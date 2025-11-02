@@ -81,14 +81,16 @@ class DatabaseManager:
     def create_database(self, file_path: str) -> None:
         # close existing
         self.close()
-        # create/connect
+        # create/connect with foreign key support
         self.conn = sqlite3.connect(file_path)
+        self.conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
         self.current_db_path = file_path
         
         # initialize database schema
         self.create_versions_table()
         self.create_securities_table()
         self.create_interests_table()
+        self.create_dividends_table()
         
         # record initial version
         if self.get_db_version() == 0:
@@ -106,15 +108,7 @@ class DatabaseManager:
         
         # Check version compatibility
         db_version = self.get_db_version()
-        if db_version == 0:
-            # No version table - assume new/empty DB and initialize it
-            self.create_versions_table()
-            self.create_securities_table()
-            self.update_db_version(
-                self.CURRENT_VERSION,
-                "Initial schema: versions and securities tables"
-            )
-        elif db_version > self.CURRENT_VERSION:
+        if db_version > self.CURRENT_VERSION:
             raise RuntimeError(
                 f"Database version {db_version} is newer than supported version "
                 f"{self.CURRENT_VERSION}. Please update the application."
@@ -143,6 +137,9 @@ class DatabaseManager:
             self.conn = new_conn
             self.current_db_path = file_path
 
+    ###########################################################################
+    ## Importing DataFrames and managing tables
+    ###########################################################################
     def import_dataframe(self, table_name: str, df: pd.DataFrame) -> Dict[str, object]:
         """Import a pandas DataFrame into the open DB as table_name.
 
@@ -159,6 +156,10 @@ class DatabaseManager:
             "records": int(len(df)),
             "columns": list(df.columns),
         }
+
+    ###########################################################################
+    ## Securities
+    ###########################################################################
 
     def create_securities_table(self) -> None:
         """Create the `securities` table with columns:
@@ -185,6 +186,95 @@ class DatabaseManager:
         cur.execute(sql)
         self.conn.commit()
 
+    def insert_security(self, isin: str, ticker: str | None, name: str | None) -> int:
+        """Insert a single security into the securities table.
+
+        Args:
+            isin: ISIN code (must be non-empty)
+            ticker: Optional ticker symbol
+            name: Optional security name
+        
+        Returns:
+            Integer id of the securities row.
+
+        Raises:
+            RuntimeError: If no database is open
+            ValueError: If isin is empty or invalid
+            sqlite3.IntegrityError: If isin already exists in the table
+            sqlite3.DatabaseError: For other database errors
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+        if not isin:
+            raise ValueError("isin must be provided")
+        if not isinstance(isin, str):
+            raise ValueError("isin must be a string")
+        
+        try:
+            sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+            cur = self.conn.cursor()
+            cur.execute(sql, (isin, ticker, name))
+            self.conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError as e:
+            # Re-raise with more specific message
+            raise sqlite3.IntegrityError(f"Security with ISIN '{isin}' already exists") from e
+        except sqlite3.Error as e:
+            # Wrap other SQLite errors with context
+            raise sqlite3.DatabaseError(f"Failed to insert security: {e}") from e
+
+    def insert_many_securities(self, rows) -> int:
+        """Insert multiple securities. `rows` is an iterable of (isin, ticker, name).
+
+        Returns number of rows inserted.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+
+        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+        cur = self.conn.cursor()
+        cur.executemany(sql, rows)
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_securities_id(self, isin: str, ticker: str | None = None, name: str | None = None) -> int:
+        """Get the `id` for a security by `isin`.
+
+        If a security with the given `isin` exists, return its id.
+        Otherwise insert a new security (using the optional `ticker` and `name`) and
+        return the newly-created id.
+
+        Args:
+            isin: ISIN code (must be non-empty)
+            ticker: Optional ticker symbol
+            name: Optional security name
+
+        Returns:
+            Integer id of the securities row.
+
+        Raises:
+            RuntimeError: If no database is open
+            ValueError: If `isin` is empty
+            sqlite3.DatabaseError: For unexpected database errors
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to query/insert into")
+        if not isin:
+            raise ValueError("`isin` must be provided")
+
+        cur = self.conn.cursor()
+        # Try to find existing
+        cur.execute("SELECT id FROM securities WHERE isin = ?", (isin,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+        # Not found — insert. 
+        return self.insert_security(isin, ticker, name)
+
+    ###########################################################################
+    ## Interests
+    ###########################################################################
     def create_interests_table(self) -> None:
         """Create the `interests` table with columns:
 
@@ -247,37 +337,6 @@ class DatabaseManager:
         cur.execute(sql, (timestamp, int(type_), id_string, total_czk))
         self.conn.commit()
 
-    def insert_many_interests(self, rows) -> int:
-        """Insert multiple interest records.
-        
-        Args:
-            rows: Iterable of (timestamp, type, id_string, total_czk) tuples
-            where timestamp is Unix timestamp in seconds
-            
-        Returns:
-            Number of rows inserted
-            
-        Note: type should be an integer matching InterestType enum values
-        Raises:
-            ValueError: If any timestamp is negative
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
-            
-        # Validate timestamps
-        for row in rows:
-            if row[0] < 0:
-                raise ValueError(f"Invalid negative timestamp in row: {row}")
-
-        sql = ("INSERT INTO interests "
-               "(timestamp, type, id_string, total_czk) "
-               "VALUES (?, ?, ?, ?)")
-        
-        cur = self.conn.cursor()
-        cur.executemany(sql, rows)
-        self.conn.commit()
-        return cur.rowcount
-        
     def get_interests_by_date_range(
         self, 
         start_timestamp: int, 
@@ -304,6 +363,99 @@ class DatabaseManager:
         cur.execute(sql, (start_timestamp, end_timestamp))
         return cur.fetchall()
 
+    ###########################################################################
+    ## Dividends
+    ###########################################################################
+    def create_dividends_table(self) -> None:
+        """Create the dividends table with columns:
+        
+        - id INTEGER PRIMARY KEY AUTOINCREMENT
+        - timestamp INTEGER NOT NULL (Unix timestamp)
+        - isin_id INTEGER NOT NULL REFERENCES securities(id)
+        - number_of_shares REAL NOT NULL
+        - price_for_share REAL NOT NULL
+        - currency_of_price TEXT NOT NULL
+        - total_czk REAL NOT NULL
+        - withholding_tax_czk REAL NOT NULL
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to create table in")
+            
+        sql = (
+            "CREATE TABLE IF NOT EXISTS dividends ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "timestamp INTEGER NOT NULL, "
+            "isin_id INTEGER NOT NULL, "
+            "number_of_shares REAL NOT NULL, "
+            "price_for_share REAL NOT NULL, "
+            "currency_of_price TEXT NOT NULL, "
+            "total_czk REAL NOT NULL, "
+            "withholding_tax_czk REAL NOT NULL, "
+            "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        # Create indexes for common queries
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_dividends_timestamp ON dividends(timestamp)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_dividends_isin_id ON dividends(isin_id)")
+        self.conn.commit()
+        
+    def insert_dividend(
+        self,
+        timestamp: int,
+        isin: int,
+        ticker: str, 
+        name: str,
+        number_of_shares: float,
+        price_for_share: float,
+        currency_of_price: str,
+        total_czk: float,
+        withholding_tax_czk: float
+    ) -> None:
+        """Insert a single dividend record.
+        
+        Args:
+            timestamp: Unix timestamp (seconds since epoch)
+            isin_id: Foreign key to securities.id
+            number_of_shares: Number of shares for dividend
+            price_for_share: Price per share in original currency
+            currency_of_price: Currency code of price_for_share
+            total_czk: Total amount in CZK
+            withholding_tax_czk: Withholding tax amount in CZK
+            
+        Raises:
+            sqlite3.IntegrityError: If isin_id doesn't exist in securities table
+            RuntimeError: If no database is open
+            ValueError: If timestamp is negative or any amount is negative
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+        if timestamp < 0:
+            raise ValueError("timestamp must be a positive Unix timestamp")
+        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, withholding_tax_czk]):
+            raise ValueError("All numeric values must be non-negative")
+
+        isin_id = self.get_securities_id(isin, ticker, name)
+
+        sql = (
+            "INSERT INTO dividends ("
+            "timestamp, isin_id, number_of_shares, price_for_share, "
+            "currency_of_price, total_czk, withholding_tax_czk"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        
+        cur = self.conn.cursor()
+        cur.execute(sql, (
+            timestamp, isin_id, number_of_shares, price_for_share,
+            currency_of_price, total_czk, withholding_tax_czk
+        ))
+        self.conn.commit()
+        
+
+    ###########################################################################
+    ## Helper functions
+    ###########################################################################
     @staticmethod
     def datetime_to_timestamp(dt: datetime) -> int:
         """Convert Python datetime to Unix timestamp."""
@@ -313,42 +465,6 @@ class DatabaseManager:
     def timestamp_to_datetime(ts: int) -> datetime:
         """Convert Unix timestamp to Python datetime."""
         return datetime.fromtimestamp(ts)
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
 
-        sql = ("INSERT INTO interests "
-               "(timestamp, type, id_string, total_czk) "
-               "VALUES (?, ?, ?, ?)")
-        
-        cur = self.conn.cursor()
-        cur.executemany(sql, rows)
-        self.conn.commit()
-        return cur.rowcount
 
-    def insert_security(self, isin: str, ticker: str | None, name: str | None) -> None:
-        """Insert a single security into the securities table.
 
-        `isin` must be provided (NOT NULL). `ticker` and `name` may be None.
-        Raises sqlite3.IntegrityError on PK/constraint violation.
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
-
-        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
-        cur = self.conn.cursor()
-        cur.execute(sql, (isin, ticker, name))
-        self.conn.commit()
-
-    def insert_many_securities(self, rows) -> int:
-        """Insert multiple securities. `rows` is an iterable of (isin, ticker, name).
-
-        Returns number of rows inserted.
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
-
-        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
-        cur = self.conn.cursor()
-        cur.executemany(sql, rows)
-        self.conn.commit()
-        return cur.rowcount
