@@ -1,7 +1,17 @@
 import sqlite3
 import os
-from typing import Optional, Tuple, Dict
+import enum
+import time
+from datetime import datetime
+from typing import Optional, Tuple, Dict, List
 import pandas as pd
+
+
+class InterestType(enum.IntEnum):
+    """Types of interest entries in the database."""
+    UNKNOWN = 0
+    CASH_INTEREST = 1
+    LENDING_INTEREST = 2
 
 
 class DatabaseManager:
@@ -78,12 +88,13 @@ class DatabaseManager:
         # initialize database schema
         self.create_versions_table()
         self.create_securities_table()
+        self.create_interests_table()
         
         # record initial version
         if self.get_db_version() == 0:
             self.update_db_version(
                 self.CURRENT_VERSION,
-                "Initial schema: versions and securities tables"
+                "Initial schema: versions, securities, and interests tables"
             )
 
     def open_database(self, file_path: str) -> None:
@@ -173,6 +184,146 @@ class DatabaseManager:
         cur = self.conn.cursor()
         cur.execute(sql)
         self.conn.commit()
+
+    def create_interests_table(self) -> None:
+        """Create the `interests` table with columns:
+
+        - id INTEGER PRIMARY KEY AUTOINCREMENT
+        - timestamp INTEGER NOT NULL (Unix timestamp, seconds since epoch)
+        - type INTEGER NOT NULL (0=unknown, 1=cash interest, 2=lending interest)
+        - id_string TEXT UNIQUE
+        - total_czk REAL NOT NULL
+
+        The table will be created if it does not already exist.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to create table in")
+
+        sql = (
+            "CREATE TABLE IF NOT EXISTS interests ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "timestamp INTEGER NOT NULL, "  # Unix timestamp
+            "type INTEGER NOT NULL CHECK (type IN (0,1,2)), "
+            "id_string TEXT UNIQUE, "
+            "total_czk REAL NOT NULL"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        # Create index on timestamp for range queries
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_interests_timestamp ON interests(timestamp)")
+        self.conn.commit()
+
+    def insert_interest(
+        self, 
+        timestamp: int, 
+        type_: InterestType, 
+        id_string: str, 
+        total_czk: float
+    ) -> None:
+        """Insert a single interest record.
+        
+        Args:
+            timestamp: Unix timestamp (seconds since epoch)
+            type_: Interest type from InterestType enum
+            id_string: Unique identifier for this interest record
+            total_czk: Amount in CZK
+            
+        Raises:
+            sqlite3.IntegrityError: If id_string already exists
+            RuntimeError: If no database is open
+            ValueError: If timestamp is negative
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+        if timestamp < 0:
+            raise ValueError("timestamp must be a positive Unix timestamp")
+
+        sql = ("INSERT INTO interests "
+               "(timestamp, type, id_string, total_czk) "
+               "VALUES (?, ?, ?, ?)")
+        
+        cur = self.conn.cursor()
+        cur.execute(sql, (timestamp, int(type_), id_string, total_czk))
+        self.conn.commit()
+
+    def insert_many_interests(self, rows) -> int:
+        """Insert multiple interest records.
+        
+        Args:
+            rows: Iterable of (timestamp, type, id_string, total_czk) tuples
+            where timestamp is Unix timestamp in seconds
+            
+        Returns:
+            Number of rows inserted
+            
+        Note: type should be an integer matching InterestType enum values
+        Raises:
+            ValueError: If any timestamp is negative
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+            
+        # Validate timestamps
+        for row in rows:
+            if row[0] < 0:
+                raise ValueError(f"Invalid negative timestamp in row: {row}")
+
+        sql = ("INSERT INTO interests "
+               "(timestamp, type, id_string, total_czk) "
+               "VALUES (?, ?, ?, ?)")
+        
+        cur = self.conn.cursor()
+        cur.executemany(sql, rows)
+        self.conn.commit()
+        return cur.rowcount
+        
+    def get_interests_by_date_range(
+        self, 
+        start_timestamp: int, 
+        end_timestamp: int
+    ) -> List[Tuple]:
+        """Get interests within the given timestamp range.
+        
+        Args:
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+            
+        Returns:
+            List of (id, timestamp, type, id_string, total_czk) tuples
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to query")
+            
+        sql = ("SELECT id, timestamp, type, id_string, total_czk "
+               "FROM interests "
+               "WHERE timestamp BETWEEN ? AND ? "
+               "ORDER BY timestamp")
+               
+        cur = self.conn.cursor()
+        cur.execute(sql, (start_timestamp, end_timestamp))
+        return cur.fetchall()
+
+    @staticmethod
+    def datetime_to_timestamp(dt: datetime) -> int:
+        """Convert Python datetime to Unix timestamp."""
+        return int(dt.timestamp())
+
+    @staticmethod
+    def timestamp_to_datetime(ts: int) -> datetime:
+        """Convert Unix timestamp to Python datetime."""
+        return datetime.fromtimestamp(ts)
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+
+        sql = ("INSERT INTO interests "
+               "(timestamp, type, id_string, total_czk) "
+               "VALUES (?, ?, ?, ?)")
+        
+        cur = self.conn.cursor()
+        cur.executemany(sql, rows)
+        self.conn.commit()
+        return cur.rowcount
 
     def insert_security(self, isin: str, ticker: str | None, name: str | None) -> None:
         """Insert a single security into the securities table.
