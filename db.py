@@ -13,9 +13,52 @@ class DatabaseManager:
     - Import pandas DataFrame into the DB
     """
 
+    # Current schema version of the database
+    CURRENT_VERSION = 1
+
     def __init__(self) -> None:
         self.conn: Optional[sqlite3.Connection] = None
         self.current_db_path: Optional[str] = None
+        
+    def get_db_version(self) -> int:
+        """Get the current database schema version."""
+        if not self.conn:
+            raise RuntimeError("No open database to check version")
+        
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT version FROM versions ORDER BY timestamp DESC LIMIT 1")
+            row = cur.fetchone()
+            return row[0] if row else 0
+        except sqlite3.OperationalError:
+            # versions table doesn't exist yet
+            return 0
+
+    def create_versions_table(self) -> None:
+        """Create the versions table to track schema changes."""
+        if not self.conn:
+            raise RuntimeError("No open database connection")
+            
+        sql = (
+            "CREATE TABLE IF NOT EXISTS versions ("
+            "version INTEGER NOT NULL, "
+            "timestamp TEXT DEFAULT CURRENT_TIMESTAMP, "
+            "description TEXT"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        self.conn.commit()
+        
+    def update_db_version(self, version: int, description: str) -> None:
+        """Record a new database version."""
+        if not self.conn:
+            raise RuntimeError("No open database connection")
+            
+        sql = "INSERT INTO versions (version, description) VALUES (?, ?)"
+        cur = self.conn.cursor()
+        cur.execute(sql, (version, description))
+        self.conn.commit()
 
     def close(self) -> None:
         if self.conn:
@@ -31,12 +74,42 @@ class DatabaseManager:
         # create/connect
         self.conn = sqlite3.connect(file_path)
         self.current_db_path = file_path
+        
+        # initialize database schema
+        self.create_versions_table()
+        self.create_securities_table()
+        
+        # record initial version
+        if self.get_db_version() == 0:
+            self.update_db_version(
+                self.CURRENT_VERSION,
+                "Initial schema: versions and securities tables"
+            )
 
     def open_database(self, file_path: str) -> None:
+        """Open an existing database and verify its version is compatible."""
         # close existing
         self.close()
         self.conn = sqlite3.connect(file_path)
         self.current_db_path = file_path
+        
+        # Check version compatibility
+        db_version = self.get_db_version()
+        if db_version == 0:
+            # No version table - assume new/empty DB and initialize it
+            self.create_versions_table()
+            self.create_securities_table()
+            self.update_db_version(
+                self.CURRENT_VERSION,
+                "Initial schema: versions and securities tables"
+            )
+        elif db_version > self.CURRENT_VERSION:
+            raise RuntimeError(
+                f"Database version {db_version} is newer than supported version "
+                f"{self.CURRENT_VERSION}. Please update the application."
+            )
+        # Future: elif db_version < self.CURRENT_VERSION:
+        #     self.migrate_database(from_version=db_version)
 
     def save_database(self) -> None:
         if not self.conn:
@@ -75,3 +148,56 @@ class DatabaseManager:
             "records": int(len(df)),
             "columns": list(df.columns),
         }
+
+    def create_securities_table(self) -> None:
+        """Create the `securities` table with columns:
+
+        - id INTEGER PRIMARY KEY AUTOINCREMENT
+        - isin TEXT NOT NULL UNIQUE
+        - ticker TEXT
+        - name TEXT
+
+        The table will be created if it does not already exist.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to create table in")
+
+        sql = (
+            "CREATE TABLE IF NOT EXISTS securities ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "isin TEXT NOT NULL UNIQUE, "
+            "ticker TEXT, "
+            "name TEXT"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        self.conn.commit()
+
+    def insert_security(self, isin: str, ticker: str | None, name: str | None) -> None:
+        """Insert a single security into the securities table.
+
+        `isin` must be provided (NOT NULL). `ticker` and `name` may be None.
+        Raises sqlite3.IntegrityError on PK/constraint violation.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+
+        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+        cur = self.conn.cursor()
+        cur.execute(sql, (isin, ticker, name))
+        self.conn.commit()
+
+    def insert_many_securities(self, rows) -> int:
+        """Insert multiple securities. `rows` is an iterable of (isin, ticker, name).
+
+        Returns number of rows inserted.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+
+        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+        cur = self.conn.cursor()
+        cur.executemany(sql, rows)
+        self.conn.commit()
+        return cur.rowcount
