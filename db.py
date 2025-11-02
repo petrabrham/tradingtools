@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import pandas as pd
-
+import cnb_exchange_rate
 
 class InterestType(enum.IntEnum):
     """Types of interest entries in the database."""
@@ -410,8 +410,10 @@ class DatabaseManager:
         number_of_shares: float,
         price_for_share: float,
         currency_of_price: str,
-        total_czk: float,
-        withholding_tax_czk: float
+        total: float,
+        currency_of_total: str,
+        withholding_tax: float,
+        currency_of_withholding_tax: str
     ) -> None:
         """Insert a single dividend record.
         
@@ -427,16 +429,24 @@ class DatabaseManager:
         Raises:
             sqlite3.IntegrityError: If isin_id doesn't exist in securities table
             RuntimeError: If no database is open
-            ValueError: If timestamp is negative or any amount is negative
+            ValueError: If timestamp is negative
         """
         if not self.conn:
             raise RuntimeError("No open database to insert into")
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
-        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, withholding_tax_czk]):
-            raise ValueError("All numeric values must be non-negative")
 
         isin_id = self.get_securities_id(isin, ticker, name)
+
+        if (currency_of_total == 'CZK'):
+            total_czk = total
+        else
+            total_czk = total * cnb_exchange_rate.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
+
+        if (currency_of_withholding_tax == 'CZK'):
+            withholding_tax_czk = withholding_tax
+        else:
+            withholding_tax_czk = withholding_tax * cnb_exchange_rate.daily_rate(currency_of_withholding_tax, datetime.fromtimestamp(timestamp))
 
         sql = (
             "INSERT INTO dividends ("
@@ -452,6 +462,15 @@ class DatabaseManager:
         ))
         self.conn.commit()
         
+    ###########################################################################
+    ## Trades
+    ###########################################################################
+
+
+
+
+
+
 
     ###########################################################################
     ## Helper functions
