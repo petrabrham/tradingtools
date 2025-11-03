@@ -1,0 +1,27 @@
+from datetime import datetime
+
+# Insert using current time
+now = int(time.time())
+db.insert_interest(
+    timestamp=now,
+    type_=InterestType.CASH_INTEREST,
+    id_string="INT2025110201",
+    total_czk=1250.50
+)
+
+# Insert using datetime
+dt = datetime(2025, 11, 2, 14, 30)
+db.insert_interest(
+    timestamp=db.datetime_to_timestamp(dt),
+    type_=InterestType.LENDING_INTEREST,
+    id_string="INT2025110202",
+    total_czk=325.75
+)
+
+# Query by date range
+start_dt = datetime(2025, 11, 1)
+end_dt = datetime(2025, 11, 30)
+results = db.get_interests_by_date_range(
+    db.datetime_to_timestamp(start_dt),
+    db.datetime_to_timestamp(end_dt)
+)

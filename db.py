@@ -91,6 +91,7 @@ class DatabaseManager:
         self.create_securities_table()
         self.create_interests_table()
         self.create_dividends_table()
+        self.create_trades_table()
         
         # record initial version
         if self.get_db_version() == 0:
@@ -440,7 +441,7 @@ class DatabaseManager:
 
         if (currency_of_total == 'CZK'):
             total_czk = total
-        else
+        else:
             total_czk = total * cnb_exchange_rate.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
 
         if (currency_of_withholding_tax == 'CZK'):
@@ -466,11 +467,119 @@ class DatabaseManager:
     ## Trades
     ###########################################################################
 
+    def create_trades_table(self) -> None:
+        """Create the `trades` table with the requested columns.
+
+        Columns:
+        - id INTEGER PRIMARY KEY AUTOINCREMENT
+        - timestamp INTEGER NOT NULL (Unix timestamp)
+        - isin_id INTEGER NOT NULL REFERENCES securities(id)
+        - id_string TEXT NOT NULL UNIQUE
+        - number_of_shares REAL NOT NULL
+        - price_for_share REAL NOT NULL
+        - currency_of_price TEXT NOT NULL 
+        - total_czk REAL NOT NULL
+        - stamp_tax_czk REAL DEFAULT 0
+        - conversion_fee_czk REAL DEFAULT 0
+        - french_transaction_tax_czk REAL DEFAULT 0
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to create table in")
+
+        sql = (
+            "CREATE TABLE IF NOT EXISTS trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "timestamp INTEGER NOT NULL, "
+            "isin_id INTEGER NOT NULL, "
+            "id_string TEXT NOT NULL UNIQUE, "
+            "number_of_shares REAL NOT NULL, "
+            "price_for_share REAL NOT NULL, "
+            "currency_of_price TEXT NOT NULL, "
+            "total_czk REAL NOT NULL, "
+            "stamp_tax_czk REAL DEFAULT 0, "
+            "conversion_fee_czk REAL DEFAULT 0, "
+            "french_transaction_tax_czk REAL DEFAULT 0, "
+            "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        # Indexes for common queries
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_isin_id ON trades(isin_id)")
+        self.conn.commit()
+
+    def insert_trade(
+        self,
+        timestamp: int,
+        isin: str,
+        ticker: str,
+        name: str,
+        id_string: str,
+        number_of_shares: float,
+        price_for_share: float,
+        currency_of_price: str,
+        total: float,
+        currency_of_total: str,
+        stamp_tax: float,
+        currency_of_stamp_tax: str,
+        conversion_fee: float,
+        currency_of_conversion_fee: str,
+        french_transaction_tax: float,
+        currency_of_french_transaction_tax: str
+    ) -> int:
+        """Insert a single trade record.
+
+        Returns the inserted trade row id.
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to insert into")
+        if timestamp < 0:
+            raise ValueError("timestamp must be a positive Unix timestamp")
+        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, stamp_tax_czk, conversion_fee_czk, french_transaction_tax_czk]):
+            raise ValueError("Numeric trade values must be non-negative")
+        if not id_string:
+            raise ValueError("id_string must be provided and non-empty")
+
+        # Resolve isin_id from an ISIN string
+        isin_id = self.get_securities_id(isin, ticker, name)
+
+        # calculate values to CZK
+        dt = datetime.fromtimestamp(timestamp)
+        if (currency_of_total == 'CZK'):
+            total_czk = total
+        else:
+            total_czk = total * cnb_exchange_rate.daily_rate(currency_of_total, dt)
+
+        if (currency_of_stamp_tax == 'CZK'):
+            stamp_tax_czk = stamp_tax
+        else:
+            stamp_tax_czk = stamp_tax * cnb_exchange_rate.daily_rate(currency_of_stamp_tax, dt)
+
+        if (currency_of_conversion_fee == 'CZK'):
+            conversion_fee_czk = conversion_fee
+        else:
+            conversion_fee_czk = conversion_fee * cnb_exchange_rate.daily_rate(currency_of_conversion_fee, dt)
+
+        if (currency_of_french_transaction_tax == 'CZK'):
+            french_transaction_tax_czk = french_transaction_tax
+        else:
+            french_transaction_tax_czk = french_transaction_tax * cnb_exchange_rate.daily_rate(currency_of_french_transaction_tax, dt)
 
 
-
-
-
+        sql = (
+            "INSERT INTO trades (timestamp, isin_id, id_string, number_of_shares, "
+            "price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
+            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql, (
+            timestamp, isin_id, id_string, number_of_shares,
+            price_for_share, currency_of_price, total_czk, stamp_tax_czk,
+            conversion_fee_czk, french_transaction_tax_czk
+        ))
+        self.conn.commit()
+        return cur.lastrowid
 
     ###########################################################################
     ## Helper functions
