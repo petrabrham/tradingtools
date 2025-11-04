@@ -61,17 +61,14 @@ class TradingToolsApp:
                 # Read CSV file
                 df = pd.read_csv(file_path)
 
-                # Get table name from file name (without extension)
-                table_name = os.path.splitext(os.path.basename(file_path))[0]
-
                 # Use DatabaseManager to import DataFrame
-                meta = self.db.import_dataframe(table_name, df)
+                meta = self.db.import_dataframe(df)
 
                 messagebox.showinfo(
                     "Success",
-                    f"Imported CSV file to table '{meta['table']}'\n"
-                    f"Records imported: {meta['records']}\n"
-                    f"Columns: {', '.join(meta['columns'])}",
+                    f"Records imported: {meta['records']}\n",
+                    f"  interests: {meta['read']['interests']} / {meta['added']['interests']}",
+                    f"  interests: {meta['read']['unknown']} / ",
                 )
 
             except Exception as e:

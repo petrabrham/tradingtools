@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import pandas as pd
-import cnb_exchange_rate
+from cnb_rate import cnb_rate
 
 class InterestType(enum.IntEnum):
     """Types of interest entries in the database."""
@@ -29,6 +29,7 @@ class DatabaseManager:
     def __init__(self) -> None:
         self.conn: Optional[sqlite3.Connection] = None
         self.current_db_path: Optional[str] = None
+        self._rates = cnb_rate()
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -141,7 +142,7 @@ class DatabaseManager:
     ###########################################################################
     ## Importing DataFrames and managing tables
     ###########################################################################
-    def import_dataframe(self, table_name: str, df: pd.DataFrame) -> Dict[str, object]:
+    def import_dataframe(self, df: pd.DataFrame) -> Dict[str, object]:
         """Import a pandas DataFrame into the open DB as table_name.
 
         Returns metadata dict: { 'table': str, 'records': int, 'columns': List[str] }
@@ -149,13 +150,84 @@ class DatabaseManager:
         if not self.conn:
             raise RuntimeError("No open database to import into")
 
-        # Write DataFrame to SQL (replace if exists)
-        df.to_sql(table_name, self.conn, if_exists="replace", index=False)
-        self.conn.commit()
+        # Counters for read rows from CSV
+        read_buy = 0
+        read_sell = 0
+        read_interest = 0
+        read_dividend = 0
+        read_insignificant = 0
+        read_unknown = 0
+
+        # Counters for successfully added records
+        added_buy = 0
+        added_sell = 0
+        added_interest = 0
+        added_dividend = 0
+
+        for index, row in df.iterrows():
+            # Safe access to columns whether row is Series or dict-like
+            action = row.get('Action') if hasattr(row, 'get') else row['Action']
+            time_str = row.get('Time') if hasattr(row, 'get') else row['Time']
+
+            # Try to convert time string to timestamp for logging
+            ts = None
+            if time_str:
+                try:
+                    ts = DatabaseManager.timestr_to_timestamp(time_str)
+                except ValueError:
+                    ts = None
+
+            # Process row based on action type
+            if action in ("Market buy", "Limit buy", "Stock split open"):
+                read_buy += 1
+                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+                # TODO: Implement buy handling
+                # added_buy += result_of_insert
+            elif action in ("Market sell", "Limit sell", "Stock split close"):
+                read_sell += 1
+                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+                # TODO: Implement sell handling
+                # added_sell += result_of_insert
+            elif action in ("Interest on cash", "Lending interest"):
+                read_interest += 1
+                if row['Notes'] in ("Interest on cash"):
+                    interest_type = InterestType.CASH_INTEREST
+                elif row['Notes'] in ("Share lending interest"):
+                    interest_type = InterestType.LENDING_INTEREST
+                else:
+                    interest_type = InterestType.UNKNOWN
+                rows_inserted = self.insert_interest(ts, interest_type, row['ID'], row['Total'], row['Currency (Total)'])
+                added_interest += rows_inserted
+                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+            elif action in ("Dividend (Dividend)", "Dividend (Dividend manufactured payment)"):
+                read_dividend += 1
+                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+                # TODO: Implement dividend handling
+                # added_dividend += result_of_insert
+            elif action in ("Deposit", "Currency conversion", "Card debit", "Withdrawal", "Result adjustment"):
+                read_insignificant += 1
+                print(f"Row {index}: {action} (insignificant) at {time_str} (ts={ts})")
+                # These are not stored in DB
+            else:
+                read_unknown += 1
+
         return {
-            "table": table_name,
             "records": int(len(df)),
             "columns": list(df.columns),
+            "read": {
+                "buy": read_buy,
+                "sell": read_sell,
+                "interest": read_interest,
+                "dividend": read_dividend,
+                "insignificant": read_insignificant,
+                "unknown": read_unknown,
+            },
+            "added": {
+                "buy": added_buy,
+                "sell": added_sell,
+                "interest": added_interest,
+                "dividend": added_dividend,
+            },
         }
 
     ###########################################################################
@@ -308,10 +380,11 @@ class DatabaseManager:
     def insert_interest(
         self, 
         timestamp: int, 
-        type_: InterestType, 
+        type: InterestType, 
         id_string: str, 
-        total_czk: float
-    ) -> None:
+        total: float,
+        currency_of_total: str
+    ) -> int:
         """Insert a single interest record.
         
         Args:
@@ -329,14 +402,18 @@ class DatabaseManager:
             raise RuntimeError("No open database to insert into")
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
+        
+        total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
 
         sql = ("INSERT INTO interests "
                "(timestamp, type, id_string, total_czk) "
                "VALUES (?, ?, ?, ?)")
         
         cur = self.conn.cursor()
-        cur.execute(sql, (timestamp, int(type_), id_string, total_czk))
+        cur.execute(sql, (timestamp, int(type), id_string, total_czk))
         self.conn.commit()
+        # Return number of rows inserted (should be 1 on success)
+        return cur.rowcount
 
     def get_interests_by_date_range(
         self, 
@@ -439,15 +516,8 @@ class DatabaseManager:
 
         isin_id = self.get_securities_id(isin, ticker, name)
 
-        if (currency_of_total == 'CZK'):
-            total_czk = total
-        else:
-            total_czk = total * cnb_exchange_rate.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
-
-        if (currency_of_withholding_tax == 'CZK'):
-            withholding_tax_czk = withholding_tax
-        else:
-            withholding_tax_czk = withholding_tax * cnb_exchange_rate.daily_rate(currency_of_withholding_tax, datetime.fromtimestamp(timestamp))
+        total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
+        withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, datetime.fromtimestamp(timestamp))
 
         sql = (
             "INSERT INTO dividends ("
@@ -546,25 +616,10 @@ class DatabaseManager:
 
         # calculate values to CZK
         dt = datetime.fromtimestamp(timestamp)
-        if (currency_of_total == 'CZK'):
-            total_czk = total
-        else:
-            total_czk = total * cnb_exchange_rate.daily_rate(currency_of_total, dt)
-
-        if (currency_of_stamp_tax == 'CZK'):
-            stamp_tax_czk = stamp_tax
-        else:
-            stamp_tax_czk = stamp_tax * cnb_exchange_rate.daily_rate(currency_of_stamp_tax, dt)
-
-        if (currency_of_conversion_fee == 'CZK'):
-            conversion_fee_czk = conversion_fee
-        else:
-            conversion_fee_czk = conversion_fee * cnb_exchange_rate.daily_rate(currency_of_conversion_fee, dt)
-
-        if (currency_of_french_transaction_tax == 'CZK'):
-            french_transaction_tax_czk = french_transaction_tax
-        else:
-            french_transaction_tax_czk = french_transaction_tax * cnb_exchange_rate.daily_rate(currency_of_french_transaction_tax, dt)
+        total_czk = total * self._rates.daily_rate(currency_of_total, dt)
+        stamp_tax_czk = stamp_tax * self._rates.daily_rate(currency_of_stamp_tax, dt)
+        conversion_fee_czk = conversion_fee * self._rates.daily_rate(currency_of_conversion_fee, dt)
+        french_transaction_tax_czk = french_transaction_tax * self._rates.daily_rate(currency_of_french_transaction_tax, dt)
 
 
         sql = (
@@ -594,5 +649,24 @@ class DatabaseManager:
         """Convert Unix timestamp to Python datetime."""
         return datetime.fromtimestamp(ts)
 
-
-
+    @staticmethod
+    def timestr_to_timestamp(timestr: str) -> int:
+        """Convert a datetime string to Unix timestamp.
+        
+        Args:
+            timestr: String in format "YYYY-MM-DD HH:MM:SS"
+                    e.g., "2023-12-07 16:01:12"
+            
+        Returns:
+            Unix timestamp (seconds since epoch)
+            
+        Raises:
+            ValueError: If the string format is invalid
+        """
+        try:
+            dt = datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S")
+            return int(dt.timestamp())
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid datetime string format. Expected 'YYYY-MM-DD HH:MM:SS', got '{timestr}'"
+            ) from e
