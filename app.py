@@ -64,12 +64,17 @@ class TradingToolsApp:
                 # Use DatabaseManager to import DataFrame
                 meta = self.db.import_dataframe(df)
 
-                messagebox.showinfo(
-                    "Success",
-                    f"Records imported: {meta['records']}\n",
-                    f"  interests: {meta['read']['interests']} / {meta['added']['interests']}",
-                    f"  interests: {meta['read']['unknown']} / ",
+                message = (
+                    f"Records imported: {meta['records']}\n"
+                    f"Read / Added counts:\n"
+                    f"  Buy:         {meta['read']['buy']} / {meta['added'].get('buy', 0)}\n"
+                    f"  Sell:        {meta['read']['sell']} / {meta['added'].get('sell', 0)}\n"
+                    f"  Interest:    {meta['read']['interest']} / {meta['added']['interest']}\n"
+                    f"  Dividend:    {meta['read']['dividend']} / {meta['added'].get('dividend', 0)}\n"
+                    f"  Other:       {meta['read']['insignificant']} / -\n"
+                    f"  Unknown:     {meta['read']['unknown']} / -"
                 )
+                messagebox.showinfo("Success", message)
 
             except Exception as e:
                 messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")

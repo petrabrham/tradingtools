@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import pandas as pd
 from cnb_rate import cnb_rate
+import logging
+from logger_config import setup_logger
 
 class InterestType(enum.IntEnum):
     """Types of interest entries in the database."""
@@ -30,6 +32,7 @@ class DatabaseManager:
         self.conn: Optional[sqlite3.Connection] = None
         self.current_db_path: Optional[str] = None
         self._rates = cnb_rate()
+        self.logger = setup_logger('trading_tools.db')
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -80,12 +83,14 @@ class DatabaseManager:
                 self.current_db_path = None
 
     def create_database(self, file_path: str) -> None:
+        self.logger.info(f"Creating new database at {file_path}")
         # close existing
         self.close()
         # create/connect with foreign key support
         self.conn = sqlite3.connect(file_path)
         self.conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
         self.current_db_path = file_path
+        self.logger.debug("Enabled foreign key constraints")
         
         # initialize database schema
         self.create_versions_table()
@@ -148,7 +153,10 @@ class DatabaseManager:
         Returns metadata dict: { 'table': str, 'records': int, 'columns': List[str] }
         """
         if not self.conn:
+            self.logger.error("Attempted to import DataFrame without database connection")
             raise RuntimeError("No open database to import into")
+            
+        self.logger.info(f"Starting import of DataFrame with {len(df)} rows")
 
         # Counters for read rows from CSV
         read_buy = 0
@@ -211,7 +219,7 @@ class DatabaseManager:
             else:
                 read_unknown += 1
 
-        return {
+        results = {
             "records": int(len(df)),
             "columns": list(df.columns),
             "read": {
@@ -229,6 +237,17 @@ class DatabaseManager:
                 "dividend": added_dividend,
             },
         }
+        
+        self.logger.info(
+            "Import complete: %d records processed (%d buys, %d sells, %d interests, %d dividends, %d other)",
+            len(df), read_buy, read_sell, read_interest, read_dividend, read_insignificant + read_unknown
+        )
+        self.logger.info(
+            "Records added to DB: %d buys, %d sells, %d interests, %d dividends",
+            added_buy, added_sell, added_interest, added_dividend
+        )
+        
+        return results
 
     ###########################################################################
     ## Securities
@@ -277,23 +296,30 @@ class DatabaseManager:
             sqlite3.DatabaseError: For other database errors
         """
         if not self.conn:
+            self.logger.error("Attempted to insert security without database connection")
             raise RuntimeError("No open database to insert into")
         if not isin:
+            self.logger.error("Attempted to insert security with empty ISIN")
             raise ValueError("isin must be provided")
         if not isinstance(isin, str):
+            self.logger.error(f"Invalid ISIN type: {type(isin)}")
             raise ValueError("isin must be a string")
+            
+        self.logger.debug(f"Inserting security: ISIN={isin}, ticker={ticker}, name={name}")
         
         try:
-            sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+            sql = "INSERT OR IGNORE INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
             cur = self.conn.cursor()
             cur.execute(sql, (isin, ticker, name))
             self.conn.commit()
-            return cur.lastrowid
+            inserted_id = cur.lastrowid
+            self.logger.info(f"Inserted security {isin} with ID {inserted_id}")
+            return inserted_id
         except sqlite3.IntegrityError as e:
-            # Re-raise with more specific message
+            self.logger.warning(f"Attempted to insert duplicate security with ISIN {isin}")
             raise sqlite3.IntegrityError(f"Security with ISIN '{isin}' already exists") from e
         except sqlite3.Error as e:
-            # Wrap other SQLite errors with context
+            self.logger.error(f"Database error inserting security {isin}: {e}")
             raise sqlite3.DatabaseError(f"Failed to insert security: {e}") from e
 
     def insert_many_securities(self, rows) -> int:
@@ -304,7 +330,7 @@ class DatabaseManager:
         if not self.conn:
             raise RuntimeError("No open database to insert into")
 
-        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+        sql = "INSERT OR IGNORE INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
         cur = self.conn.cursor()
         cur.executemany(sql, rows)
         self.conn.commit()
@@ -405,7 +431,7 @@ class DatabaseManager:
         
         total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
 
-        sql = ("INSERT INTO interests "
+        sql = ("INSERT OR IGNORE INTO interests "
                "(timestamp, type, id_string, total_czk) "
                "VALUES (?, ?, ?, ?)")
         
@@ -469,6 +495,7 @@ class DatabaseManager:
             "currency_of_price TEXT NOT NULL, "
             "total_czk REAL NOT NULL, "
             "withholding_tax_czk REAL NOT NULL, "
+            "UNIQUE (timestamp, isin_id),"
             "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
             ")"
         )
@@ -520,7 +547,7 @@ class DatabaseManager:
         withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, datetime.fromtimestamp(timestamp))
 
         sql = (
-            "INSERT INTO dividends ("
+            "INSERT OR IGNORE INTO dividends ("
             "timestamp, isin_id, number_of_shares, price_for_share, "
             "currency_of_price, total_czk, withholding_tax_czk"
             ") VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -623,7 +650,7 @@ class DatabaseManager:
 
 
         sql = (
-            "INSERT INTO trades (timestamp, isin_id, id_string, number_of_shares, "
+            "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, number_of_shares, "
             "price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
             "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
