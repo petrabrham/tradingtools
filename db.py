@@ -11,6 +11,7 @@ from logger_config import setup_logger
 from db.repositories.securities import SecuritiesRepository
 from db.repositories.interests import InterestsRepository, InterestType
 from db.repositories.dividends import DividendsRepository
+from db.repositories.trades import TradesRepository
 from db.decorators import requires_connection, requires_repo
 
 
@@ -37,6 +38,7 @@ class DatabaseManager:
         self.securities_repo: Optional[SecuritiesRepository] = None
         self.interests_repo: Optional[InterestsRepository] = None
         self.dividends_repo: Optional[DividendsRepository] = None
+        self.trades_repo: Optional[TradesRepository] = None
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -102,6 +104,7 @@ class DatabaseManager:
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
         self.dividends_repo = DividendsRepository(self.conn, self.logger)
+        self.trades_repo = TradesRepository(self.conn, self.logger)
         # create tables through repositories
         self.create_securities_table()
         self.create_interests_table()
@@ -511,48 +514,14 @@ class DatabaseManager:
     ## Trades
     ###########################################################################
 
+    @requires_connection
+    @requires_repo('trades_repo')
     def create_trades_table(self) -> None:
-        """Create the `trades` table with the requested columns.
+        """Create the `trades` table if it does not exist (delegates to repository)."""
+        self.trades_repo.create_table()
 
-        Columns:
-        - id INTEGER PRIMARY KEY AUTOINCREMENT
-        - timestamp INTEGER NOT NULL (Unix timestamp)
-        - isin_id INTEGER NOT NULL REFERENCES securities(id)
-        - id_string TEXT NOT NULL UNIQUE
-        - number_of_shares REAL NOT NULL
-        - price_for_share REAL NOT NULL
-        - currency_of_price TEXT NOT NULL 
-        - total_czk REAL NOT NULL
-        - stamp_tax_czk REAL DEFAULT 0
-        - conversion_fee_czk REAL DEFAULT 0
-        - french_transaction_tax_czk REAL DEFAULT 0
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to create table in")
-
-        sql = (
-            "CREATE TABLE IF NOT EXISTS trades ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "timestamp INTEGER NOT NULL, "
-            "isin_id INTEGER NOT NULL, "
-            "id_string TEXT NOT NULL UNIQUE, "
-            "number_of_shares REAL NOT NULL, "
-            "price_for_share REAL NOT NULL, "
-            "currency_of_price TEXT NOT NULL, "
-            "total_czk REAL NOT NULL, "
-            "stamp_tax_czk REAL DEFAULT 0, "
-            "conversion_fee_czk REAL DEFAULT 0, "
-            "french_transaction_tax_czk REAL DEFAULT 0, "
-            "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
-            ")"
-        )
-        cur = self.conn.cursor()
-        cur.execute(sql)
-        # Indexes for common queries
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_isin_id ON trades(isin_id)")
-        self.conn.commit()
-
+    @requires_connection
+    @requires_repo('trades_repo')
     def insert_trade(
         self,
         timestamp: int,
@@ -572,16 +541,12 @@ class DatabaseManager:
         french_transaction_tax: float,
         currency_of_french_transaction_tax: str
     ) -> int:
-        """Insert a single trade record.
+        """Insert a single trade record (delegates to TradesRepository).
 
         Returns the inserted trade row id.
         """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
-        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, stamp_tax_czk, conversion_fee_czk, french_transaction_tax_czk]):
-            raise ValueError("Numeric trade values must be non-negative")
         if not id_string:
             raise ValueError("id_string must be provided and non-empty")
 
@@ -595,20 +560,19 @@ class DatabaseManager:
         conversion_fee_czk = conversion_fee * self._rates.daily_rate(currency_of_conversion_fee, dt)
         french_transaction_tax_czk = french_transaction_tax * self._rates.daily_rate(currency_of_french_transaction_tax, dt)
 
-
-        sql = (
-            "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, number_of_shares, "
-            "price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
-            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        # Delegate actual insert to repository which returns row id
+        return self.trades_repo.insert(
+            timestamp=timestamp,
+            isin_id=isin_id,
+            id_string=id_string,
+            number_of_shares=number_of_shares,
+            price_for_share=price_for_share,
+            currency_of_price=currency_of_price,
+            total_czk=total_czk,
+            stamp_tax_czk=stamp_tax_czk,
+            conversion_fee_czk=conversion_fee_czk,
+            french_transaction_tax_czk=french_transaction_tax_czk,
         )
-        cur = self.conn.cursor()
-        cur.execute(sql, (
-            timestamp, isin_id, id_string, number_of_shares,
-            price_for_share, currency_of_price, total_czk, stamp_tax_czk,
-            conversion_fee_czk, french_transaction_tax_czk
-        ))
-        self.conn.commit()
-        return cur.lastrowid
 
     ###########################################################################
     ## Helper functions
