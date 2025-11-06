@@ -10,6 +10,7 @@ import logging
 from logger_config import setup_logger
 from db.repositories.securities import SecuritiesRepository
 from db.repositories.interests import InterestsRepository, InterestType
+from db.repositories.dividends import DividendsRepository
 from db.decorators import requires_connection, requires_repo
 
 
@@ -35,6 +36,7 @@ class DatabaseManager:
         # repository instances (created when a connection exists)
         self.securities_repo: Optional[SecuritiesRepository] = None
         self.interests_repo: Optional[InterestsRepository] = None
+        self.dividends_repo: Optional[DividendsRepository] = None
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -99,6 +101,7 @@ class DatabaseManager:
         # instantiate repositories now that connection exists
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
+        self.dividends_repo = DividendsRepository(self.conn, self.logger)
         # create tables through repositories
         self.create_securities_table()
         self.create_interests_table()
@@ -121,6 +124,7 @@ class DatabaseManager:
         # instantiate repositories for the open connection
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
+        self.dividends_repo = DividendsRepository(self.conn, self.logger)
         
         # Check version compatibility
         db_version = self.get_db_version()
@@ -440,46 +444,18 @@ class DatabaseManager:
     ###########################################################################
     ## Dividends
     ###########################################################################
+    @requires_connection
+    @requires_repo('dividends_repo')
     def create_dividends_table(self) -> None:
-        """Create the dividends table with columns:
+        """Create the `dividends` table if it does not exist."""
+        self.dividends_repo.create_table()
         
-        - id INTEGER PRIMARY KEY AUTOINCREMENT
-        - timestamp INTEGER NOT NULL (Unix timestamp)
-        - isin_id INTEGER NOT NULL REFERENCES securities(id)
-        - number_of_shares REAL NOT NULL
-        - price_for_share REAL NOT NULL
-        - currency_of_price TEXT NOT NULL
-        - total_czk REAL NOT NULL
-        - withholding_tax_czk REAL NOT NULL
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to create table in")
-            
-        sql = (
-            "CREATE TABLE IF NOT EXISTS dividends ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "timestamp INTEGER NOT NULL, "
-            "isin_id INTEGER NOT NULL, "
-            "number_of_shares REAL NOT NULL, "
-            "price_for_share REAL NOT NULL, "
-            "currency_of_price TEXT NOT NULL, "
-            "total_czk REAL NOT NULL, "
-            "withholding_tax_czk REAL NOT NULL, "
-            "UNIQUE (timestamp, isin_id),"
-            "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
-            ")"
-        )
-        cur = self.conn.cursor()
-        cur.execute(sql)
-        # Create indexes for common queries
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_dividends_timestamp ON dividends(timestamp)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_dividends_isin_id ON dividends(isin_id)")
-        self.conn.commit()
-        
+    @requires_connection
+    @requires_repo('dividends_repo')
     def insert_dividend(
         self,
         timestamp: int,
-        isin: int,
+        isin: str,
         ticker: str, 
         name: str,
         number_of_shares: float,
@@ -494,41 +470,42 @@ class DatabaseManager:
         
         Args:
             timestamp: Unix timestamp (seconds since epoch)
-            isin_id: Foreign key to securities.id
+            isin: ISIN string for the security
+            ticker: Ticker symbol
+            name: Security name
             number_of_shares: Number of shares for dividend
             price_for_share: Price per share in original currency
             currency_of_price: Currency code of price_for_share
-            total_czk: Total amount in CZK
-            withholding_tax_czk: Withholding tax amount in CZK
+            total: Total amount in original currency
+            currency_of_total: Currency code for total
+            withholding_tax: Withholding tax in original currency
+            currency_of_withholding_tax: Currency code for withholding tax
             
         Raises:
             sqlite3.IntegrityError: If isin_id doesn't exist in securities table
-            RuntimeError: If no database is open
-            ValueError: If timestamp is negative
+            ValueError: If timestamp is negative or any numeric value is negative
         """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
 
+        # Convert currencies to CZK
+        ts_dt = datetime.fromtimestamp(timestamp)
+        total_czk = total * self._rates.daily_rate(currency_of_total, ts_dt)
+        withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, ts_dt)
+
+        # Get or create the security ID
         isin_id = self.get_securities_id(isin, ticker, name)
 
-        total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
-        withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, datetime.fromtimestamp(timestamp))
-
-        sql = (
-            "INSERT OR IGNORE INTO dividends ("
-            "timestamp, isin_id, number_of_shares, price_for_share, "
-            "currency_of_price, total_czk, withholding_tax_czk"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        # Insert via repository
+        self.dividends_repo.insert(
+            timestamp=timestamp,
+            isin_id=isin_id,
+            number_of_shares=number_of_shares,
+            price_for_share=price_for_share,
+            currency_of_price=currency_of_price,
+            total_czk=total_czk,
+            withholding_tax_czk=withholding_tax_czk
         )
-        
-        cur = self.conn.cursor()
-        cur.execute(sql, (
-            timestamp, isin_id, number_of_shares, price_for_share,
-            currency_of_price, total_czk, withholding_tax_czk
-        ))
-        self.conn.commit()
         
     ###########################################################################
     ## Trades
