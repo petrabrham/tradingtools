@@ -1,6 +1,6 @@
 import sqlite3
 import os
-import enum
+
 import time
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
@@ -8,12 +8,11 @@ import pandas as pd
 from cnb_rate import cnb_rate
 import logging
 from logger_config import setup_logger
+from db.repositories.securities import SecuritiesRepository
+from db.repositories.interests import InterestsRepository, InterestType
+from db.decorators import requires_connection, requires_repo
 
-class InterestType(enum.IntEnum):
-    """Types of interest entries in the database."""
-    UNKNOWN = 0
-    CASH_INTEREST = 1
-    LENDING_INTEREST = 2
+
 
 
 class DatabaseManager:
@@ -33,6 +32,9 @@ class DatabaseManager:
         self.current_db_path: Optional[str] = None
         self._rates = cnb_rate()
         self.logger = setup_logger('trading_tools.db')
+        # repository instances (created when a connection exists)
+        self.securities_repo: Optional[SecuritiesRepository] = None
+        self.interests_repo: Optional[InterestsRepository] = None
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -94,6 +96,10 @@ class DatabaseManager:
         
         # initialize database schema
         self.create_versions_table()
+        # instantiate repositories now that connection exists
+        self.securities_repo = SecuritiesRepository(self.conn, self.logger)
+        self.interests_repo = InterestsRepository(self.conn, self.logger)
+        # create tables through repositories
         self.create_securities_table()
         self.create_interests_table()
         self.create_dividends_table()
@@ -112,6 +118,9 @@ class DatabaseManager:
         self.close()
         self.conn = sqlite3.connect(file_path)
         self.current_db_path = file_path
+        # instantiate repositories for the open connection
+        self.securities_repo = SecuritiesRepository(self.conn, self.logger)
+        self.interests_repo = InterestsRepository(self.conn, self.logger)
         
         # Check version compatibility
         db_version = self.get_db_version()
@@ -374,39 +383,17 @@ class DatabaseManager:
     ###########################################################################
     ## Interests
     ###########################################################################
+    @requires_connection
     def create_interests_table(self) -> None:
-        """Create the `interests` table with columns:
+        """Create the `interests` table if it does not exist."""
+        self.interests_repo.create_table()
 
-        - id INTEGER PRIMARY KEY AUTOINCREMENT
-        - timestamp INTEGER NOT NULL (Unix timestamp, seconds since epoch)
-        - type INTEGER NOT NULL (0=unknown, 1=cash interest, 2=lending interest)
-        - id_string TEXT UNIQUE
-        - total_czk REAL NOT NULL
-
-        The table will be created if it does not already exist.
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to create table in")
-
-        sql = (
-            "CREATE TABLE IF NOT EXISTS interests ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "timestamp INTEGER NOT NULL, "  # Unix timestamp
-            "type INTEGER NOT NULL CHECK (type IN (0,1,2)), "
-            "id_string TEXT UNIQUE, "
-            "total_czk REAL NOT NULL"
-            ")"
-        )
-        cur = self.conn.cursor()
-        cur.execute(sql)
-        # Create index on timestamp for range queries
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_interests_timestamp ON interests(timestamp)")
-        self.conn.commit()
-
+    @requires_connection
+    @requires_repo('interests_repo')
     def insert_interest(
         self, 
         timestamp: int, 
-        type: InterestType, 
+        type_: InterestType, 
         id_string: str, 
         total: float,
         currency_of_total: str
@@ -417,30 +404,23 @@ class DatabaseManager:
             timestamp: Unix timestamp (seconds since epoch)
             type_: Interest type from InterestType enum
             id_string: Unique identifier for this interest record
-            total_czk: Amount in CZK
+            total: Amount in original currency
+            currency_of_total: Currency code for the total amount
+            
+        Returns:
+            Number of rows inserted (1 on success, 0 if duplicate id_string)
             
         Raises:
-            sqlite3.IntegrityError: If id_string already exists
-            RuntimeError: If no database is open
             ValueError: If timestamp is negative
         """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
         
         total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
+        return self.interests_repo.insert(timestamp, type_, id_string, total_czk)
 
-        sql = ("INSERT OR IGNORE INTO interests "
-               "(timestamp, type, id_string, total_czk) "
-               "VALUES (?, ?, ?, ?)")
-        
-        cur = self.conn.cursor()
-        cur.execute(sql, (timestamp, int(type), id_string, total_czk))
-        self.conn.commit()
-        # Return number of rows inserted (should be 1 on success)
-        return cur.rowcount
-
+    @requires_connection
+    @requires_repo('interests_repo')
     def get_interests_by_date_range(
         self, 
         start_timestamp: int, 
@@ -455,17 +435,7 @@ class DatabaseManager:
         Returns:
             List of (id, timestamp, type, id_string, total_czk) tuples
         """
-        if not self.conn:
-            raise RuntimeError("No open database to query")
-            
-        sql = ("SELECT id, timestamp, type, id_string, total_czk "
-               "FROM interests "
-               "WHERE timestamp BETWEEN ? AND ? "
-               "ORDER BY timestamp")
-               
-        cur = self.conn.cursor()
-        cur.execute(sql, (start_timestamp, end_timestamp))
-        return cur.fetchall()
+        return self.interests_repo.get_by_date_range(start_timestamp, end_timestamp)
 
     ###########################################################################
     ## Dividends
