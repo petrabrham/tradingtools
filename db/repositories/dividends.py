@@ -69,8 +69,7 @@ class DividendsRepository(BaseRepository):
             currency_of_price, total_czk, withholding_tax_czk
         ))
         self.commit()
-        # Return number of rows inserted (1 if inserted, 0 if ignored due to duplicate)
-        return cur.rowcount
+        return cur.lastrowid
         
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         """Get dividends within the given timestamp range.

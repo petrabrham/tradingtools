@@ -116,10 +116,16 @@ class cnb_rate:
                 raise ValueError(f"Failed to get rate for {currency} on {date}: {e}") from e
                 
         rates = self._daily_cache[date]
-        if currency not in rates:
-            raise ValueError(f"No rate available for {currency} on {date}")
             
-        return rates[currency]
+        if currency == 'GBX':
+            # Calculate rate for GPX from GBP
+            if 'GBP' not in rates:
+                raise ValueError(f"No rate available for GBX on {date}")
+            return rates['GBP'] / 100.0
+        else:
+            if currency not in rates:
+                raise ValueError(f"No rate available for {currency} on {date}")
+            return rates[currency]
 
     def clear_cache(self) -> None:
         """Clear the in-memory cache of fetched rates."""

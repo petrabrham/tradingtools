@@ -61,6 +61,8 @@ class TradingToolsApp:
                 # Read CSV file
                 df = pd.read_csv(file_path)
 
+                self.db.logger.info(f"Importing CSV file: {file_path}")
+
                 # Use DatabaseManager to import DataFrame
                 meta = self.db.import_dataframe(df)
 
@@ -91,7 +93,7 @@ class TradingToolsApp:
                 self.db.create_database(file_path)
                 self.update_title()
                 self.update_menu_states()
-                messagebox.showinfo("Success", "New database created successfully!")
+                # messagebox.showinfo("Success", "New database created successfully!")
             except Exception as e:
                 messagebox.showerror("Error", f"Error creating database: {str(e)}")
                 
@@ -126,7 +128,7 @@ class TradingToolsApp:
                 self.db.open_database(file_path)
                 self.update_title()
                 self.update_menu_states()
-                messagebox.showinfo("Success", "Database opened successfully!")
+                # messagebox.showinfo("Success", "Database opened successfully!")
             except Exception as e:
                 messagebox.showerror("Error", f"Error opening database: {str(e)}")
 
@@ -138,7 +140,7 @@ class TradingToolsApp:
 
         try:
             self.db.save_database()
-            messagebox.showinfo("Success", "Database saved successfully!")
+            # messagebox.showinfo("Success", "Database saved successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Error saving database: {str(e)}")
 

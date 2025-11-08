@@ -53,7 +53,7 @@ class InterestsRepository(BaseRepository):
         
         cur = self.execute(sql, (timestamp, int(type_), id_string, total_czk))
         self.commit()
-        return cur.rowcount
+        return cur.lastrowid
 
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         """Get interests within the given timestamp range.

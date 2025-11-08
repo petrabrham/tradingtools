@@ -128,6 +128,7 @@ class DatabaseManager:
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
         self.dividends_repo = DividendsRepository(self.conn, self.logger)
+        self.trades_repo = TradesRepository(self.conn, self.logger)
         
         # Check version compatibility
         db_version = self.get_db_version()
@@ -204,7 +205,7 @@ class DatabaseManager:
             # Process row based on action type
             if action in ("Market buy", "Limit buy", "Stock split open"):
                 read_buy += 1
-                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+                
                 # Parse using the exact CSV column names provided
                 try:
                     isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
@@ -217,6 +218,8 @@ class DatabaseManager:
                     stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
                     conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
                     french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+
+                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
 
                     # Require ISIN and id_string at minimum for trades
                     if not isin or not id_string:
@@ -247,9 +250,10 @@ class DatabaseManager:
                             self.logger.exception(f"Failed to insert buy trade for row {index}: {e}")
                 except Exception as e:
                     self.logger.exception(f"Error parsing buy row {index}: {e}")
+
             elif action in ("Market sell", "Limit sell", "Stock split close"):
                 read_sell += 1
-                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+
                 # Parse using the exact CSV column names for sells (same as buys)
                 try:
                     isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
@@ -257,16 +261,13 @@ class DatabaseManager:
                     name = row.get('Name') if hasattr(row, 'get') else row['Name']
                     id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
                     number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share = float(row.get('Price / share') if hasattr(row, 'get') else row['Price / share'])
-                    currency_of_price = row.get('Currency (Price / share)') if hasattr(row, 'get') else row['Currency (Price / share)']
-                    total = float(row.get('Total') if hasattr(row, 'get') else row['Total'])
-                    currency_of_total = row.get('Currency (Total)') if hasattr(row, 'get') else row['Currency (Total)']
-                    stamp_tax = float(row.get('Stamp duty reserve tax') if hasattr(row, 'get') else row['Stamp duty reserve tax']) if (row.get('Stamp duty reserve tax') if hasattr(row, 'get') else row['Stamp duty reserve tax']) else 0.0
-                    currency_of_stamp_tax = row.get('Currency (Stamp duty reserve tax)') if hasattr(row, 'get') else row['Currency (Stamp duty reserve tax)']
-                    conversion_fee = float(row.get('Currency conversion fee') if hasattr(row, 'get') else row['Currency conversion fee']) if (row.get('Currency conversion fee') if hasattr(row, 'get') else row['Currency conversion fee']) else 0.0
-                    currency_of_conversion_fee = row.get('Currency (Currency conversion fee)') if hasattr(row, 'get') else row['Currency (Currency conversion fee)']
-                    french_transaction_tax = float(row.get('French transaction tax') if hasattr(row, 'get') else row['French transaction tax']) if (row.get('French transaction tax') if hasattr(row, 'get') else row['French transaction tax']) else 0.0
-                    currency_of_french_transaction_tax = row.get('Currency (French transaction tax)') if hasattr(row, 'get') else row['Currency (French transaction tax)']
+                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
+                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
+                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
+                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
+                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+
+                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
 
                     if not isin or not id_string:
                         self.logger.warning(f"Row {index}: missing ISIN or ID for trade, skipping")
@@ -280,15 +281,15 @@ class DatabaseManager:
                                 id_string=id_string,
                                 number_of_shares=number_of_shares,
                                 price_for_share=price_for_share,
-                                currency_of_price=currency_of_price or 'CZK',
+                                currency_of_price=currency_of_price,
                                 total=total,
-                                currency_of_total=currency_of_total or 'CZK',
+                                currency_of_total=currency_of_total,
                                 stamp_tax=stamp_tax,
-                                currency_of_stamp_tax=currency_of_stamp_tax or 'CZK',
+                                currency_of_stamp_tax=currency_of_stamp_tax,
                                 conversion_fee=conversion_fee,
-                                currency_of_conversion_fee=currency_of_conversion_fee or 'CZK',
+                                currency_of_conversion_fee=currency_of_conversion_fee,
                                 french_transaction_tax=french_transaction_tax,
-                                currency_of_french_transaction_tax=currency_of_french_transaction_tax or 'CZK'
+                                currency_of_french_transaction_tax=currency_of_french_transaction_tax
                             )
                             if rowid:
                                 added_sell += 1
@@ -296,16 +297,18 @@ class DatabaseManager:
                             self.logger.exception(f"Failed to insert sell trade for row {index}: {e}")
                 except Exception as e:
                     self.logger.exception(f"Error parsing sell row {index}: {e}")
+
             elif action in ("Interest on cash", "Lending interest"):
                 read_interest += 1
-                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+
                 # Parse using the exact CSV column names
                 try:
                     note = row.get('Notes') if hasattr(row, 'get') else row['Notes']    
                     id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
-                    total = float(row.get('Total') if hasattr(row, 'get') else row['Total'])
-                    currency_of_total = row.get('Currency (Total)') if hasattr(row, 'get') else row['Currency (Total)']
+                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
                     
+                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({total} {currency_of_total})")
+
                     # Determine interest type
                     if note in ("Interest on cash"):
                         interest_type = InterestType.CASH_INTEREST
@@ -324,11 +327,11 @@ class DatabaseManager:
                                 timestamp = ts, 
                                 type_ = interest_type,
                                 id_string = id_string, 
-                                total_czk = total,
-                                currency_of_total = currency_of_total or 'CZK'
+                                total = total,
+                                currency_of_total = currency_of_total
                             )
                             if rowcount:
-                                added_interest += int(rowcount)
+                                added_interest += 1
                             else:
                                 # INSERT OR IGNORE may return 0 if duplicate; treat as not added
                                 pass
@@ -336,9 +339,10 @@ class DatabaseManager:
                             self.logger.exception(f"Failed to insert interest for row {index}: {e}")
                 except Exception as e:
                     self.logger.exception(f"Error parsing interest row {index}: {e}")
+
             elif action in ("Dividend (Dividend)", "Dividend (Dividend manufactured payment)"):
                 read_dividend += 1
-                print(f"Row {index}: {action} at {time_str} (ts={ts})")
+
                 # Attempt to extract common dividend fields from the row in a tolerant way
                 try:
                     isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
@@ -346,12 +350,12 @@ class DatabaseManager:
                     name = row.get('Name') if hasattr(row, 'get') else row['Name']
 
                     number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share = float(row.get('Price / share') if hasattr(row, 'get') else row['Price / share'])
-                    currency_of_price = row.get('Currency (Price / share)') if hasattr(row, 'get') else row['Currency (Price / share)']
-                    total = float(row.get('Total') if hasattr(row, 'get') else row['Total'])
-                    currency_of_total = row.get('Currency (Total)') if hasattr(row, 'get') else row['Currency (Total)']
+                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
+                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
                     withholding_tax = float(row.get('Withholding tax') if hasattr(row, 'get') else row['Withholding tax']) if (row.get('Withholding tax') if hasattr(row, 'get') else row['Withholding tax']) else 0.0
                     currency_of_withholding_tax = row.get('Currency (Withholding tax)') if hasattr(row, 'get') else row['Currency (Withholding tax)']
+
+                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {total} {currency_of_total})")
 
                     # Validate we have at least an ISIN and timestamp
                     if not isin:
@@ -365,14 +369,14 @@ class DatabaseManager:
                                 name=name,
                                 number_of_shares=number_of_shares,
                                 price_for_share=price_for_share,
-                                currency_of_price=currency_of_price or 'CZK',
+                                currency_of_price=currency_of_price,
                                 total=total,
-                                currency_of_total=currency_of_total or 'CZK',
+                                currency_of_total=currency_of_total,
                                 withholding_tax=withholding_tax,
-                                currency_of_withholding_tax=currency_of_withholding_tax or 'CZK'
+                                currency_of_withholding_tax=currency_of_withholding_tax
                             )
                             if rowcount:
-                                added_dividend += int(rowcount)
+                                added_dividend += 1
                             else:
                                 # INSERT OR IGNORE may return 0 if duplicate; treat as not added
                                 pass
@@ -382,9 +386,10 @@ class DatabaseManager:
                     self.logger.exception(f"Error parsing dividend row {index}: {e}")
             elif action in ("Deposit", "Currency conversion", "Card debit", "Withdrawal", "Result adjustment"):
                 read_insignificant += 1
-                print(f"Row {index}: {action} (insignificant) at {time_str} (ts={ts})")
+                self.logger.info(f"Row {index}: {action} (insignificant) at {time_str}, skipping")
                 # These are not stored in DB
             else:
+                self.logger.warning(f"Row {index}: unknown action '{action}' at {time_str}, skipping")
                 read_unknown += 1
 
         results = {
