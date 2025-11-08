@@ -426,32 +426,20 @@ class DatabaseManager:
     ## Securities
     ###########################################################################
 
+    @requires_connection
     def create_securities_table(self) -> None:
-        """Create the `securities` table with columns:
+        """Create the `securities` table if it does not exist."""
+        self.securities_repo.create_table()
 
-        - id INTEGER PRIMARY KEY AUTOINCREMENT
-        - isin TEXT NOT NULL UNIQUE
-        - ticker TEXT
-        - name TEXT
 
-        The table will be created if it does not already exist.
-        """
-        if not self.conn:
-            raise RuntimeError("No open database to create table in")
-
-        sql = (
-            "CREATE TABLE IF NOT EXISTS securities ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "isin TEXT NOT NULL UNIQUE, "
-            "ticker TEXT, "
-            "name TEXT"
-            ")"
-        )
-        cur = self.conn.cursor()
-        cur.execute(sql)
-        self.conn.commit()
-
-    def insert_security(self, isin: str, ticker: str | None, name: str | None) -> int:
+    @requires_connection
+    @requires_repo('securities_repo')
+    def insert_security(
+        self, 
+        isin: str, 
+        ticker: Optional[str], 
+        name: Optional[str]
+    ) -> int:
         """Insert a single security into the securities table.
 
         Args:
@@ -468,48 +456,32 @@ class DatabaseManager:
             sqlite3.IntegrityError: If isin already exists in the table
             sqlite3.DatabaseError: For other database errors
         """
-        if not self.conn:
-            self.logger.error("Attempted to insert security without database connection")
-            raise RuntimeError("No open database to insert into")
-        if not isin:
-            self.logger.error("Attempted to insert security with empty ISIN")
-            raise ValueError("isin must be provided")
-        if not isinstance(isin, str):
-            self.logger.error(f"Invalid ISIN type: {type(isin)}")
-            raise ValueError("isin must be a string")
-            
-        self.logger.debug(f"Inserting security: ISIN={isin}, ticker={ticker}, name={name}")
-        
-        try:
-            sql = "INSERT OR IGNORE INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
-            cur = self.conn.cursor()
-            cur.execute(sql, (isin, ticker, name))
-            self.conn.commit()
-            inserted_id = cur.lastrowid
-            self.logger.info(f"Inserted security {isin} with ID {inserted_id}")
-            return inserted_id
-        except sqlite3.IntegrityError as e:
-            self.logger.warning(f"Attempted to insert duplicate security with ISIN {isin}")
-            raise sqlite3.IntegrityError(f"Security with ISIN '{isin}' already exists") from e
-        except sqlite3.Error as e:
-            self.logger.error(f"Database error inserting security {isin}: {e}")
-            raise sqlite3.DatabaseError(f"Failed to insert security: {e}") from e
+        return self.securities_repo.insert(isin, ticker, name)
 
-    def insert_many_securities(self, rows) -> int:
-        """Insert multiple securities. `rows` is an iterable of (isin, ticker, name).
+# TODO: Continue here
+    @requires_connection
+    @requires_repo('securities_repo')
+    def get_securities_id(self, isin: str) -> int:
+        """Get the `id` for a security by `isin`.
 
-        Returns number of rows inserted.
+        If a security with the given `isin` exists, return its id.
+
+        Args:
+            isin: ISIN code (must be non-empty) if exists.
+
+        Returns:
+            Integer id of the securities row.
+
+        Raises:
+            RuntimeError: If no database is open
+            ValueError: If `isin` is empty
+            sqlite3.DatabaseError: For unexpected database errors
         """
-        if not self.conn:
-            raise RuntimeError("No open database to insert into")
+        return self.securities_repo.get_id(isin)
 
-        sql = "INSERT OR IGNORE INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
-        cur = self.conn.cursor()
-        cur.executemany(sql, rows)
-        self.conn.commit()
-        return cur.rowcount
-
-    def get_securities_id(self, isin: str, ticker: str | None = None, name: str | None = None) -> int:
+    @requires_connection
+    @requires_repo('securities_repo')
+    def get_or_create_securities_id(self, isin: str, ticker: Optional[str] = None, name: Optional[str] = None) -> int:
         """Get the `id` for a security by `isin`.
 
         If a security with the given `isin` exists, return its id.
@@ -529,20 +501,7 @@ class DatabaseManager:
             ValueError: If `isin` is empty
             sqlite3.DatabaseError: For unexpected database errors
         """
-        if not self.conn:
-            raise RuntimeError("No open database to query/insert into")
-        if not isin:
-            raise ValueError("`isin` must be provided")
-
-        cur = self.conn.cursor()
-        # Try to find existing
-        cur.execute("SELECT id FROM securities WHERE isin = ?", (isin,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-
-        # Not found — insert. 
-        return self.insert_security(isin, ticker, name)
+        return self.securities_repo.get_or_create(isin, ticker, name)
 
     ###########################################################################
     ## Interests
@@ -654,7 +613,7 @@ class DatabaseManager:
         withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, ts_dt)
 
         # Get or create the security ID
-        isin_id = self.get_securities_id(isin, ticker, name)
+        isin_id = self.get_or_create_securities_id(isin, ticker, name)
 
         # Insert via repository
         self.dividends_repo.insert(
@@ -708,7 +667,7 @@ class DatabaseManager:
             raise ValueError("id_string must be provided and non-empty")
 
         # Resolve isin_id from an ISIN string
-        isin_id = self.get_securities_id(isin, ticker, name)
+        isin_id = self.get_or_create_securities_id(isin, ticker, name)
 
         # calculate values to CZK
         dt = datetime.fromtimestamp(timestamp)

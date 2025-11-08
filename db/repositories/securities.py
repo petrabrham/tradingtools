@@ -26,7 +26,7 @@ class SecuritiesRepository(BaseRepository):
         if not isinstance(isin, str):
             raise ValueError("isin must be a string")
 
-        sql = "INSERT INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
+        sql = "INSERT OR IGNORE INTO securities (isin, ticker, name) VALUES (?, ?, ?)"
         try:
             cur = self.execute(sql, (isin, ticker, name))
             self.commit()
