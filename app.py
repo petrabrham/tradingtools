@@ -3,7 +3,7 @@ from tkinter import filedialog, messagebox
 import pandas as pd
 import sys
 import os
-from db import DatabaseManager
+from dbmanager import DatabaseManager
 
 class TradingToolsApp:
     def __init__(self):

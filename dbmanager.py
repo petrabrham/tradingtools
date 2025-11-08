@@ -212,16 +212,11 @@ class DatabaseManager:
                     name = row.get('Name') if hasattr(row, 'get') else row['Name']
                     id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
                     number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share = float(row.get('Price / share') if hasattr(row, 'get') else row['Price / share'])
-                    currency_of_price = row.get('Currency (Price / share)') if hasattr(row, 'get') else row['Currency (Price / share)']
-                    total = float(row.get('Total') if hasattr(row, 'get') else row['Total'])
-                    currency_of_total = row.get('Currency (Total)') if hasattr(row, 'get') else row['Currency (Total)']
-                    stamp_tax = float(row.get('Stamp duty reserve tax') if hasattr(row, 'get') else row['Stamp duty reserve tax']) if (row.get('Stamp duty reserve tax') if hasattr(row, 'get') else row['Stamp duty reserve tax']) else 0.0
-                    currency_of_stamp_tax = row.get('Currency (Stamp duty reserve tax)') if hasattr(row, 'get') else row['Currency (Stamp duty reserve tax)']
-                    conversion_fee = float(row.get('Currency conversion fee') if hasattr(row, 'get') else row['Currency conversion fee']) if (row.get('Currency conversion fee') if hasattr(row, 'get') else row['Currency conversion fee']) else 0.0
-                    currency_of_conversion_fee = row.get('Currency (Currency conversion fee)') if hasattr(row, 'get') else row['Currency (Currency conversion fee)']
-                    french_transaction_tax = float(row.get('French transaction tax') if hasattr(row, 'get') else row['French transaction tax']) if (row.get('French transaction tax') if hasattr(row, 'get') else row['French transaction tax']) else 0.0
-                    currency_of_french_transaction_tax = row.get('Currency (French transaction tax)') if hasattr(row, 'get') else row['Currency (French transaction tax)']
+                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
+                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
+                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
+                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
+                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
 
                     # Require ISIN and id_string at minimum for trades
                     if not isin or not id_string:
@@ -236,15 +231,15 @@ class DatabaseManager:
                                 id_string=id_string,
                                 number_of_shares=number_of_shares,
                                 price_for_share=price_for_share,
-                                currency_of_price=currency_of_price or 'CZK',
+                                currency_of_price=currency_of_price,
                                 total=total,
-                                currency_of_total=currency_of_total or 'CZK',
+                                currency_of_total=currency_of_total,
                                 stamp_tax=stamp_tax,
-                                currency_of_stamp_tax=currency_of_stamp_tax or 'CZK',
+                                currency_of_stamp_tax=currency_of_stamp_tax,
                                 conversion_fee=conversion_fee,
-                                currency_of_conversion_fee=currency_of_conversion_fee or 'CZK',
+                                currency_of_conversion_fee=currency_of_conversion_fee,
                                 french_transaction_tax=french_transaction_tax,
-                                currency_of_french_transaction_tax=currency_of_french_transaction_tax or 'CZK'
+                                currency_of_french_transaction_tax=currency_of_french_transaction_tax
                             )
                             if rowid:
                                 added_buy += 1
@@ -421,6 +416,53 @@ class DatabaseManager:
         )
         
         return results
+    
+    @staticmethod
+    def safe_csv_read(row: pd.Series, val_key: str, curr_key: str) -> Tuple[float, str]:
+        """
+        Safely reads a numeric value and its currency from a CSV row, providing 
+        defaults (0.0 and 'CZK') for missing or invalid data.
+        
+        This replaces the complex conditional expressions for optional fields like 
+        taxes and fees.
+
+        Args:
+            row: Pandas Series or dict-like object representing the CSV row.
+            val_key: The key for the numeric value (e.g., 'Stamp duty reserve tax').
+            curr_key: The key for the currency (e.g., 'Currency (Stamp duty reserve tax)').
+
+        Returns:
+            A tuple: (float value, str currency).
+        """
+        
+        # --- Helper for safe row retrieval ---
+        def _get_raw(key):
+            # Use .get() if available (works for Series and dicts)
+            if hasattr(row, 'get'):
+                return row.get(key)
+            # Fallback for direct access
+            return row[key]
+
+        # 1. Retrieve raw values
+        raw_val = _get_raw(val_key)
+        raw_curr = _get_raw(curr_key)
+
+        # 2. Sanitize value to float
+        # Check for pandas NaN (pd.isna) or Python falsy values (e.g., None, empty string '')
+        if pd.isna(raw_val) or not raw_val:
+            return 0.0, 'CZK'
+        else:
+            # Value is present and not NaN, attempt float conversion
+            try:
+                value_out = float(raw_val)
+            except (ValueError, TypeError):
+                # Fallback if the non-empty value can't be converted (e.g., junk string)
+                value_out = 0.0
+
+        # 3. Sanitize currency to string (defaults to 'CZK')
+        currency_out = str(raw_curr or 'CZK')
+
+        return value_out, currency_out    
 
     ###########################################################################
     ## Securities
