@@ -140,10 +140,11 @@ class DatabaseManager:
         # Future: elif db_version < self.CURRENT_VERSION:
         #     self.migrate_database(from_version=db_version)
 
-    def save_database(self) -> None:
+    def release_database(self) -> None:
+        self.logger.info(f"Database release requested for {self.current_db_path}")
         if not self.conn:
-            raise RuntimeError("No open database to save")
-        self.conn.commit()
+            raise RuntimeError("No open database to release")
+        self.close()
 
     def save_database_as(self, file_path: str) -> None:
         if not self.conn:
