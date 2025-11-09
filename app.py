@@ -26,7 +26,7 @@ class TradingToolsApp:
         # Initial state update
         self.update_menu_states()
         self.update_title()
-        # TODO: Update wiews
+        self.update_views()
 
     ###########################################################
     # Title
@@ -48,15 +48,13 @@ class TradingToolsApp:
         
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
+        self.file_menu = file_menu
         file_menu.add_command(label="New Database", command=self.create_database)
         file_menu.add_command(label="Connect Database", command=self.open_database)
         file_menu.add_command(label="Save Database Copy As...", command=self.save_database_as, state='disabled')
         file_menu.add_command(label="Release Database", command=self.release_database, state='disabled')
         file_menu.add_separator()
-        # Import CSV menu item (initially disabled)
         file_menu.add_command(label="Import CSV", command=self.open_csv_file, state='disabled')
-        # keep file_menu around so we can update menu states later
-        self.file_menu = file_menu
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -239,23 +237,22 @@ class TradingToolsApp:
         self.notebook = ttk.Notebook(bottom_frame)
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
-        # --- 4. Tab 1: Trades Treeview ---
+        # --- 4. Tab 1: Trades View ---
         tab_trades = ttk.Frame(self.notebook)
         self.notebook.add(tab_trades, text="Trades")
-        self.create_view(tab_trades, "trades_tree")
+        self.create_trades_view(tab_trades)
 
-        # --- 5. Tab 2: Dividends/Interests Treeview ---
-        tab_income = ttk.Frame(self.notebook)
-        self.notebook.add(tab_income, text="Dividends")
-        self.create_view(tab_income, "dividends_tree")
+        # --- 5. Tab 2: Dividends View ---
+        tab_dividends = ttk.Frame(self.notebook)
+        self.notebook.add(tab_dividends, text="Dividends")
+        self.create_dividends_view(tab_dividends)
 
-        # --- 5. Tab 3: Dividends/Interests Treeview ---
-        tab_income = ttk.Frame(self.notebook)
-        self.notebook.add(tab_income, text="Interests")
-        self.create_view(tab_income, "interests_tree")
+        # --- 5. Tab 3: Interests View ---
+        tab_interests = ttk.Frame(self.notebook)
+        self.notebook.add(tab_interests, text="Interests")
+        self.create_interest_view(tab_interests)
 
-    # TODO: Create dadicated view for each tab of notebook
-    def create_view(self, parent_frame: ttk.Frame, name: str):
+    def create_trades_view(self, parent_frame: ttk.Frame):
         """Creates a Treeview widget with scrollbars and sample data."""
         
         # Configure frame to hold Treeview and Scrollbars
@@ -270,7 +267,7 @@ class TradingToolsApp:
         tree.grid(row=0, column=0, sticky='nsew')
         
         # Store a reference to the treeview
-        setattr(self, name, tree)
+        setattr(self, "trades_tree", tree)
         
         # Configure Headings and Columns
         for col in columns:
@@ -285,6 +282,16 @@ class TradingToolsApp:
         hsb = ttk.Scrollbar(parent_frame, orient="horizontal", command=tree.xview)
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
+
+    def create_dividends_view(self, parent_frame: ttk.Frame):
+        """Creates a view to dividends data."""
+        # TODO: Implement dividends view
+        pass
+
+    def create_interests_view(self, parent_frame: ttk.Frame):
+        """Creates a view to interests data."""
+        # TODO: Implement interests view
+        pass
 
     def update_views(self):
         """Update all views with data from the database."""
