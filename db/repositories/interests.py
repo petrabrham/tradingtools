@@ -1,6 +1,6 @@
 import sqlite3
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from enum import IntEnum
 from ..base import BaseRepository
 
@@ -76,3 +76,49 @@ class InterestsRepository(BaseRepository):
         )
         cur = self.execute(sql, (start_timestamp, end_timestamp))
         return cur.fetchall()
+    
+    def get_total_interest_by_type(self, start_timestamp: int, end_timestamp: int) -> Dict[InterestType, float]:
+        """
+        Calculates the total sum of 'total_czk' grouped by 'type' 
+        within the given timestamp range.
+
+        Args:
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+
+        Returns:
+            A dictionary mapping InterestType to the summed total_czk (float).
+        """
+        if not self.conn:
+            # Return an empty result if no database is open
+            return {InterestType.UNKNOWN: 0.0, InterestType.CASH_INTEREST: 0.0, InterestType.LENDING_INTEREST: 0.0}
+
+        # Correct SQL using GROUP BY
+        sql = (
+            'SELECT type, SUM(total_czk) '
+            'FROM interests '
+            'WHERE timestamp >= ? AND timestamp <= ? '
+            'GROUP BY type'
+        )
+        
+        cur = self.execute(sql, (start_timestamp, end_timestamp))
+        results = cur.fetchall()
+
+        # Initialize summary dictionary
+        summary: Dict[InterestType, float] = {
+            InterestType.UNKNOWN: 0.0,
+            InterestType.CASH_INTEREST: 0.0,
+            InterestType.LENDING_INTEREST: 0.0
+        }
+
+        # Populate summary dictionary from query results
+        for type_int, total_czk in results:
+            try:
+                interest_type = InterestType(type_int)
+                if interest_type in summary:
+                    summary[interest_type] = total_czk
+            except ValueError:
+                # Ignore unknown types if they somehow exist in the DB
+                continue
+                
+        return summary
