@@ -93,9 +93,9 @@ class InterestsRepository(BaseRepository):
             # Return an empty result if no database is open
             return {InterestType.UNKNOWN: 0.0, InterestType.CASH_INTEREST: 0.0, InterestType.LENDING_INTEREST: 0.0}
 
-        # Correct SQL using GROUP BY
+        # SQL using GROUP BY with COALESCE to handle NULL values
         sql = (
-            'SELECT type, SUM(total_czk) '
+            'SELECT type, COALESCE(SUM(total_czk), 0.0) '
             'FROM interests '
             'WHERE timestamp >= ? AND timestamp <= ? '
             'GROUP BY type'

@@ -109,3 +109,76 @@ class DividendsRepository(BaseRepository):
         )
         cur = self.execute(sql, (isin_id,))
         return cur.fetchall()
+
+    def get_summary_by_date_range(self, start_timestamp: int, end_timestamp: int) -> Tuple[float, float, float]:
+        """Get dividend summary totals within the given timestamp range.
+        
+        Args:
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+            
+        Returns:
+            Tuple of (total_gross_czk, total_tax_czk, total_net_czk)
+        """
+        sql = (
+            "SELECT "
+            "COALESCE(SUM(total_czk), 0.0) as total_gross, "
+            "COALESCE(SUM(withholding_tax_czk), 0.0) as total_tax, "
+            "COALESCE(SUM(total_czk - withholding_tax_czk), 0.0) as total_net "
+            "FROM dividends "
+            "WHERE timestamp >= ? AND timestamp <= ?"
+        )
+        cur = self.execute(sql, (start_timestamp, end_timestamp))
+        result = cur.fetchone()
+        return (result[0], result[1], result[2]) if result else (0.0, 0.0, 0.0)
+
+    def get_summary_grouped_by_isin(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
+        """Get dividend summary grouped by ISIN within the given timestamp range.
+        
+        Args:
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+            
+        Returns:
+            List of tuples: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk)
+            Ordered by name
+        """
+        sql = (
+            "SELECT "
+            "d.isin_id, "
+            "s.isin, "
+            "s.ticker, "
+            "s.name, "
+            "COALESCE(SUM(d.total_czk), 0.0) as total_gross, "
+            "COALESCE(SUM(d.withholding_tax_czk), 0.0) as total_tax "
+            "FROM dividends d "
+            "JOIN securities s ON d.isin_id = s.id "
+            "WHERE d.timestamp >= ? AND d.timestamp <= ? "
+            "GROUP BY d.isin_id, s.isin, s.ticker, s.name "
+            "ORDER BY s.name"
+        )
+        cur = self.execute(sql, (start_timestamp, end_timestamp))
+        return cur.fetchall()
+
+    def get_by_isin_and_date_range(self, isin_id: int, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
+        """Get all dividends for a specific security within a date range.
+        
+        Args:
+            isin_id: ID from securities table
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+            
+        Returns:
+            List of tuples with dividend records ordered by timestamp
+            Format: (id, timestamp, isin_id, number_of_shares, price_for_share, 
+                     currency_of_price, total_czk, withholding_tax_czk, isin, ticker, name)
+        """
+        sql = (
+            "SELECT d.*, s.isin, s.ticker, s.name "
+            "FROM dividends d "
+            "JOIN securities s ON d.isin_id = s.id "
+            "WHERE d.isin_id = ? AND d.timestamp >= ? AND d.timestamp <= ? "
+            "ORDER BY d.timestamp"
+        )
+        cur = self.execute(sql, (isin_id, start_timestamp, end_timestamp))
+        return cur.fetchall()

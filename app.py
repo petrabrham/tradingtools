@@ -34,6 +34,11 @@ class TradingToolsApp:
         self.share_lending_interest_var = tk.StringVar(value="0.00 CZK")
         self.unknown_interest_var = tk.StringVar(value="0.00 CZK")
 
+        # Variables for Dividend Summary
+        self.dividend_gross_var = tk.StringVar(value="0.00 CZK")
+        self.dividend_tax_var = tk.StringVar(value="0.00 CZK")
+        self.dividend_net_var = tk.StringVar(value="0.00 CZK")
+
         self.create_widgets()
 
         # Initial state update
@@ -298,9 +303,80 @@ class TradingToolsApp:
         tree.configure(xscrollcommand=hsb.set)
 
     def create_dividends_view(self, parent_frame: ttk.Frame):
-        """Creates a view to dividends data."""
-        # TODO: Implement dividends view
-        pass
+        """Creates a view for dividends data, split horizontally into Treeview and Summary."""
+
+        parent_frame.grid_columnconfigure(0, weight=1)
+        parent_frame.grid_rowconfigure(0, weight=1) # Treeview (expands) 
+        parent_frame.grid_rowconfigure(1, weight=0) # Summary Panel (fixed height)
+
+        # --- Top Part: Treeview for Dividends (Row 0) ---
+        treeview_frame = ttk.Frame(parent_frame)
+        treeview_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Configure frame for treeview and scrollbars
+        treeview_frame.grid_columnconfigure(0, weight=1)
+        treeview_frame.grid_rowconfigure(0, weight=1)
+        
+        # Create Treeview with tree structure visible (show='tree headings')
+        dividend_columns = ("Name", "Ticker", "Date", "Price per Share", "Gross Income (CZK)", "Withholding Tax (CZK)")
+        tree = ttk.Treeview(treeview_frame, columns=dividend_columns, show='tree headings')
+        tree.grid(row=0, column=0, sticky='nsew')
+
+        # Store reference
+        self.dividends_tree = tree
+
+        # Configure column headings and widths
+        tree.heading("#0", text="")  # Tree column (for expand/collapse icons)
+        tree.column("#0", width=30, stretch=False)  # Narrow column for tree icons
+
+        tree.heading("Name", text="Name")
+        tree.column("Name", anchor=tk.W, width=200)
+
+        tree.heading("Ticker", text="Ticker")
+        tree.column("Ticker", anchor=tk.W, width=100)
+
+        tree.heading("Date", text="Date")
+        tree.column("Date", anchor=tk.W, width=100)
+
+        tree.heading("Price per Share", text="Price per Share")
+        tree.column("Price per Share", anchor=tk.E, width=120)
+
+        tree.heading("Gross Income (CZK)", text="Gross Income (CZK)")
+        tree.column("Gross Income (CZK)", anchor=tk.E, width=130)
+
+        tree.heading("Withholding Tax (CZK)", text="Withholding Tax (CZK)")
+        tree.column("Withholding Tax (CZK)", anchor=tk.E, width=150)
+
+        # Add scrollbars
+        vsb = ttk.Scrollbar(treeview_frame, orient="vertical", command=tree.yview)
+        vsb.grid(row=0, column=1, sticky='ns')
+        tree.configure(yscrollcommand=vsb.set)
+
+        hsb = ttk.Scrollbar(treeview_frame, orient="horizontal", command=tree.xview)
+        hsb.grid(row=1, column=0, sticky='ew')
+        tree.configure(xscrollcommand=hsb.set)
+
+        # --- Bottom Part: Summary Panel (Row 1) ---
+        summary_frame = ttk.LabelFrame(parent_frame, text="Summary")
+        summary_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0), padx=2)
+        
+        # Configure grid for summary frame (4 columns: label, gross, tax, net)
+        summary_frame.grid_columnconfigure(0, weight=0)  # Label column
+        summary_frame.grid_columnconfigure(1, weight=1)  # Gross column
+        summary_frame.grid_columnconfigure(2, weight=1)  # Tax column
+        summary_frame.grid_columnconfigure(3, weight=1)  # Net column
+
+        # Row 0: Column Headers
+        ttk.Label(summary_frame, text="").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(summary_frame, text="Gross income (CZK)", font=('TkDefaultFont', 9, 'bold')).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(summary_frame, text="Withholding tax (CZK)", font=('TkDefaultFont', 9, 'bold')).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Label(summary_frame, text="Net income (CZK)", font=('TkDefaultFont', 9, 'bold')).grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+
+        # Row 1: Dividend Income and Values
+        ttk.Label(summary_frame, text="Dividend income:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        ttk.Entry(summary_frame, textvariable=self.dividend_gross_var, state='readonly', width=15, justify='right').grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Entry(summary_frame, textvariable=self.dividend_tax_var, state='readonly', width=15, justify='right').grid(row=1, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Entry(summary_frame, textvariable=self.dividend_net_var, state='readonly', width=15, justify='right').grid(row=1, column=3, padx=5, pady=5, sticky="ew")
 
     def create_interests_view(self, parent_frame: ttk.Frame):
         """Creates a view for interests data, split horizontally into Treeview and Summary."""
@@ -438,6 +514,95 @@ class TradingToolsApp:
         except Exception as e:
             messagebox.showerror("Chyba databáze", f"Chyba při načítání úroků z databáze: {e}")
 
+    def update_dividends_view(self):
+        """
+        Fetches dividends data from the DB based on current date filters 
+        and updates the Treeview with hierarchical structure (grouped by ISIN).
+        """
+        # Ensure DB connection exists and repository is initialized
+        if not self.db.conn or not self.db.dividends_repo:
+            self.dividends_tree.delete(*self.dividends_tree.get_children())
+            self.dividend_gross_var.set("0.00 CZK")
+            self.dividend_tax_var.set("0.00 CZK")
+            self.dividend_net_var.set("0.00 CZK")
+            return
+
+        date_from_str = self.date_from_var.get()
+        date_to_str = self.date_to_var.get()
+        
+        try:
+            # 1. Convert date strings to Unix timestamps for DB query
+            start_dt_str = f"{date_from_str} 00:00:00"
+            end_dt_str = f"{date_to_str} 23:59:59"
+            
+            start_ts = self.db.timestr_to_timestamp(start_dt_str)
+            end_ts = self.db.timestr_to_timestamp(end_dt_str)
+            
+            # 2. Clear existing data
+            self.dividends_tree.delete(*self.dividends_tree.get_children())
+            
+            # 3. Fetch grouped summary data (parent rows)
+            # Data format: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk)
+            grouped_dividends = self.db.dividends_repo.get_summary_grouped_by_isin(start_ts, end_ts)
+            
+            # 4. Build hierarchical tree structure
+            for group in grouped_dividends:
+                isin_id = group[0]
+                name = group[3]
+                ticker = group[2]
+                total_gross = group[4]
+                total_tax = group[5]
+                
+                # Insert parent row (grouped by ISIN) - Date column is empty
+                parent_id = self.dividends_tree.insert('', tk.END, values=(
+                    name,
+                    ticker,
+                    "",  # Empty date for parent rows
+                    "",  # Empty price per share for parent
+                    f"{total_gross:.2f}",
+                    f"{total_tax:.2f}"
+                ))
+                
+                # 5. Fetch individual dividend records for this ISIN (child rows)
+                # Data format: (id, timestamp, isin_id, number_of_shares, price_for_share,
+                #               currency_of_price, total_czk, withholding_tax_czk, isin, ticker, name)
+                detail_records = self.db.dividends_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
+                
+                for record in detail_records:
+                    timestamp = record[1]
+                    price_per_share = record[4]
+                    currency_of_price = record[5]
+                    total_czk = record[6]
+                    withholding_tax_czk = record[7]
+
+                    # Convert timestamp to display string
+                    dt_obj = self.db.timestamp_to_datetime(timestamp)
+                    date_str = dt_obj.strftime("%d.%m.%Y")
+
+                    # Format price per share with currency
+                    price_str = f"{price_per_share:.4f} {currency_of_price}"
+
+                    # Insert child row under the parent
+                    self.dividends_tree.insert(parent_id, tk.END, values=(
+                        "",  # Empty name for child rows
+                        "",  # Empty ticker for child rows
+                        date_str,
+                        price_str,
+                        f"{total_czk:.2f}",
+                        f"{withholding_tax_czk:.2f}"
+                    ))
+            
+            # 6. Update Summary Fields using separate query
+            total_gross, total_tax, total_net = self.db.dividends_repo.get_summary_by_date_range(start_ts, end_ts)
+            self.dividend_gross_var.set(f"{total_gross:.2f} CZK")
+            self.dividend_tax_var.set(f"{total_tax:.2f} CZK")
+            self.dividend_net_var.set(f"{total_net:.2f} CZK")
+
+        except ValueError as e:
+            messagebox.showerror("Filter Error", f"Error parsing date: {e}. Check format (YYYY-MM-DD).")
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Error loading dividends from database: {e}")
+
     def update_filters(self):
         """Update filter variables based on current widget states."""
         # Currently, date_from_var and date_to_var are directly linked to Entry widgets
@@ -449,8 +614,8 @@ class TradingToolsApp:
         """Update all views with data from the database."""
         # This function calls specific update functions for each view
         self.update_interests_view()
+        self.update_dividends_view()
         # TODO: self.update_trades_view()
-        # TODO: self.update_dividends_view()
         pass
 
     ###########################################################
