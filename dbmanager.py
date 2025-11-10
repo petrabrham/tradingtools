@@ -162,6 +162,32 @@ class DatabaseManager:
             self.conn = new_conn
             self.current_db_path = file_path
 
+    def get_all_years_with_data(self) -> list:
+        """Return a sorted list of all years (int) with any data in dividends, interests, or trades tables."""
+        if not self.conn:
+            return []
+        years = set()
+        cur = self.conn.cursor()
+        # Dividends
+        try:
+            cur.execute("SELECT DISTINCT strftime('%Y', datetime(timestamp, 'unixepoch')) FROM dividends")
+            years.update(int(row[0]) for row in cur.fetchall() if row[0] is not None)
+        except Exception:
+            pass
+        # Interests
+        try:
+            cur.execute("SELECT DISTINCT strftime('%Y', datetime(timestamp, 'unixepoch')) FROM interests")
+            years.update(int(row[0]) for row in cur.fetchall() if row[0] is not None)
+        except Exception:
+            pass
+        # Trades
+        try:
+            cur.execute("SELECT DISTINCT strftime('%Y', datetime(timestamp, 'unixepoch')) FROM trades")
+            years.update(int(row[0]) for row in cur.fetchall() if row[0] is not None)
+        except Exception:
+            pass
+        return sorted(years)
+
     ###########################################################################
     ## Importing DataFrames and managing tables
     ###########################################################################

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from db.repositories.interests import InterestType
 
 class TradingToolsApp:
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Trading Tools")
@@ -38,6 +39,9 @@ class TradingToolsApp:
         self.dividend_gross_var = tk.StringVar(value="0.00 CZK")
         self.dividend_tax_var = tk.StringVar(value="0.00 CZK")
         self.dividend_net_var = tk.StringVar(value="0.00 CZK")
+
+        # Year filter state (Combobox created in create_widgets)
+        self.year_combobox = None
 
         self.create_widgets()
 
@@ -80,6 +84,20 @@ class TradingToolsApp:
         
         self.root.config(menu=menubar)
 
+    def on_year_selected(self, event):
+        if not self.year_combobox:
+            return
+        year_str = self.year_combobox.get()
+        if not year_str:
+            return
+        year = int(year_str)
+        # Set date_from_var and date_to_var to first and last day of year
+        date_from = f"{year}-01-01"
+        date_to = f"{year}-12-31"
+        self.date_from_var.set(date_from)
+        self.date_to_var.set(date_to)
+        self.update_views()
+
     def update_menu_states(self):
         """Update menu items states based on database connection"""
         if self.file_menu:
@@ -118,6 +136,7 @@ class TradingToolsApp:
 
                 # Use DatabaseManager to import DataFrame
                 meta = self.db.import_dataframe(df)
+                self.update_year_list()
             except Exception as e:
                 messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")
 
@@ -149,6 +168,7 @@ class TradingToolsApp:
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
+                self.update_year_list()
             except Exception as e:
                 messagebox.showerror("Error", f"Error creating database: {str(e)}")
 
@@ -164,6 +184,7 @@ class TradingToolsApp:
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
+                self.update_year_list()
             except Exception as e:
                 messagebox.showerror("Error", f"Error opening database: {str(e)}")
 
@@ -178,6 +199,7 @@ class TradingToolsApp:
             self.update_title()
             self.update_menu_states()
             self.update_views()
+            self.update_year_list()
         except Exception as e:
             messagebox.showerror("Error", f"Error releasing database: {str(e)}")
 
@@ -224,27 +246,36 @@ class TradingToolsApp:
         top_frame.grid(row=0, column=0, sticky="ew", pady=5)
         
         # Configure column weights for the top frame
-        top_frame.grid_columnconfigure(0, weight=0) # Labels
-        top_frame.grid_columnconfigure(1, weight=1) # Entry 1
+        top_frame.grid_columnconfigure(0, weight=0) # Year label
+        top_frame.grid_columnconfigure(1, weight=0) # Year combo
         top_frame.grid_columnconfigure(2, weight=0) # Spacer
-        top_frame.grid_columnconfigure(3, weight=0) # Labels
-        top_frame.grid_columnconfigure(4, weight=1) # Entry 2
-        top_frame.grid_columnconfigure(5, weight=0) # Button
+        top_frame.grid_columnconfigure(3, weight=0) # Date from label
+        top_frame.grid_columnconfigure(4, weight=1) # Date from entry
+        top_frame.grid_columnconfigure(5, weight=0) # Spacer
+        top_frame.grid_columnconfigure(6, weight=0) # Date to label
+        top_frame.grid_columnconfigure(7, weight=1) # Date to entry
+        top_frame.grid_columnconfigure(8, weight=0) # Button
 
-        # Date 'From' Picker
-        ttk.Label(top_frame, text="Date ftom:").grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
-        self.date_from_var = tk.StringVar(value= (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
-        ttk.Entry(top_frame, textvariable=self.date_from_var).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        # Year Combobox (leftmost)
+        ttk.Label(top_frame, text="Year:").grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
+        self.year_combobox = ttk.Combobox(top_frame, state='readonly', width=10)
+        self.year_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.year_combobox.bind("<<ComboboxSelected>>", self.on_year_selected)
 
         ttk.Label(top_frame, text="  ").grid(row=0, column=2) # Spacer
 
+        # Date 'From' Picker
+        ttk.Label(top_frame, text="Date from:").grid(row=0, column=3, padx=(10, 5), pady=5, sticky="w")
+        ttk.Entry(top_frame, textvariable=self.date_from_var).grid(row=0, column=4, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(top_frame, text="  ").grid(row=0, column=5) # Spacer
+
         # Date 'To' Picker
-        ttk.Label(top_frame, text="Date to:").grid(row=0, column=3, padx=(10, 5), pady=5, sticky="w")
-        self.date_to_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        ttk.Entry(top_frame, textvariable=self.date_to_var).grid(row=0, column=4, padx=5, pady=5, sticky="ew")
-        
+        ttk.Label(top_frame, text="Date to:").grid(row=0, column=6, padx=(10, 5), pady=5, sticky="w")
+        ttk.Entry(top_frame, textvariable=self.date_to_var).grid(row=0, column=7, padx=5, pady=5, sticky="ew")
+
         # Filter Button
-        ttk.Button(top_frame, text="Use Filter", command=self.apply_filter).grid(row=0, column=5, padx=10, pady=5)
+        ttk.Button(top_frame, text="Use Filter", command=self.apply_filter).grid(row=0, column=8, padx=10, pady=5)
 
         # --- 3. Bottom Frame: Notebook (Row 1) ---
         bottom_frame = tk.Frame(main_content_frame)
@@ -617,6 +648,24 @@ class TradingToolsApp:
         self.update_dividends_view()
         # TODO: self.update_trades_view()
         pass
+
+    def update_year_list(self):
+        """Update the year combobox with years from all tables in the DB."""
+        if not self.db.conn:
+            if self.year_combobox:
+                self.year_combobox.configure(values=[])
+                self.year_combobox.set('')
+            return
+        try:
+            years = self.db.get_all_years_with_data()
+            year_strings = [str(y) for y in years]
+            self.year_combobox.configure(values=year_strings)
+            if year_strings:
+                self.year_combobox.set(year_strings[0])  # Select first year by default
+        except Exception:
+            if self.year_combobox:
+                self.year_combobox.configure(values=[])
+                self.year_combobox.set('')
 
     ###########################################################
     # Widgets command handlers

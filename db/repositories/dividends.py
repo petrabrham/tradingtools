@@ -182,3 +182,5 @@ class DividendsRepository(BaseRepository):
         )
         cur = self.execute(sql, (isin_id, start_timestamp, end_timestamp))
         return cur.fetchall()
+        
+    
