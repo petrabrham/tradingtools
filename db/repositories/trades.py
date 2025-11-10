@@ -89,3 +89,29 @@ class TradesRepository(BaseRepository):
         )
         cur = self.execute(sql, (isin_id,))
         return cur.fetchall()
+
+    def get_by_isin_and_date_range(self, isin_id: int, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
+        """Get trades for a specific ISIN within a date range, ordered by time."""
+        sql = (
+            "SELECT t.*, s.isin, s.ticker, s.name "
+            "FROM trades t "
+            "JOIN securities s ON t.isin_id = s.id "
+            "WHERE t.isin_id = ? AND t.timestamp >= ? AND t.timestamp <= ? "
+            "ORDER BY t.timestamp"
+        )
+        cur = self.execute(sql, (isin_id, start_timestamp, end_timestamp))
+        return cur.fetchall()
+
+    def get_summary_grouped_by_isin(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
+        """Return summary rows grouped by ISIN with total shares, ordered by security name."""
+        sql = (
+            "SELECT s.id AS isin_id, s.name, s.ticker, "
+            "COALESCE(SUM(t.number_of_shares), 0.0) AS total_shares "
+            "FROM trades t "
+            "JOIN securities s ON t.isin_id = s.id "
+            "WHERE t.timestamp >= ? AND t.timestamp <= ? "
+            "GROUP BY s.id, s.name, s.ticker "
+            "ORDER BY s.name COLLATE NOCASE"
+        )
+        cur = self.execute(sql, (start_timestamp, end_timestamp))
+        return cur.fetchall()

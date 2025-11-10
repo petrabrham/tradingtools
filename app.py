@@ -303,35 +303,152 @@ class TradingToolsApp:
         self.create_interests_view(tab_interests)
 
     def create_trades_view(self, parent_frame: ttk.Frame):
-        """Creates a Treeview widget with scrollbars and sample data."""
-        
-        # Configure frame to hold Treeview and Scrollbars
+        """Create hierarchical trades Treeview with grouped parents and detailed child rows."""
+        # Layout
         parent_frame.grid_columnconfigure(0, weight=1)
         parent_frame.grid_rowconfigure(0, weight=1)
-        
-        # Define Columns
-        columns = ("ID", "Datum", "ISIN", "Akcie", "Počet", "Cena", "Měna")
-        
-        # Create Treeview
-        tree = ttk.Treeview(parent_frame, columns=columns, show='headings')
+
+        tree_frame = ttk.Frame(parent_frame)
+        tree_frame.grid(row=0, column=0, sticky="nsew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        columns = (
+            "Name",
+            "Ticker",
+            "Sum of Shares",
+            "Trade Type",
+            "Date",
+            "Shares",
+            "Price per Share",
+            "Total (CZK)",
+            "Stamp Tax (CZK)",
+            "Conversion Fee (CZK)",
+            "French Transaction Tax (CZK)",
+        )
+
+        tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings')
         tree.grid(row=0, column=0, sticky='nsew')
-        
-        # Store a reference to the treeview
-        setattr(self, "trades_tree", tree)
-        
-        # Configure Headings and Columns
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, anchor=tk.W, width=100)
-            
+        self.trades_tree = tree
+
+        # Tree column for expand/collapse icons
+        tree.heading("#0", text="")
+        tree.column("#0", width=30, stretch=False)
+
+        # Headings
+        tree.heading("Name", text="Name")
+        tree.column("Name", anchor=tk.W, width=200)
+
+        tree.heading("Ticker", text="Ticker")
+        tree.column("Ticker", anchor=tk.W, width=100)
+
+        tree.heading("Sum of Shares", text="Sum of Shares")
+        tree.column("Sum of Shares", anchor=tk.E, width=120)
+
+        tree.heading("Trade Type", text="Trade Type")
+        tree.column("Trade Type", anchor=tk.W, width=90)
+
+        tree.heading("Date", text="Date")
+        tree.column("Date", anchor=tk.W, width=110)
+
+        tree.heading("Shares", text="Shares")
+        tree.column("Shares", anchor=tk.E, width=90)
+
+        tree.heading("Price per Share", text="Price per Share")
+        tree.column("Price per Share", anchor=tk.E, width=120)
+
+        tree.heading("Total (CZK)", text="Total (CZK)")
+        tree.column("Total (CZK)", anchor=tk.E, width=110)
+
+        tree.heading("Stamp Tax (CZK)", text="Stamp Tax (CZK)")
+        tree.column("Stamp Tax (CZK)", anchor=tk.E, width=130)
+
+        tree.heading("Conversion Fee (CZK)", text="Conversion Fee (CZK)")
+        tree.column("Conversion Fee (CZK)", anchor=tk.E, width=150)
+
+        tree.heading("French Transaction Tax (CZK)", text="French Transaction Tax (CZK)")
+        tree.column("French Transaction Tax (CZK)", anchor=tk.E, width=200)
+
         # Scrollbars
-        vsb = ttk.Scrollbar(parent_frame, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         vsb.grid(row=0, column=1, sticky='ns')
         tree.configure(yscrollcommand=vsb.set)
 
-        hsb = ttk.Scrollbar(parent_frame, orient="horizontal", command=tree.xview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
+
+    def update_trades_view(self):
+        """Populate the trades tree with grouped parents and detailed child trades."""
+        if not hasattr(self, 'trades_tree') or self.trades_tree is None:
+            return
+        tree = self.trades_tree
+        # Clear
+        for item in tree.get_children():
+            tree.delete(item)
+
+        if not self.db or not self.db.conn:
+            return
+
+        # Parse date range
+        date_from_str = self.date_from_var.get().strip()
+        date_to_str = self.date_to_var.get().strip()
+        try:
+            start_ts = DatabaseManager.timestr_to_timestamp(f"{date_from_str} 00:00:00")
+            end_ts = DatabaseManager.timestr_to_timestamp(f"{date_to_str} 23:59:59")
+        except Exception:
+            # If parsing fails, attempt to load everything
+            start_ts = 0
+            end_ts = int(datetime.now().timestamp())
+
+        try:
+            # Parent rows: grouped by ISIN with sum of shares
+            parents = self.db.trades_repo.get_summary_grouped_by_isin(start_ts, end_ts)
+            for parent in parents:
+                isin_id, name, ticker, total_shares = parent
+                parent_iid = f"tr_parent_{isin_id}"
+                tree.insert("", tk.END, iid=parent_iid, text="", values=(
+                    name or "",
+                    ticker or "",
+                    f"{total_shares:.4f}",
+                    "", "", "", "", "", "", "", ""
+                ))
+
+                # Child trades for this ISIN within range
+                rows = self.db.trades_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
+                for r in rows:
+                    # Indices based on trades table layout
+                    ts = r[1]
+                    trade_type_val = r[4]
+                    num_shares = r[5]
+                    price_per_share = r[6]
+                    total_czk = r[8]
+                    stamp_tax_czk = r[9]
+                    conversion_fee_czk = r[10]
+                    french_tax_czk = r[11]
+
+                    dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+                    trade_type_str = "BUY" if int(trade_type_val) == 1 else ("SELL" if int(trade_type_val) == 2 else "?")
+
+                    tree.insert(parent_iid, tk.END, values=(
+                        "",  # Name
+                        "",  # Ticker
+                        "",  # Sum of Shares
+                        trade_type_str,
+                        dt_str,
+                        f"{num_shares:.4f}",
+                        f"{price_per_share:.4f}",
+                        f"{total_czk:.2f}",
+                        f"{stamp_tax_czk:.2f}",
+                        f"{conversion_fee_czk:.2f}",
+                        f"{french_tax_czk:.2f}"
+                    ))
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Error loading trades: {e}")
+
+    # Backward-compatible alias for requested name with typos
+    def update_trases_wiew(self):
+        self.update_trades_view()
 
     def create_dividends_view(self, parent_frame: ttk.Frame):
         """Creates a view for dividends data, split horizontally into Treeview and Summary."""
@@ -646,8 +763,7 @@ class TradingToolsApp:
         # This function calls specific update functions for each view
         self.update_interests_view()
         self.update_dividends_view()
-        # TODO: self.update_trades_view()
-        pass
+        self.update_trades_view()
 
     def update_year_list(self):
         """Update the year combobox with years from all tables in the DB."""
