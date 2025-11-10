@@ -1,7 +1,13 @@
 from datetime import datetime
 from typing import List, Tuple
 import sqlite3
+from enum import IntEnum
 from ..base import BaseRepository
+
+class TradeType(IntEnum):
+    """Types of trade entries in the database."""
+    BUY = 1
+    SELL = 2
 
 class TradesRepository(BaseRepository):
     """Repository for the `trades` table operations."""
@@ -13,6 +19,7 @@ class TradesRepository(BaseRepository):
             "timestamp INTEGER NOT NULL, "
             "isin_id INTEGER NOT NULL, "
             "id_string TEXT NOT NULL UNIQUE, "
+            "trade_type INTEGER NOT NULL, "
             "number_of_shares REAL NOT NULL, "
             "price_for_share REAL NOT NULL, "
             "currency_of_price TEXT NOT NULL, "
@@ -33,6 +40,7 @@ class TradesRepository(BaseRepository):
                timestamp: int,
                isin_id: int,
                id_string: str,
+               trade_type: TradeType,
                number_of_shares: float,
                price_for_share: float,
                currency_of_price: str,
@@ -49,11 +57,11 @@ class TradesRepository(BaseRepository):
             raise ValueError("Numeric trade values must be non-negative")
 
         sql = (
-            "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, number_of_shares, "
+            "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, trade_type, number_of_shares, "
             "price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
-            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         cur = self.execute(sql, (
-            timestamp, isin_id, id_string, number_of_shares,
+            timestamp, isin_id, id_string, int(trade_type), number_of_shares,
             price_for_share, currency_of_price, total_czk, stamp_tax_czk,
             conversion_fee_czk, french_transaction_tax_czk
         ))

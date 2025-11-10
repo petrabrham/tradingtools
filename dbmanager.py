@@ -11,7 +11,7 @@ from logger_config import setup_logger
 from db.repositories.securities import SecuritiesRepository
 from db.repositories.interests import InterestsRepository, InterestType
 from db.repositories.dividends import DividendsRepository
-from db.repositories.trades import TradesRepository
+from db.repositories.trades import TradesRepository, TradeType
 from db.decorators import requires_connection, requires_repo
 
 
@@ -259,6 +259,7 @@ class DatabaseManager:
                                 ticker=ticker,
                                 name=name,
                                 id_string=id_string,
+                                trade_type=TradeType.BUY,
                                 number_of_shares=number_of_shares,
                                 price_for_share=price_for_share,
                                 currency_of_price=currency_of_price,
@@ -306,6 +307,7 @@ class DatabaseManager:
                                 ticker=ticker,
                                 name=name,
                                 id_string=id_string,
+                                trade_type=TradeType.SELL,
                                 number_of_shares=number_of_shares,
                                 price_for_share=price_for_share,
                                 currency_of_price=currency_of_price,
@@ -719,6 +721,7 @@ class DatabaseManager:
         ticker: str,
         name: str,
         id_string: str,
+        trade_type: TradeType,
         number_of_shares: float,
         price_for_share: float,
         currency_of_price: str,
@@ -755,6 +758,7 @@ class DatabaseManager:
             timestamp=timestamp,
             isin_id=isin_id,
             id_string=id_string,
+            trade_type=trade_type,
             number_of_shares=number_of_shares,
             price_for_share=price_for_share,
             currency_of_price=currency_of_price,
