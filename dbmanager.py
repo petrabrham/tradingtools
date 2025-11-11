@@ -241,10 +241,14 @@ class DatabaseManager:
                     id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
                     number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
                     price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
-                    total, currency_of_total = -1 * DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    stamp_tax, currency_of_stamp_tax = -1 * DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
-                    conversion_fee, currency_of_conversion_fee = -1 * DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
-                    french_transaction_tax, currency_of_french_transaction_tax = -1 * DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
+                    total = -total
+                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
+                    stamp_tax = -stamp_tax
+                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
+                    conversion_fee = -conversion_fee
+                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+                    french_transaction_tax = -french_transaction_tax
 
                     self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
 
@@ -291,9 +295,12 @@ class DatabaseManager:
                     number_of_shares = -1 * float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
                     price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
                     total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    stamp_tax, currency_of_stamp_tax = -1 * DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
-                    conversion_fee, currency_of_conversion_fee = -1 * DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
-                    french_transaction_tax, currency_of_french_transaction_tax = -1 * DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
+                    stamp_tax = -stamp_tax
+                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
+                    conversion_fee = -conversion_fee
+                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
+                    french_transaction_tax = -french_transaction_tax
 
                     self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
 

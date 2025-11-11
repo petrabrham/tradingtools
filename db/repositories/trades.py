@@ -53,8 +53,6 @@ class TradesRepository(BaseRepository):
             raise ValueError("timestamp must be a positive Unix timestamp")
         if not id_string:
             raise ValueError("id_string must be provided and non-empty")
-        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, stamp_tax_czk, conversion_fee_czk, french_transaction_tax_czk]):
-            raise ValueError("Numeric trade values must be non-negative")
 
         sql = (
             "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, trade_type, number_of_shares, "
