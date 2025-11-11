@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk  # Required for Treeview and Notebook
+from tkcalendar import DateEntry
 import pandas as pd
 import sys
 import os
@@ -97,6 +98,44 @@ class TradingToolsApp:
         self.date_from_var.set(date_from)
         self.date_to_var.set(date_to)
         self.update_views()
+
+    def copy_treeview_to_clipboard(self, event):
+        """Copy selected treeview rows to clipboard as tab-separated values."""
+        widget = event.widget
+        if not isinstance(widget, ttk.Treeview):
+            return
+        
+        # Get selected items
+        selection = widget.selection()
+        if not selection:
+            return
+        
+        # Build clipboard content
+        lines = []
+        
+        # Add header row
+        columns = widget['columns']
+        if columns:
+            # Include tree column if visible
+            if widget['show'] == 'tree headings':
+                header = [''] + [widget.heading(col)['text'] for col in columns]
+            else:
+                header = [widget.heading(col)['text'] for col in columns]
+            lines.append('\t'.join(header))
+        
+        # Add data rows
+        for item_id in selection:
+            values = widget.item(item_id)['values']
+            if values:
+                lines.append('\t'.join(str(v) for v in values))
+        
+        # Copy to clipboard
+        clipboard_text = '\n'.join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(clipboard_text)
+        
+        # Show confirmation (optional)
+        print(f"Copied {len(selection)} row(s) to clipboard")
 
     def update_menu_states(self):
         """Update menu items states based on database connection"""
@@ -266,13 +305,17 @@ class TradingToolsApp:
 
         # Date 'From' Picker
         ttk.Label(top_frame, text="Date from:").grid(row=0, column=3, padx=(10, 5), pady=5, sticky="w")
-        ttk.Entry(top_frame, textvariable=self.date_from_var).grid(row=0, column=4, padx=5, pady=5, sticky="ew")
+        self.date_from_picker = DateEntry(top_frame, textvariable=self.date_from_var, 
+                                          date_pattern='yyyy-mm-dd', width=12)
+        self.date_from_picker.grid(row=0, column=4, padx=5, pady=5, sticky="ew")
 
         ttk.Label(top_frame, text="  ").grid(row=0, column=5) # Spacer
 
         # Date 'To' Picker
         ttk.Label(top_frame, text="Date to:").grid(row=0, column=6, padx=(10, 5), pady=5, sticky="w")
-        ttk.Entry(top_frame, textvariable=self.date_to_var).grid(row=0, column=7, padx=5, pady=5, sticky="ew")
+        self.date_to_picker = DateEntry(top_frame, textvariable=self.date_to_var,
+                                        date_pattern='yyyy-mm-dd', width=12)
+        self.date_to_picker.grid(row=0, column=7, padx=5, pady=5, sticky="ew")
 
         # Filter Button
         ttk.Button(top_frame, text="Use Filter", command=self.apply_filter).grid(row=0, column=8, padx=10, pady=5)
@@ -377,6 +420,10 @@ class TradingToolsApp:
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
+
+        # Bind Ctrl+C for clipboard copy
+        tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
+        tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
 
     def update_trades_view(self):
         """Populate the trades tree with grouped parents and detailed child trades."""
@@ -504,6 +551,10 @@ class TradingToolsApp:
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
 
+        # Bind Ctrl+C for clipboard copy
+        tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
+        tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
+
         # --- Bottom Part: Summary Panel (Row 1) ---
         summary_frame = ttk.LabelFrame(parent_frame, text="Summary")
         summary_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0), padx=2)
@@ -589,6 +640,10 @@ class TradingToolsApp:
         hsb = ttk.Scrollbar(parent_frame, orient="horizontal", command=tree.xview)
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
+
+        # Bind Ctrl+C for clipboard copy
+        tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
+        tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
 
     ###########################################################
     # Data Update Logic
