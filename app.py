@@ -5,6 +5,7 @@ from tkcalendar import DateEntry
 import pandas as pd
 import sys
 import os
+import json
 from dbmanager import DatabaseManager
 from datetime import datetime, timedelta
 from db.repositories.interests import InterestType
@@ -18,6 +19,9 @@ class TradingToolsApp:
         
         # Database manager (moved DB logic to separate module)
         self.db = DatabaseManager()
+
+        # Config file path
+        self.config_file = os.path.join(os.path.dirname(__file__), 'config.json')
 
         # Menu container reference (used to enable/disable items)
         self.file_menu = None
@@ -51,6 +55,55 @@ class TradingToolsApp:
         self.update_title()
         self.update_filters()
         self.update_views()
+
+        # Try to open last used database
+        self.open_last_database()
+
+    ###########################################################
+    # Configuration Management
+    ###########################################################
+    def load_config(self):
+        """Load configuration from config.json"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+        return {}
+
+    def save_config(self, config):
+        """Save configuration to config.json"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def save_last_database_path(self, path):
+        """Save the last used database path to config"""
+        config = self.load_config()
+        config['last_database'] = path
+        self.save_config(config)
+
+    def get_last_database_path(self):
+        """Get the last used database path from config"""
+        config = self.load_config()
+        return config.get('last_database')
+
+    def open_last_database(self):
+        """Attempt to open the last used database on startup"""
+        last_db = self.get_last_database_path()
+        if last_db and os.path.exists(last_db):
+            try:
+                self.db.open_database(last_db)
+                self.update_title()
+                self.update_menu_states()
+                self.update_views()
+                self.update_year_list()
+                print(f"Opened last used database: {last_db}")
+            except Exception as e:
+                print(f"Could not open last database: {e}")
 
     ###########################################################
     # Title
@@ -204,6 +257,7 @@ class TradingToolsApp:
             try:
                 # Delegate to DatabaseManager
                 self.db.create_database(file_path)
+                self.save_last_database_path(file_path)
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
@@ -220,6 +274,7 @@ class TradingToolsApp:
             try:
                 # Delegate to DatabaseManager
                 self.db.open_database(file_path)
+                self.save_last_database_path(file_path)
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
@@ -256,6 +311,7 @@ class TradingToolsApp:
             try:
                 # Delegate to DatabaseManager
                 self.db.save_database_as(file_path)
+                self.save_last_database_path(file_path)
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
