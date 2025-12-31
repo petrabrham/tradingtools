@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Manual country of origin overrides for securities where ISIN country code does not match actual company origin",
+  "metadata": {
+    "last_updated": "2025-12-31",
+    "purpose": "Correct country assignment for ADRs, cross-listings, and other cases where ISIN registration country differs from company origin",
+    "usage": "Key is ISIN, value is ISO 3166-1 alpha-2 country code"
+  },
+  "overrides": {
+    "US05606L1008": {
+      "country_code": "CN",
+      "name": "BYD Co Ltd",
+      "note": "Chinese company traded as ADR in US"
+    }
+  }
+}

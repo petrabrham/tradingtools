@@ -8,6 +8,8 @@ import os
 from dbmanager import DatabaseManager
 from datetime import datetime, timedelta
 from db.repositories.interests import InterestType
+from config.tax_rates_loader import TaxRatesLoader
+from config.country_resolver import CountryResolver
 
 class TradingToolsApp:
 
@@ -19,8 +21,18 @@ class TradingToolsApp:
         # Database manager (moved DB logic to separate module)
         self.db = DatabaseManager()
 
+        # Tax rates loader for JSON-based calculations
+        self.tax_rates_loader = TaxRatesLoader()
+        
+        # Country resolver for accurate country of origin detection
+        self.country_resolver = CountryResolver()
+        
+        # Tax calculation method: True = use JSON rates, False = use CSV values
+        self.use_json_tax_rates = tk.BooleanVar(value=True)
+
         # Menu container reference (used to enable/disable items)
         self.file_menu = None
+        self.options_menu = None
 
         # Create menu
         self.create_menu()
@@ -89,6 +101,16 @@ class TradingToolsApp:
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
         
+        # Options menu
+        options_menu = tk.Menu(menubar, tearoff=0)
+        self.options_menu = options_menu
+        options_menu.add_checkbutton(
+            label="Calculate taxes from JSON config",
+            variable=self.use_json_tax_rates,
+            command=self.on_tax_calculation_method_changed
+        )
+        menubar.add_cascade(label="Options", menu=options_menu)
+        
         self.root.config(menu=menubar)
 
     def on_year_selected(self, event):
@@ -104,6 +126,10 @@ class TradingToolsApp:
         self.date_from_var.set(date_from)
         self.date_to_var.set(date_to)
         self.update_views()
+    
+    def on_tax_calculation_method_changed(self):
+        """Handle change in tax calculation method - refresh dividends view."""
+        self.update_dividends_view()
 
     def copy_treeview_to_clipboard(self, event):
         """Copy selected treeview rows to clipboard as tab-separated values."""
@@ -509,11 +535,12 @@ class TradingToolsApp:
         self.update_trades_view()
 
     def create_dividends_view(self, parent_frame: ttk.Frame):
-        """Creates a view for dividends data, split horizontally into Treeview and Summary."""
+        """Creates a view for dividends data, split into three parts: Treeview, Country Summary, and Total Summary."""
 
         parent_frame.grid_columnconfigure(0, weight=1)
         parent_frame.grid_rowconfigure(0, weight=1) # Treeview (expands) 
-        parent_frame.grid_rowconfigure(1, weight=0) # Summary Panel (fixed height)
+        parent_frame.grid_rowconfigure(1, weight=0) # Country Summary Table (fixed height)
+        parent_frame.grid_rowconfigure(2, weight=0) # Total Summary Panel (fixed height)
 
         # --- Top Part: Treeview for Dividends (Row 0) ---
         treeview_frame = ttk.Frame(parent_frame)
@@ -569,9 +596,46 @@ class TradingToolsApp:
         tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
         tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
 
-        # --- Bottom Part: Summary Panel (Row 1) ---
-        summary_frame = ttk.LabelFrame(parent_frame, text="Summary")
-        summary_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0), padx=2)
+        # --- Middle Part: Country Summary Table (Row 1) ---
+        country_summary_frame = ttk.LabelFrame(parent_frame, text="Summary by Country")
+        country_summary_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0), padx=2)
+        
+        country_summary_frame.grid_columnconfigure(0, weight=1)
+        country_summary_frame.grid_rowconfigure(0, weight=1)
+        
+        # Create Treeview for country summary
+        country_columns = ("Country", "Gross dividend (CZK)", "Rate of withholding tax (%)", "Withholding tax (CZK)", "Net dividends (CZK)")
+        self.country_summary_tree = ttk.Treeview(country_summary_frame, columns=country_columns, show='headings', height=6)
+        self.country_summary_tree.grid(row=0, column=0, sticky='nsew')
+        
+        # Configure columns
+        self.country_summary_tree.heading("Country", text="Country")
+        self.country_summary_tree.column("Country", anchor=tk.W, width=150)
+        
+        self.country_summary_tree.heading("Gross dividend (CZK)", text="Gross dividend (CZK)")
+        self.country_summary_tree.column("Gross dividend (CZK)", anchor=tk.E, width=150)
+        
+        self.country_summary_tree.heading("Rate of withholding tax (%)", text="Rate of withholding tax (%)")
+        self.country_summary_tree.column("Rate of withholding tax (%)", anchor=tk.E, width=180)
+        
+        self.country_summary_tree.heading("Withholding tax (CZK)", text="Withholding tax (CZK)")
+        self.country_summary_tree.column("Withholding tax (CZK)", anchor=tk.E, width=150)
+        
+        self.country_summary_tree.heading("Net dividends (CZK)", text="Net dividends (CZK)")
+        self.country_summary_tree.column("Net dividends (CZK)", anchor=tk.E, width=150)
+        
+        # Add scrollbar
+        country_vsb = ttk.Scrollbar(country_summary_frame, orient="vertical", command=self.country_summary_tree.yview)
+        country_vsb.grid(row=0, column=1, sticky='ns')
+        self.country_summary_tree.configure(yscrollcommand=country_vsb.set)
+        
+        # Bind Ctrl+C for clipboard copy
+        self.country_summary_tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
+        self.country_summary_tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
+
+        # --- Bottom Part: Total Summary Panel (Row 2) ---
+        summary_frame = ttk.LabelFrame(parent_frame, text="Total Summary")
+        summary_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0), padx=2)
         
         # Configure grid for summary frame (4 columns: label, gross, tax, net)
         summary_frame.grid_columnconfigure(0, weight=0)  # Label column
@@ -820,10 +884,23 @@ class TradingToolsApp:
         """
         Fetches dividends data from the DB based on current date filters 
         and updates the Treeview with hierarchical structure (grouped by ISIN).
+        
+        Tax Calculation Methods:
+        - JSON mode (default): Uses withholding tax rates from config/withholding_tax_rates.json
+          Calculates gross and tax from the precise net amount using formulas:
+          gross = net / (1 - rate)
+          tax = net * rate / (1 - rate)
+          This corrects rounding errors in the original CSV data.
+        
+        - CSV mode: Uses gross and tax values as imported from the CSV file.
+          These may contain rounding errors but reflect the original data.
+        
+        The calculation method can be toggled via Options > Calculate taxes from JSON config.
         """
         # Ensure DB connection exists and repository is initialized
         if not self.db.conn or not self.db.dividends_repo:
             self.dividends_tree.delete(*self.dividends_tree.get_children())
+            self.country_summary_tree.delete(*self.country_summary_tree.get_children())
             self.dividend_gross_var.set("0.00 CZK")
             self.dividend_tax_var.set("0.00 CZK")
             self.dividend_net_var.set("0.00 CZK")
@@ -842,19 +919,67 @@ class TradingToolsApp:
             
             # 2. Clear existing data
             self.dividends_tree.delete(*self.dividends_tree.get_children())
+            self.country_summary_tree.delete(*self.country_summary_tree.get_children())
             
             # 3. Fetch grouped summary data (parent rows)
             # Data format: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk, total_net_czk)
             grouped_dividends = self.db.dividends_repo.get_summary_grouped_by_isin(start_ts, end_ts)
             
+            # Dictionary to accumulate dividends by country
+            country_summary = {}
+            
+            # Determine which calculation method to use
+            use_json_rates = self.use_json_tax_rates.get()
+            
             # 4. Build hierarchical tree structure
             for group in grouped_dividends:
                 isin_id = group[0]
+                isin = group[1]
                 name = group[3]
                 ticker = group[2]
-                total_gross = group[4]
-                total_tax = group[5]
-                total_net = group[6]
+                
+                # If using JSON rates, recalculate gross and tax from net
+                if use_json_rates:
+                    # Resolve country code (with override support)
+                    country_code, source = self.country_resolver.get_country(isin)
+                    
+                    # Get net amount from database (this is the precise value)
+                    total_net = group[6]
+                    
+                    if country_code:
+                        calculated_gross = self.tax_rates_loader.calculate_gross_from_net(total_net, country_code)
+                        calculated_tax = self.tax_rates_loader.calculate_tax_from_net(total_net, country_code)
+                        
+                        if calculated_gross is not None and calculated_tax is not None:
+                            total_gross = calculated_gross
+                            total_tax = calculated_tax
+                        else:
+                            # Fallback to CSV values if JSON rate not found
+                            total_gross = group[4]
+                            total_tax = group[5]
+                    else:
+                        # Fallback to CSV values if no country code
+                        total_gross = group[4]
+                        total_tax = group[5]
+                else:
+                    # Use values from CSV (stored in database)
+                    total_gross = group[4]
+                    total_tax = group[5]
+                    total_net = group[6]
+                
+                # Resolve country code using CountryResolver (handles overrides)
+                country_code, country_source = self.country_resolver.get_country(isin)
+                
+                # Accumulate by country
+                if country_code not in country_summary:
+                    country_summary[country_code] = {
+                        'gross': 0.0,
+                        'tax': 0.0,
+                        'net': 0.0
+                    }
+                country_summary[country_code]['gross'] += total_gross
+                country_summary[country_code]['tax'] += total_tax
+                country_summary[country_code]['net'] += total_net
                 
                 # Insert parent row (grouped by ISIN) - Date column is empty
                 parent_id = self.dividends_tree.insert('', tk.END, values=(
@@ -876,9 +1001,24 @@ class TradingToolsApp:
                     timestamp = record[1]
                     price_per_share = record[4]
                     currency_of_price = record[5]
-                    gross_czk = record[6]
-                    net_czk = record[7]
-                    withholding_tax_czk = record[8]
+                    net_czk = record[7]  # Net is the precise value
+                    
+                    # Recalculate gross and tax if using JSON rates
+                    if use_json_rates and country_code and country_code != "XX":
+                        calculated_gross = self.tax_rates_loader.calculate_gross_from_net(net_czk, country_code)
+                        calculated_tax = self.tax_rates_loader.calculate_tax_from_net(net_czk, country_code)
+                        
+                        if calculated_gross is not None and calculated_tax is not None:
+                            gross_czk = calculated_gross
+                            withholding_tax_czk = calculated_tax
+                        else:
+                            # Fallback to CSV values
+                            gross_czk = record[6]
+                            withholding_tax_czk = record[8]
+                    else:
+                        # Use CSV values
+                        gross_czk = record[6]
+                        withholding_tax_czk = record[8]
 
                     # Convert timestamp to display string
                     dt_obj = self.db.timestamp_to_datetime(timestamp)
@@ -898,11 +1038,51 @@ class TradingToolsApp:
                         f"{net_czk:.2f}"
                     ))
             
-            # 6. Update Summary Fields using separate query
-            total_gross, total_tax, total_net = self.db.dividends_repo.get_summary_by_date_range(start_ts, end_ts)
-            self.dividend_gross_var.set(f"{total_gross:.2f} CZK")
-            self.dividend_tax_var.set(f"{total_tax:.2f} CZK")
-            self.dividend_net_var.set(f"{total_net:.2f} CZK")
+            # 6. Populate country summary table
+            total_gross_sum = 0.0
+            total_tax_sum = 0.0
+            total_net_sum = 0.0
+            
+            for country_code in sorted(country_summary.keys()):
+                data = country_summary[country_code]
+                gross = data['gross']
+                tax = data['tax']
+                net = data['net']
+                
+                # Calculate effective tax rate
+                tax_rate = (tax / gross * 100) if gross > 0 else 0.0
+                
+                self.country_summary_tree.insert('', tk.END, values=(
+                    country_code,
+                    f"{gross:.2f}",
+                    f"{tax_rate:.2f}",
+                    f"{tax:.2f}",
+                    f"{net:.2f}"
+                ))
+                
+                total_gross_sum += gross
+                total_tax_sum += tax
+                total_net_sum += net
+            
+            # Insert totals row if there's data
+            if country_summary:
+                total_tax_rate = (total_tax_sum / total_gross_sum * 100) if total_gross_sum > 0 else 0.0
+                self.country_summary_tree.insert('', tk.END, values=(
+                    "TOTAL",
+                    f"{total_gross_sum:.2f}",
+                    f"{total_tax_rate:.2f}",
+                    f"{total_tax_sum:.2f}",
+                    f"{total_net_sum:.2f}"
+                ), tags=('total',))
+                
+                # Make the total row bold
+                self.country_summary_tree.tag_configure('total', font=('TkDefaultFont', 9, 'bold'))
+            
+            # 7. Update Summary Fields with accumulated totals
+            # Use the totals we already calculated from country_summary
+            self.dividend_gross_var.set(f"{total_gross_sum:.2f} CZK")
+            self.dividend_tax_var.set(f"{total_tax_sum:.2f} CZK")
+            self.dividend_net_var.set(f"{total_net_sum:.2f} CZK")
 
         except ValueError as e:
             messagebox.showerror("Filter Error", f"Error parsing date: {e}. Check format (YYYY-MM-DD).")
