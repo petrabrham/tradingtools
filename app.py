@@ -1039,10 +1039,6 @@ class TradingToolsApp:
                     ))
             
             # 6. Populate country summary table
-            total_gross_sum = 0.0
-            total_tax_sum = 0.0
-            total_net_sum = 0.0
-            
             for country_code in sorted(country_summary.keys()):
                 data = country_summary[country_code]
                 gross = data['gross']
@@ -1059,30 +1055,69 @@ class TradingToolsApp:
                     f"{tax:.2f}",
                     f"{net:.2f}"
                 ))
-                
-                total_gross_sum += gross
-                total_tax_sum += tax
-                total_net_sum += net
             
             # Insert totals row if there's data
             if country_summary:
-                total_tax_rate = (total_tax_sum / total_gross_sum * 100) if total_gross_sum > 0 else 0.0
+                # Calculate totals for TOTAL row from country_summary
+                row_total_gross = sum(data['gross'] for data in country_summary.values())
+                row_total_tax = sum(data['tax'] for data in country_summary.values())
+                row_total_net = sum(data['net'] for data in country_summary.values())
+                row_total_tax_rate = (row_total_tax / row_total_gross * 100) if row_total_gross > 0 else 0.0
+                
                 self.country_summary_tree.insert('', tk.END, values=(
                     "TOTAL",
-                    f"{total_gross_sum:.2f}",
-                    f"{total_tax_rate:.2f}",
-                    f"{total_tax_sum:.2f}",
-                    f"{total_net_sum:.2f}"
+                    f"{row_total_gross:.2f}",
+                    f"{row_total_tax_rate:.2f}",
+                    f"{row_total_tax:.2f}",
+                    f"{row_total_net:.2f}"
                 ), tags=('total',))
                 
                 # Make the total row bold
                 self.country_summary_tree.tag_configure('total', font=('TkDefaultFont', 9, 'bold'))
             
-            # 7. Update Summary Fields with accumulated totals
-            # Use the totals we already calculated from country_summary
-            self.dividend_gross_var.set(f"{total_gross_sum:.2f} CZK")
-            self.dividend_tax_var.set(f"{total_tax_sum:.2f} CZK")
-            self.dividend_net_var.set(f"{total_net_sum:.2f} CZK")
+            # 7. Update Summary Fields using database aggregation
+            # Always get net total from database (most efficient)
+            _, _, db_total_net = self.db.dividends_repo.get_summary_by_date_range(start_ts, end_ts)
+            
+            if use_json_rates:
+                # JSON mode: Calculate gross and tax from aggregated net using weighted average rate
+                # We need to determine the overall effective rate from all countries
+                total_gross_sum = 0.0
+                total_tax_sum = 0.0
+                
+                # Get all ISINs to properly weight the calculation
+                for group in grouped_dividends:
+                    isin = group[1]
+                    country_code, _ = self.country_resolver.get_country(isin)
+                    
+                    # Get the net for this ISIN
+                    isin_net = group[6]
+                    
+                    if country_code and country_code != "XX":
+                        calculated_gross = self.tax_rates_loader.calculate_gross_from_net(isin_net, country_code)
+                        calculated_tax = self.tax_rates_loader.calculate_tax_from_net(isin_net, country_code)
+                        
+                        if calculated_gross is not None and calculated_tax is not None:
+                            total_gross_sum += calculated_gross
+                            total_tax_sum += calculated_tax
+                        else:
+                            # Fallback to CSV values
+                            total_gross_sum += group[4]
+                            total_tax_sum += group[5]
+                    else:
+                        # No country or unknown - use CSV values
+                        total_gross_sum += group[4]
+                        total_tax_sum += group[5]
+                
+                self.dividend_gross_var.set(f"{total_gross_sum:.2f} CZK")
+                self.dividend_tax_var.set(f"{total_tax_sum:.2f} CZK")
+                self.dividend_net_var.set(f"{db_total_net:.2f} CZK")
+            else:
+                # CSV mode: Get all totals from database aggregation
+                db_total_gross, db_total_tax, db_total_net = self.db.dividends_repo.get_summary_by_date_range(start_ts, end_ts)
+                self.dividend_gross_var.set(f"{db_total_gross:.2f} CZK")
+                self.dividend_tax_var.set(f"{db_total_tax:.2f} CZK")
+                self.dividend_net_var.set(f"{db_total_net:.2f} CZK")
 
         except ValueError as e:
             messagebox.showerror("Filter Error", f"Error parsing date: {e}. Check format (YYYY-MM-DD).")

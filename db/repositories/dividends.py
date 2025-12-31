@@ -186,5 +186,33 @@ class DividendsRepository(BaseRepository):
         )
         cur = self.execute(sql, (isin_id, start_timestamp, end_timestamp))
         return cur.fetchall()
+    
+    def get_summary_grouped_by_country(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
+        """Get dividend summary grouped by ISIN country within the given timestamp range.
+        
+        Extracts country code from the first 2 characters of ISIN and aggregates totals.
+        
+        Args:
+            start_timestamp: Start of range (inclusive)
+            end_timestamp: End of range (inclusive)
+            
+        Returns:
+            List of tuples: (country_code, total_gross_czk, total_tax_czk, total_net_czk)
+            Ordered by country_code
+        """
+        sql = (
+            "SELECT "
+            "UPPER(SUBSTR(s.isin, 1, 2)) as country_code, "
+            "COALESCE(SUM(d.gross_czk), 0.0) as total_gross, "
+            "COALESCE(SUM(d.withholding_tax_czk), 0.0) as total_tax, "
+            "COALESCE(SUM(d.net_czk), 0.0) as total_net "
+            "FROM dividends d "
+            "JOIN securities s ON d.isin_id = s.id "
+            "WHERE d.timestamp >= ? AND d.timestamp <= ? "
+            "GROUP BY country_code "
+            "ORDER BY country_code"
+        )
+        cur = self.execute(sql, (start_timestamp, end_timestamp))
+        return cur.fetchall()
         
     
