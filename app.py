@@ -524,7 +524,7 @@ class TradingToolsApp:
         treeview_frame.grid_rowconfigure(0, weight=1)
         
         # Create Treeview with tree structure visible (show='tree headings')
-        dividend_columns = ("Name", "Ticker", "Date", "Price per Share", "Gross Income (CZK)", "Withholding Tax (CZK)")
+        dividend_columns = ("Name", "Ticker", "Date", "Price per Share", "Gross Income (CZK)", "Withholding Tax (CZK)", "Net Income (CZK)")
         tree = ttk.Treeview(treeview_frame, columns=dividend_columns, show='tree headings')
         tree.grid(row=0, column=0, sticky='nsew')
 
@@ -552,6 +552,9 @@ class TradingToolsApp:
 
         tree.heading("Withholding Tax (CZK)", text="Withholding Tax (CZK)")
         tree.column("Withholding Tax (CZK)", anchor=tk.E, width=150)
+
+        tree.heading("Net Income (CZK)", text="Net Income (CZK)")
+        tree.column("Net Income (CZK)", anchor=tk.E, width=130)
 
         # Add scrollbars
         vsb = ttk.Scrollbar(treeview_frame, orient="vertical", command=tree.yview)
@@ -841,7 +844,7 @@ class TradingToolsApp:
             self.dividends_tree.delete(*self.dividends_tree.get_children())
             
             # 3. Fetch grouped summary data (parent rows)
-            # Data format: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk)
+            # Data format: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk, total_net_czk)
             grouped_dividends = self.db.dividends_repo.get_summary_grouped_by_isin(start_ts, end_ts)
             
             # 4. Build hierarchical tree structure
@@ -851,6 +854,7 @@ class TradingToolsApp:
                 ticker = group[2]
                 total_gross = group[4]
                 total_tax = group[5]
+                total_net = group[6]
                 
                 # Insert parent row (grouped by ISIN) - Date column is empty
                 parent_id = self.dividends_tree.insert('', tk.END, values=(
@@ -859,20 +863,22 @@ class TradingToolsApp:
                     "",  # Empty date for parent rows
                     "",  # Empty price per share for parent
                     f"{total_gross:.2f}",
-                    f"{total_tax:.2f}"
+                    f"{total_tax:.2f}",
+                    f"{total_net:.2f}"
                 ))
                 
                 # 5. Fetch individual dividend records for this ISIN (child rows)
                 # Data format: (id, timestamp, isin_id, number_of_shares, price_for_share,
-                #               currency_of_price, total_czk, withholding_tax_czk, isin, ticker, name)
+                #               currency_of_price, gross_czk, net_czk, withholding_tax_czk, isin, ticker, name)
                 detail_records = self.db.dividends_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
                 
                 for record in detail_records:
                     timestamp = record[1]
                     price_per_share = record[4]
                     currency_of_price = record[5]
-                    total_czk = record[6]
-                    withholding_tax_czk = record[7]
+                    gross_czk = record[6]
+                    net_czk = record[7]
+                    withholding_tax_czk = record[8]
 
                     # Convert timestamp to display string
                     dt_obj = self.db.timestamp_to_datetime(timestamp)
@@ -887,8 +893,9 @@ class TradingToolsApp:
                         "",  # Empty ticker for child rows
                         date_str,
                         price_str,
-                        f"{total_czk:.2f}",
-                        f"{withholding_tax_czk:.2f}"
+                        f"{gross_czk:.2f}",
+                        f"{withholding_tax_czk:.2f}",
+                        f"{net_czk:.2f}"
                     ))
             
             # 6. Update Summary Fields using separate query

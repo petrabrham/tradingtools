@@ -16,7 +16,8 @@ class DividendsRepository(BaseRepository):
             "number_of_shares REAL NOT NULL, "
             "price_for_share REAL NOT NULL, "
             "currency_of_price TEXT NOT NULL, "
-            "total_czk REAL NOT NULL, "
+            "gross_czk REAL NOT NULL, "
+            "net_czk REAL NOT NULL, "
             "withholding_tax_czk REAL NOT NULL, "
             "UNIQUE (timestamp, isin_id),"
             "FOREIGN KEY (isin_id) REFERENCES securities(id) ON DELETE RESTRICT"
@@ -34,7 +35,8 @@ class DividendsRepository(BaseRepository):
         number_of_shares: float,
         price_for_share: float,
         currency_of_price: str,
-        total_czk: float,
+        gross_czk: float,
+        net_czk: float,
         withholding_tax_czk: float
     ) -> int:
         """Insert a single dividend record.
@@ -45,7 +47,8 @@ class DividendsRepository(BaseRepository):
             number_of_shares: Number of shares for dividend
             price_for_share: Price per share in original currency
             currency_of_price: Currency code of price_for_share
-            total_czk: Total amount in CZK
+            gross_czk: Gross amount in CZK (before tax)
+            net_czk: Net amount in CZK (after tax)
             withholding_tax_czk: Withholding tax amount in CZK
             
         Raises:
@@ -54,19 +57,19 @@ class DividendsRepository(BaseRepository):
         """
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
-        if any(v < 0 for v in [number_of_shares, price_for_share, total_czk, withholding_tax_czk]):
+        if any(v < 0 for v in [number_of_shares, price_for_share, gross_czk, net_czk, withholding_tax_czk]):
             raise ValueError("Numeric dividend values must be non-negative")
 
         sql = (
             "INSERT OR IGNORE INTO dividends ("
             "timestamp, isin_id, number_of_shares, price_for_share, "
-            "currency_of_price, total_czk, withholding_tax_czk"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "currency_of_price, gross_czk, net_czk, withholding_tax_czk"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         
         cur = self.execute(sql, (
             timestamp, isin_id, number_of_shares, price_for_share,
-            currency_of_price, total_czk, withholding_tax_czk
+            currency_of_price, gross_czk, net_czk, withholding_tax_czk
         ))
         self.commit()
         return cur.lastrowid
@@ -122,9 +125,9 @@ class DividendsRepository(BaseRepository):
         """
         sql = (
             "SELECT "
-            "COALESCE(SUM(total_czk), 0.0) as total_gross, "
+            "COALESCE(SUM(gross_czk), 0.0) as total_gross, "
             "COALESCE(SUM(withholding_tax_czk), 0.0) as total_tax, "
-            "COALESCE(SUM(total_czk - withholding_tax_czk), 0.0) as total_net "
+            "COALESCE(SUM(net_czk), 0.0) as total_net "
             "FROM dividends "
             "WHERE timestamp >= ? AND timestamp <= ?"
         )
@@ -140,7 +143,7 @@ class DividendsRepository(BaseRepository):
             end_timestamp: End of range (inclusive)
             
         Returns:
-            List of tuples: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk)
+            List of tuples: (isin_id, isin, ticker, name, total_gross_czk, total_tax_czk, total_net_czk)
             Ordered by name
         """
         sql = (
@@ -149,8 +152,9 @@ class DividendsRepository(BaseRepository):
             "s.isin, "
             "s.ticker, "
             "s.name, "
-            "COALESCE(SUM(d.total_czk), 0.0) as total_gross, "
-            "COALESCE(SUM(d.withholding_tax_czk), 0.0) as total_tax "
+            "COALESCE(SUM(d.gross_czk), 0.0) as total_gross, "
+            "COALESCE(SUM(d.withholding_tax_czk), 0.0) as total_tax, "
+            "COALESCE(SUM(d.net_czk), 0.0) as total_net "
             "FROM dividends d "
             "JOIN securities s ON d.isin_id = s.id "
             "WHERE d.timestamp >= ? AND d.timestamp <= ? "
@@ -171,7 +175,7 @@ class DividendsRepository(BaseRepository):
         Returns:
             List of tuples with dividend records ordered by timestamp
             Format: (id, timestamp, isin_id, number_of_shares, price_for_share, 
-                     currency_of_price, total_czk, withholding_tax_czk, isin, ticker, name)
+                     currency_of_price, gross_czk, net_czk, withholding_tax_czk, isin, ticker, name)
         """
         sql = (
             "SELECT d.*, s.isin, s.ticker, s.name "

@@ -692,8 +692,9 @@ class DatabaseManager:
 
         # Convert currencies to CZK
         ts_dt = datetime.fromtimestamp(timestamp)
-        total_czk = total * self._rates.daily_rate(currency_of_total, ts_dt)
+        net_czk = total * self._rates.daily_rate(currency_of_total, ts_dt)
         withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, ts_dt)
+        gross_czk = net_czk + withholding_tax_czk
 
         # Get or create the security ID
         isin_id = self.get_or_create_securities_id(isin, ticker, name)
@@ -705,7 +706,8 @@ class DatabaseManager:
             number_of_shares=number_of_shares,
             price_for_share=price_for_share,
             currency_of_price=currency_of_price,
-            total_czk=total_czk,
+            gross_czk=gross_czk,
+            net_czk=net_czk,
             withholding_tax_czk=withholding_tax_czk
         )
         

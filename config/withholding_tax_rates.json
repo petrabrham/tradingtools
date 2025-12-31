@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Withholding tax rates by country with validity periods",
+  "metadata": {
+    "last_updated": "2025-12-31",
+    "source": "Czech Republic Double Taxation Treaties (DTT)",
+    "date_methodology": "The 'valid_from' dates represent the earliest confirmed validity period for these rates. Most rates have been in effect since before 2023-01-01 but this date is used as a conservative baseline. For precise treaty signing/implementation dates, refer to individual DTT documents. The 'valid_to' field is null for currently active rates.",
+    "notes": [
+      "Rates shown are for dividend withholding tax under Czech DTTs",
+      "Some treaties may have different rates based on ownership percentage",
+      "Russia: Treaty suspended as of September 29, 2023 (reciprocal to Russian suspension of August 11, 2023)",
+      "Belarus: Certain articles suspended June 1, 2024 through December 31, 2026",
+      "Rates verified against PWC Tax Summaries (last reviewed July 24, 2025)",
+      "Confirmed treaty effective dates: GB (1992-01-01), US (1993-01-01)"
+    ]
+  },
+  "rates": [
+    {
+      "country_code": "AU",
+      "country_name": "Australia",
+      "rate": 30.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "AT",
+      "country_name": "Austria",
+      "rate": 27.500,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "BE",
+      "country_name": "Belgium",
+      "rate": 30.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "RU",
+      "country_name": "Russia",
+      "rate": 15.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "GR",
+      "country_name": "Greece",
+      "rate": 5.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "DK",
+      "country_name": "Denmark",
+      "rate": 27.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "SG",
+      "country_name": "Singapore",
+      "rate": 0.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "FI",
+      "country_name": "Finland",
+      "rate": 30.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "SK",
+      "country_name": "Slovakia",
+      "rate": 7.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "FR",
+      "country_name": "France",
+      "rate": 25.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "ES",
+      "country_name": "Spain",
+      "rate": 19.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "HK",
+      "country_name": "Hong Kong",
+      "rate": 0.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "SE",
+      "country_name": "Sweden",
+      "rate": 30.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "IE",
+      "country_name": "Ireland",
+      "rate": 25.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "CH",
+      "country_name": "Switzerland",
+      "rate": 35.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "IT",
+      "country_name": "Italy",
+      "rate": 26.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "TR",
+      "country_name": "Turkey",
+      "rate": 15.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "JP",
+      "country_name": "Japan",
+      "rate": 15.315,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "US",
+      "country_name": "United States",
+      "rate": 15.000,
+      "valid_from": "1993-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "CA",
+      "country_name": "Canada",
+      "rate": 25.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "CN",
+      "country_name": "China",
+      "rate": 10.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "GB",
+      "country_name": "United Kingdom",
+      "rate": 0.000,
+      "valid_from": "1992-01-01",
+      "valid_to": null,
+      "note": "Originally UK-Czechoslovakia treaty effective 1992-01-01, modified by MLI from 2021-01-01 for withholding taxes"
+    },
+    {
+      "country_code": "LU",
+      "country_name": "Luxembourg",
+      "rate": 15.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "BG",
+      "country_name": "Bulgaria",
+      "rate": 5.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "HU",
+      "country_name": "Hungary",
+      "rate": 15.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "HR",
+      "country_name": "Croatia",
+      "rate": 10.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "DE",
+      "country_name": "Germany",
+      "rate": 26.375,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "IS",
+      "country_name": "Iceland",
+      "rate": 22.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "NL",
+      "country_name": "Netherlands",
+      "rate": 15.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "IL",
+      "country_name": "Israel",
+      "rate": 25.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "NO",
+      "country_name": "Norway",
+      "rate": 25.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "RO",
+      "country_name": "Romania",
+      "rate": 10.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "PL",
+      "country_name": "Poland",
+      "rate": 19.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "SI",
+      "country_name": "Slovenia",
+      "rate": 27.500,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "PT",
+      "country_name": "Portugal",
+      "rate": 35.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    },
+    {
+      "country_code": "RS",
+      "country_name": "Serbia",
+      "rate": 20.000,
+      "valid_from": "2023-01-01",
+      "valid_to": null
+    }
+  ]
+}
