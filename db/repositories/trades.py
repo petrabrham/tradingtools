@@ -189,7 +189,7 @@ class TradesRepository(BaseRepository):
                         remaining_to_sell = shares_to_sell
                         
                         while remaining_to_sell > 0 and len(buy_queue) > 0:
-                            buy_shares, buy_cost_per_share = buy_queue[0]
+                            buy_shares, buy_cost_per_share, _, _ = buy_queue[0]
                             
                             if buy_shares <= remaining_to_sell:
                                 # Consume entire buy position

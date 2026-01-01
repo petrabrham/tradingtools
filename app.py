@@ -97,6 +97,7 @@ class TradingToolsApp:
         file_menu.add_command(label="Release Database", command=self.release_database, state='disabled')
         file_menu.add_separator()
         file_menu.add_command(label="Import CSV", command=self.open_csv_file, state='disabled')
+        file_menu.add_command(label="Import Annual Exchange Rates...", command=self.import_annual_rates, state='disabled')
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -108,6 +109,12 @@ class TradingToolsApp:
             label="Calculate taxes from JSON config",
             variable=self.use_json_tax_rates,
             command=self.on_tax_calculation_method_changed
+        )
+        options_menu.add_separator()
+        # Exchange rate mode is read-only - displayed but not changeable
+        options_menu.add_command(
+            label="Exchange rate mode: (no database)",
+            state='disabled'
         )
         menubar.add_cascade(label="Options", menu=options_menu)
         
@@ -130,6 +137,21 @@ class TradingToolsApp:
     def on_tax_calculation_method_changed(self):
         """Handle change in tax calculation method - refresh dividends view."""
         self.update_dividends_view()
+    
+    def update_exchange_rate_display(self):
+        """Update the Options menu to show the current exchange rate mode (read-only)."""
+        if not self.options_menu or not self.db.conn:
+            return
+        
+        rate_mode = "Annual GFŘ" if self.db.use_annual_rates else "Daily CNB"
+        
+        # Find and update the exchange rate menu item (last item)
+        menu_index = self.options_menu.index('end')
+        self.options_menu.entryconfig(
+            menu_index,
+            label=f"Exchange rate mode: {rate_mode} (immutable)",
+            state='disabled'
+        )
 
     def copy_treeview_to_clipboard(self, event):
         """Copy selected treeview rows to clipboard as tab-separated values."""
@@ -178,11 +200,17 @@ class TradingToolsApp:
                     self.file_menu.entryconfig("Import CSV", state='normal')
                     self.file_menu.entryconfig("Save Database Copy As...", state='normal')
                     self.file_menu.entryconfig("Release Database", state='normal')
+                    # Annual rates import only available for databases using annual rates
+                    if self.db.use_annual_rates:
+                        self.file_menu.entryconfig("Import Annual Exchange Rates...", state='normal')
+                    else:
+                        self.file_menu.entryconfig("Import Annual Exchange Rates...", state='disabled')
                 else:
                     # No DB connected
                     self.file_menu.entryconfig("Import CSV", state='disabled')
                     self.file_menu.entryconfig("Save Database Copy As...", state='disabled')
                     self.file_menu.entryconfig("Release Database", state='disabled')
+                    self.file_menu.entryconfig("Import Annual Exchange Rates...", state='disabled')
             except Exception:
                 # fallback: do nothing if entryconfig fails
                 pass
@@ -228,6 +256,75 @@ class TradingToolsApp:
 
     def create_database(self):
         """Create a new SQLite database"""
+        # Ask user to choose exchange rate mode
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Exchange Rate Mode")
+        dialog.geometry("500x250")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {'mode': None}
+        
+        tk.Label(
+            dialog,
+            text="Choose Exchange Rate Calculation Method",
+            font=("Arial", 12, "bold")
+        ).pack(pady=10)
+        
+        tk.Label(
+            dialog,
+            text="This setting is permanent and cannot be changed after database creation.",
+            fg="red"
+        ).pack(pady=5)
+        
+        tk.Label(
+            dialog,
+            text="\nDaily CNB rates: Precise daily exchange rates from Czech National Bank\n"
+                 "Annual GFŘ rates: Unified yearly rates from General Financial Directorate\n\n"
+                 "Note: Both methods are compliant with Czech tax law.",
+            justify=tk.LEFT
+        ).pack(pady=10, padx=20)
+        
+        def on_choice(use_annual):
+            result['mode'] = use_annual
+            dialog.destroy()
+        
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        tk.Button(
+            button_frame,
+            text="Daily CNB Rates",
+            command=lambda: on_choice(False),
+            width=20,
+            bg="#4CAF50",
+            fg="white"
+        ).pack(side=tk.LEFT, padx=10)
+        
+        tk.Button(
+            button_frame,
+            text="Annual GFŘ Rates",
+            command=lambda: on_choice(True),
+            width=20,
+            bg="#2196F3",
+            fg="white"
+        ).pack(side=tk.LEFT, padx=10)
+        
+        self.root.wait_window(dialog)
+        
+        if result['mode'] is None:
+            return  # User closed dialog without choosing
+        
+        # Set the mode before creating database
+        self.db.use_annual_rates = result['mode']
+        
         file_path = filedialog.asksaveasfilename(
             defaultextension=".db",
             filetypes=[("SQLite Database", "*.db"), ("All files", "*.*")]
@@ -240,6 +337,9 @@ class TradingToolsApp:
                 self.update_menu_states()
                 self.update_views()
                 self.update_year_list()
+                
+                # Update UI to reflect loaded mode
+                self.update_exchange_rate_display()
             except Exception as e:
                 messagebox.showerror("Error", f"Error creating database: {str(e)}")
 
@@ -250,12 +350,15 @@ class TradingToolsApp:
         )
         if file_path:
             try:
-                # Delegate to DatabaseManager
+                # Delegate to DatabaseManager (which loads exchange rate mode)
                 self.db.open_database(file_path)
                 self.update_title()
                 self.update_menu_states()
                 self.update_views()
                 self.update_year_list()
+                
+                # Update UI to reflect loaded mode
+                self.update_exchange_rate_display()
             except Exception as e:
                 messagebox.showerror("Error", f"Error opening database: {str(e)}")
 
@@ -293,6 +396,134 @@ class TradingToolsApp:
                 self.update_views()
             except Exception as e:
                 messagebox.showerror("Error", f"Error saving database: {str(e)}")
+
+    def import_annual_rates(self):
+        """Import annual exchange rates from GFŘ text file"""
+        if not self.db.conn:
+            messagebox.showwarning("Warning", "Please create or open a database first!")
+            return
+        
+        if not self.db.use_annual_rates:
+            messagebox.showwarning(
+                "Warning", 
+                "This database uses daily CNB rates.\n\n"
+                "Annual exchange rates can only be imported into databases\n"
+                "configured for annual GFŘ rates."
+            )
+            return
+        
+        # Get available years
+        available_years = self.db.get_available_annual_rate_years()
+        
+        # Create dialog to select year
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Import Annual Exchange Rates")
+        dialog.geometry("450x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {'year': None, 'file_path': None}
+        
+        tk.Label(
+            dialog,
+            text="Select year and file to import",
+            font=("Arial", 11, "bold")
+        ).pack(pady=10)
+        
+        if available_years:
+            tk.Label(
+                dialog,
+                text=f"Available years: {', '.join(map(str, available_years))}",
+                fg="blue"
+            ).pack(pady=5)
+        
+        # Year entry
+        year_frame = tk.Frame(dialog)
+        year_frame.pack(pady=10)
+        
+        tk.Label(year_frame, text="Year:").pack(side=tk.LEFT, padx=5)
+        year_entry = tk.Entry(year_frame, width=10)
+        year_entry.insert(0, str(datetime.now().year))
+        year_entry.pack(side=tk.LEFT, padx=5)
+        
+        # File selection
+        file_frame = tk.Frame(dialog)
+        file_frame.pack(pady=10)
+        
+        tk.Label(file_frame, text="File:").pack(side=tk.LEFT, padx=5)
+        file_label = tk.Label(file_frame, text="No file selected", width=30, anchor='w', relief='sunken')
+        file_label.pack(side=tk.LEFT, padx=5)
+        
+        def browse_file():
+            file_path = filedialog.askopenfilename(
+                title="Select annual rates file",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            )
+            if file_path:
+                result['file_path'] = file_path
+                file_label.config(text=os.path.basename(file_path))
+        
+        tk.Button(file_frame, text="Browse...", command=browse_file).pack(side=tk.LEFT, padx=5)
+        
+        def on_import():
+            try:
+                year = int(year_entry.get())
+                if year < 1990 or year > 2100:
+                    messagebox.showerror("Error", "Invalid year. Please enter a year between 1990 and 2100.")
+                    return
+                result['year'] = year
+                
+                if not result.get('file_path'):
+                    messagebox.showerror("Error", "Please select a file to import.")
+                    return
+                
+                dialog.destroy()
+            except ValueError:
+                messagebox.showerror("Error", "Invalid year. Please enter a valid number.")
+        
+        def on_cancel():
+            result['year'] = None
+            result['file_path'] = None
+            dialog.destroy()
+        
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=15)
+        
+        tk.Button(button_frame, text="Import", command=on_import, width=10, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=10)
+        tk.Button(button_frame, text="Cancel", command=on_cancel, width=10).pack(side=tk.LEFT, padx=10)
+        
+        self.root.wait_window(dialog)
+        
+        if result.get('year') and result.get('file_path'):
+            try:
+                import_result = self.db.import_annual_rates_from_file(result['file_path'], result['year'])
+                
+                message = (
+                    f"Import completed for year {result['year']}:\n\n"
+                    f"Imported: {import_result['imported']} rates\n"
+                    f"Skipped: {import_result['skipped']} lines\n"
+                )
+                
+                if import_result['errors']:
+                    message += f"\nErrors: {len(import_result['errors'])}\n"
+                    message += "\nFirst errors:\n"
+                    for error in import_result['errors'][:5]:
+                        message += f"  {error}\n"
+                
+                if import_result['imported'] > 0:
+                    messagebox.showinfo("Import Successful", message)
+                else:
+                    messagebox.showwarning("Import Warning", message)
+                    
+            except Exception as e:
+                messagebox.showerror("Import Error", f"Error importing annual rates:\n\n{str(e)}")
 
     ###########################################################
     # Widgets

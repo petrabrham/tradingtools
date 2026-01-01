@@ -33,6 +33,7 @@ class DatabaseManager:
         self.conn: Optional[sqlite3.Connection] = None
         self.current_db_path: Optional[str] = None
         self._rates = cnb_rate()
+        self.use_annual_rates = False  # False = daily CNB rates, True = annual GFŘ rates
         self.logger = setup_logger('trading_tools.db')
         # repository instances (created when a connection exists)
         self.securities_repo: Optional[SecuritiesRepository] = None
@@ -69,6 +70,46 @@ class DatabaseManager:
         cur = self.conn.cursor()
         cur.execute(sql)
         self.conn.commit()
+    
+    def create_settings_table(self) -> None:
+        """Create the settings table to store database configuration."""
+        if not self.conn:
+            raise RuntimeError("No open database connection")
+            
+        sql = (
+            "CREATE TABLE IF NOT EXISTS settings ("
+            "key TEXT PRIMARY KEY, "
+            "value TEXT NOT NULL, "
+            "description TEXT"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        self.conn.commit()
+    
+    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        """Get a setting value from the database."""
+        if not self.conn:
+            return default
+            
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else default
+        except sqlite3.OperationalError:
+            # settings table doesn't exist yet
+            return default
+    
+    def set_setting(self, key: str, value: str, description: str = None) -> None:
+        """Set a setting value in the database."""
+        if not self.conn:
+            raise RuntimeError("No open database connection")
+            
+        sql = "INSERT OR REPLACE INTO settings (key, value, description) VALUES (?, ?, ?)"
+        cur = self.conn.cursor()
+        cur.execute(sql, (key, value, description))
+        self.conn.commit()
         
     def update_db_version(self, version: int, description: str) -> None:
         """Record a new database version."""
@@ -100,6 +141,16 @@ class DatabaseManager:
         
         # initialize database schema
         self.create_versions_table()
+        self.create_settings_table()
+        
+        # Store exchange rate mode setting
+        rate_mode = "annual" if self.use_annual_rates else "daily"
+        self.set_setting(
+            "exchange_rate_mode",
+            rate_mode,
+            "Exchange rate calculation method: 'daily' for CNB daily rates, 'annual' for GFŘ annual rates"
+        )
+        
         # instantiate repositories now that connection exists
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
@@ -111,11 +162,15 @@ class DatabaseManager:
         self.create_dividends_table()
         self.create_trades_table()
         
+        # Create annual rates table if using annual exchange rates
+        if self.use_annual_rates:
+            self.create_annual_rates_table()
+        
         # record initial version
         if self.get_db_version() == 0:
             self.update_db_version(
                 self.CURRENT_VERSION,
-                "Initial schema: versions, securities, and interests tables"
+                "Initial schema: versions, settings, securities, and interests tables"
             )
 
     def open_database(self, file_path: str) -> None:
@@ -123,7 +178,15 @@ class DatabaseManager:
         # close existing
         self.close()
         self.conn = sqlite3.connect(file_path)
+        self.conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
         self.current_db_path = file_path
+        self.logger.debug("Enabled foreign key constraints")
+        
+        # Load exchange rate mode from database
+        rate_mode = self.get_setting("exchange_rate_mode", "daily")
+        self.use_annual_rates = (rate_mode == "annual")
+        self.logger.info(f"Loaded exchange rate mode: {rate_mode}")
+        
         # instantiate repositories for the open connection
         self.securities_repo = SecuritiesRepository(self.conn, self.logger)
         self.interests_repo = InterestsRepository(self.conn, self.logger)
@@ -187,6 +250,39 @@ class DatabaseManager:
         except Exception:
             pass
         return sorted(years)
+
+    ###########################################################################
+    ## Exchange Rate Helper
+    ###########################################################################
+    def get_exchange_rate(self, currency: str, dt: datetime) -> float:
+        """Get exchange rate for currency at given datetime.
+        
+        Uses either daily CNB rates or annual GFŘ rates based on use_annual_rates setting.
+        For annual rates, validates that the rate exists in the database.
+        
+        Args:
+            currency: Three-letter currency code
+            dt: Datetime for the transaction
+            
+        Returns:
+            Exchange rate (CZK per 1 unit of currency)
+            
+        Raises:
+            ValueError: If annual rate is not found in database
+        """
+        if self.use_annual_rates:
+            # Use annual GFŘ rate from database
+            year = dt.year
+            rate = self.get_annual_rate_from_db(currency, year)
+            if rate is None:
+                raise ValueError(
+                    f"Annual exchange rate for {currency} in year {year} not found in database. "
+                    f"Please import exchange rates for year {year} before importing transactions."
+                )
+            return rate
+        else:
+            # Use daily CNB rate
+            return self._rates.daily_rate(currency, dt)
 
     ###########################################################################
     ## Importing DataFrames and managing tables
@@ -622,7 +718,8 @@ class DatabaseManager:
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
         
-        total_czk = total * self._rates.daily_rate(currency_of_total, datetime.fromtimestamp(timestamp))
+        dt = datetime.fromtimestamp(timestamp)
+        total_czk = total * self.get_exchange_rate(currency_of_total, dt)
         return self.interests_repo.insert(timestamp, type_, id_string, total_czk)
 
     @requires_connection
@@ -692,8 +789,8 @@ class DatabaseManager:
 
         # Convert currencies to CZK
         ts_dt = datetime.fromtimestamp(timestamp)
-        net_czk = total * self._rates.daily_rate(currency_of_total, ts_dt)
-        withholding_tax_czk = withholding_tax * self._rates.daily_rate(currency_of_withholding_tax, ts_dt)
+        net_czk = total * self.get_exchange_rate(currency_of_total, ts_dt)
+        withholding_tax_czk = withholding_tax * self.get_exchange_rate(currency_of_withholding_tax, ts_dt)
         gross_czk = net_czk + withholding_tax_czk
 
         # Get or create the security ID
@@ -757,10 +854,10 @@ class DatabaseManager:
 
         # calculate values to CZK
         dt = datetime.fromtimestamp(timestamp)
-        total_czk = total * self._rates.daily_rate(currency_of_total, dt)
-        stamp_tax_czk = stamp_tax * self._rates.daily_rate(currency_of_stamp_tax, dt)
-        conversion_fee_czk = conversion_fee * self._rates.daily_rate(currency_of_conversion_fee, dt)
-        french_transaction_tax_czk = french_transaction_tax * self._rates.daily_rate(currency_of_french_transaction_tax, dt)
+        total_czk = total * self.get_exchange_rate(currency_of_total, dt)
+        stamp_tax_czk = stamp_tax * self.get_exchange_rate(currency_of_stamp_tax, dt)
+        conversion_fee_czk = conversion_fee * self.get_exchange_rate(currency_of_conversion_fee, dt)
+        french_transaction_tax_czk = french_transaction_tax * self.get_exchange_rate(currency_of_french_transaction_tax, dt)
 
         # Delegate actual insert to repository which returns row id
         return self.trades_repo.insert(
@@ -776,6 +873,181 @@ class DatabaseManager:
             conversion_fee_czk=conversion_fee_czk,
             french_transaction_tax_czk=french_transaction_tax_czk,
         )
+
+    ###########################################################################
+    ## Annual Exchange Rates (for databases using annual GFŘ rates)
+    ###########################################################################
+
+    @requires_connection
+    def create_annual_rates_table(self) -> None:
+        """Create the `annual_rates` table for storing GFŘ unified annual rates.
+        
+        This table stores annual exchange rates (jednotný kurz) from GFŘ.
+        Each rate represents the arithmetic mean of daily CNB rates for the entire year.
+        """
+        sql = (
+            "CREATE TABLE IF NOT EXISTS annual_rates ("
+            "year INTEGER NOT NULL, "
+            "currency TEXT NOT NULL, "
+            "amount INTEGER NOT NULL, "
+            "rate REAL NOT NULL, "
+            "country TEXT, "
+            "PRIMARY KEY (year, currency)"
+            ")"
+        )
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        self.conn.commit()
+        self.logger.info("Created annual_rates table")
+
+    @requires_connection
+    def get_annual_rate_from_db(self, currency: str, year: int) -> Optional[float]:
+        """Get annual exchange rate from database.
+        
+        Args:
+            currency: Three-letter currency code
+            year: Year for the rate
+            
+        Returns:
+            Exchange rate (CZK per 1 unit of currency), or None if not found
+        """
+        sql = "SELECT rate, amount FROM annual_rates WHERE currency = ? AND year = ?"
+        cur = self.conn.cursor()
+        cur.execute(sql, (currency, year))
+        row = cur.fetchone()
+        if row:
+            rate, amount = row
+            # Return rate per 1 unit of currency
+            return rate / amount
+        return None
+
+    @requires_connection
+    def insert_annual_rate(self, year: int, currency: str, amount: int, rate: float, country: str = None) -> None:
+        """Insert or update annual exchange rate.
+        
+        Args:
+            year: Year for the rate
+            currency: Three-letter currency code
+            amount: Number of currency units (e.g., 1 for USD, 100 for JPY)
+            rate: Exchange rate in CZK for the specified amount
+            country: Optional country name
+        """
+        sql = "INSERT OR REPLACE INTO annual_rates (year, currency, amount, rate, country) VALUES (?, ?, ?, ?, ?)"
+        cur = self.conn.cursor()
+        cur.execute(sql, (year, currency, amount, rate, country))
+        self.conn.commit()
+        self.logger.debug(f"Inserted annual rate: {year} {currency} {amount}={rate} CZK")
+
+    @requires_connection
+    def get_all_annual_rates_for_year(self, year: int) -> List[Tuple[str, int, float, Optional[str]]]:
+        """Get all annual exchange rates for a specific year.
+        
+        Args:
+            year: Year to query
+            
+        Returns:
+            List of tuples: (currency, amount, rate, country)
+        """
+        sql = "SELECT currency, amount, rate, country FROM annual_rates WHERE year = ? ORDER BY currency"
+        cur = self.conn.cursor()
+        cur.execute(sql, (year,))
+        return cur.fetchall()
+
+    @requires_connection
+    def get_available_annual_rate_years(self) -> List[int]:
+        """Get list of years for which annual rates are available.
+        
+        Returns:
+            List of years, sorted ascending
+        """
+        sql = "SELECT DISTINCT year FROM annual_rates ORDER BY year"
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        return [row[0] for row in cur.fetchall()]
+
+    def import_annual_rates_from_file(self, file_path: str, year: int) -> Dict[str, object]:
+        """Import annual exchange rates from GFŘ text file.
+        
+        Expected format (both '.' and ',' work as decimal separator):
+        Austrálie dolar 1 AUD 15,31
+        Brazílie real 1 BRL 4,29
+        EMU euro 1 EUR 25,16
+        Japonsko jen 100 JPY 15,35
+        
+        Args:
+            file_path: Path to the text file
+            year: Year for these rates
+            
+        Returns:
+            Dict with import statistics: {'imported': int, 'skipped': int, 'errors': List[str]}
+        """
+        if not self.conn:
+            raise RuntimeError("No open database to import into")
+        
+        if not self.use_annual_rates:
+            raise RuntimeError("Cannot import annual rates into database configured for daily rates")
+        
+        self.logger.info(f"Importing annual rates from {file_path} for year {year}")
+        
+        imported = 0
+        skipped = 0
+        errors = []
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        # Parse line: "Country name amount CURRENCY rate"
+                        # Example: "Austrálie dolar 1 AUD 15,31"
+                        parts = line.split()
+                        if len(parts) < 3:
+                            errors.append(f"Line {line_num}: Invalid format (too few parts): {line}")
+                            skipped += 1
+                            continue
+                        
+                        # Currency code is the second-to-last part
+                        currency = parts[-2]
+                        
+                        # Rate is the last part (replace comma with dot)
+                        rate_str = parts[-1].replace(',', '.')
+                        rate = float(rate_str)
+                        
+                        # Amount is the third-to-last part
+                        amount = int(parts[-3])
+                        
+                        # Country name is everything before amount
+                        country = ' '.join(parts[:-3])
+                        
+                        # Insert into database
+                        self.insert_annual_rate(year, currency, amount, rate, country)
+                        imported += 1
+                        
+                    except ValueError as e:
+                        errors.append(f"Line {line_num}: Parse error: {e} - {line}")
+                        skipped += 1
+                    except Exception as e:
+                        errors.append(f"Line {line_num}: Unexpected error: {e} - {line}")
+                        skipped += 1
+        
+        except FileNotFoundError:
+            raise FileNotFoundError(f"File not found: {file_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error reading file: {e}")
+        
+        self.logger.info(f"Import complete: {imported} rates imported, {skipped} skipped")
+        if errors:
+            for error in errors[:10]:  # Log first 10 errors
+                self.logger.warning(error)
+        
+        return {
+            'imported': imported,
+            'skipped': skipped,
+            'errors': errors
+        }
 
     ###########################################################################
     ## Helper functions

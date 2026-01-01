@@ -613,3 +613,6 @@ Currency conversion,2025-12-22 05:19:58,,,,"500.00 CZK -> 24.07 USD",2RFPN45PN90
 Limit buy,2025-12-22 14:34:22,US1280302027,CALM,"Cal-Maine Foods",,EOF43759744791,0.2000000000,85.3800000000,USD,1.00000000,,"USD",17.08,"USD",,,,,,,,,,,,,,
 Dividend (Dividend),2025-12-26 12:27:12,US67066G1040,NVDA,"Nvidia",,,0.0827313000,0.008500,USD,14.22038077,,,0.01,"CZK",0.00,USD,,,,,,,,,,,,
 Dividend (Dividend),2025-12-30 15:03:39,US5398301094,LMT,"Lockheed Martin",,,0.1018918900,2.932500,USD,20.61593675,,,6.16,"CZK",0.05,USD,,,,,,,,,,,,
+Deposit,2025-12-31 09:15:25,,,,"Bank Transfer",e14ebe4a-e058-4225-a4ec-036526536bef,,,,,,,1000.00,"CZK",,,,,,,,,,,,,,
+Dividend (Dividend),2025-12-31 14:56:22,IE00B3XXRP09,VUSA,"Vanguard S&P 500 (Dist)",,,0.5705523500,0.222260,GBP,27.75785194,,,3.52,"CZK",-0.00,GBP,,,,,,,,,,,,
+Dividend (Dividend manufactured payment),2025-12-31 16:17:13,CA11276H1064,BIPC,"Brookfield Infrastructure",,,0.5101442100,0.430000,USD,20.65079543,,,4.53,"CZK",0.00,USD,,,,,,,,,,,,
