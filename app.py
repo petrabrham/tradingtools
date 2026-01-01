@@ -14,6 +14,8 @@ from views.trades_view import TradesView
 from views.interests_view import InterestsView
 from views.realized_income_view import RealizedIncomeView
 from views.dividends_view import DividendsView
+from dialogs.exchange_rate_dialog import ExchangeRateDialog
+from dialogs.import_rates_dialog import ImportRatesDialog
 
 class TradingToolsApp:
 
@@ -266,74 +268,15 @@ class TradingToolsApp:
 
     def create_database(self):
         """Create a new SQLite database"""
-        # Ask user to choose exchange rate mode
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Exchange Rate Mode")
-        dialog.geometry("500x250")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.grab_set()
+        # Ask user to choose exchange rate mode using dialog
+        rate_dialog = ExchangeRateDialog(self.root)
+        selected_mode = rate_dialog.show()
         
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        result = {'mode': None}
-        
-        tk.Label(
-            dialog,
-            text="Choose Exchange Rate Calculation Method",
-            font=("Arial", 12, "bold")
-        ).pack(pady=10)
-        
-        tk.Label(
-            dialog,
-            text="This setting is permanent and cannot be changed after database creation.",
-            fg="red"
-        ).pack(pady=5)
-        
-        tk.Label(
-            dialog,
-            text="\nDaily CNB rates: Precise daily exchange rates from Czech National Bank\n"
-                 "Annual GFŘ rates: Unified yearly rates from General Financial Directorate\n\n"
-                 "Note: Both methods are compliant with Czech tax law.",
-            justify=tk.LEFT
-        ).pack(pady=10, padx=20)
-        
-        def on_choice(use_annual):
-            result['mode'] = use_annual
-            dialog.destroy()
-        
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=20)
-        
-        tk.Button(
-            button_frame,
-            text="Daily CNB Rates",
-            command=lambda: on_choice(False),
-            width=20,
-            bg="#4CAF50",
-            fg="white"
-        ).pack(side=tk.LEFT, padx=10)
-        
-        tk.Button(
-            button_frame,
-            text="Annual GFŘ Rates",
-            command=lambda: on_choice(True),
-            width=20,
-            bg="#2196F3",
-            fg="white"
-        ).pack(side=tk.LEFT, padx=10)
-        
-        self.root.wait_window(dialog)
-        
-        if result['mode'] is None:
+        if selected_mode is None:
             return  # User closed dialog without choosing
         
         # Set the mode before creating database
-        self.db.use_annual_rates = result['mode']
+        self.db.use_annual_rates = selected_mode
         
         file_path = filedialog.asksaveasfilename(
             defaultextension=".db",
@@ -429,98 +372,16 @@ class TradingToolsApp:
         # Get available years
         available_years = self.db.get_available_annual_rate_years()
         
-        # Create dialog to select year
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Import Annual Exchange Rates")
-        dialog.geometry("450x200")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.grab_set()
+        # Show dialog
+        import_dialog = ImportRatesDialog(self.root, available_years)
+        year, file_path = import_dialog.show()
         
-        # Center the dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
-        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-        
-        result = {'year': None, 'file_path': None}
-        
-        tk.Label(
-            dialog,
-            text="Select year and file to import",
-            font=("Arial", 11, "bold")
-        ).pack(pady=10)
-        
-        if available_years:
-            tk.Label(
-                dialog,
-                text=f"Available years: {', '.join(map(str, available_years))}",
-                fg="blue"
-            ).pack(pady=5)
-        
-        # Year entry
-        year_frame = tk.Frame(dialog)
-        year_frame.pack(pady=10)
-        
-        tk.Label(year_frame, text="Year:").pack(side=tk.LEFT, padx=5)
-        year_entry = tk.Entry(year_frame, width=10)
-        year_entry.insert(0, str(datetime.now().year))
-        year_entry.pack(side=tk.LEFT, padx=5)
-        
-        # File selection
-        file_frame = tk.Frame(dialog)
-        file_frame.pack(pady=10)
-        
-        tk.Label(file_frame, text="File:").pack(side=tk.LEFT, padx=5)
-        file_label = tk.Label(file_frame, text="No file selected", width=30, anchor='w', relief='sunken')
-        file_label.pack(side=tk.LEFT, padx=5)
-        
-        def browse_file():
-            file_path = filedialog.askopenfilename(
-                title="Select annual rates file",
-                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-            )
-            if file_path:
-                result['file_path'] = file_path
-                file_label.config(text=os.path.basename(file_path))
-        
-        tk.Button(file_frame, text="Browse...", command=browse_file).pack(side=tk.LEFT, padx=5)
-        
-        def on_import():
+        if year and file_path:
             try:
-                year = int(year_entry.get())
-                if year < 1990 or year > 2100:
-                    messagebox.showerror("Error", "Invalid year. Please enter a year between 1990 and 2100.")
-                    return
-                result['year'] = year
-                
-                if not result.get('file_path'):
-                    messagebox.showerror("Error", "Please select a file to import.")
-                    return
-                
-                dialog.destroy()
-            except ValueError:
-                messagebox.showerror("Error", "Invalid year. Please enter a valid number.")
-        
-        def on_cancel():
-            result['year'] = None
-            result['file_path'] = None
-            dialog.destroy()
-        
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=15)
-        
-        tk.Button(button_frame, text="Import", command=on_import, width=10, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=10)
-        tk.Button(button_frame, text="Cancel", command=on_cancel, width=10).pack(side=tk.LEFT, padx=10)
-        
-        self.root.wait_window(dialog)
-        
-        if result.get('year') and result.get('file_path'):
-            try:
-                import_result = self.db.import_annual_rates_from_file(result['file_path'], result['year'])
+                import_result = self.db.import_annual_rates_from_file(file_path, year)
                 
                 message = (
-                    f"Import completed for year {result['year']}:\n\n"
+                    f"Import completed for year {year}:\n\n"
                     f"Imported: {import_result['imported']} rates\n"
                     f"Skipped: {import_result['skipped']} lines\n"
                 )
