@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from db.repositories.interests import InterestType
 from config.tax_rates_loader import TaxRatesLoader
 from config.country_resolver import CountryResolver
+from views.trades_view import TradesView
+from views.interests_view import InterestsView
 
 class TradingToolsApp:
 
@@ -61,6 +63,10 @@ class TradingToolsApp:
 
         # Year filter state (Combobox created in create_widgets)
         self.year_combobox = None
+
+        # Initialize views
+        self.trades_view = TradesView(self.db, self.root)
+        self.interests_view = InterestsView(self.db, self.root)
 
         self.create_widgets()
 
@@ -600,7 +606,7 @@ class TradingToolsApp:
         # --- 4. Tab 1: Trades View ---
         tab_trades = ttk.Frame(self.notebook)
         self.notebook.add(tab_trades, text="Trades")
-        self.create_trades_view(tab_trades)
+        self.trades_view.create_view(tab_trades)
 
         # --- 5. Tab 2: Dividends View ---
         tab_dividends = ttk.Frame(self.notebook)
@@ -610,113 +616,21 @@ class TradingToolsApp:
         # --- 5. Tab 3: Interests View ---
         tab_interests = ttk.Frame(self.notebook)
         self.notebook.add(tab_interests, text="Interests")
-        self.create_interests_view(tab_interests)
+        # Set summary variables before creating view
+        self.interests_view.set_summary_variables(
+            self.interest_on_cash_var,
+            self.share_lending_interest_var,
+            self.unknown_interest_var
+        )
+        self.interests_view.create_view(tab_interests)
 
         # --- 6. Tab 4: Realized Income View ---
         tab_realized = ttk.Frame(self.notebook)
         self.notebook.add(tab_realized, text="Realized Income")
         self.create_realized_income_view(tab_realized)
 
-    def create_trades_view(self, parent_frame: ttk.Frame):
-        """Create hierarchical trades Treeview with grouped parents and detailed child rows."""
-        # Layout
-        parent_frame.grid_columnconfigure(0, weight=1)
-        parent_frame.grid_rowconfigure(0, weight=1)
-
-        tree_frame = ttk.Frame(parent_frame)
-        tree_frame.grid(row=0, column=0, sticky="nsew")
-        tree_frame.grid_columnconfigure(0, weight=1)
-        tree_frame.grid_rowconfigure(0, weight=1)
-
-        columns = (
-            "Name",
-            "Ticker",
-            "Shares Before / To",
-            "Total Before / To (CZK)",
-            "Trade Type",
-            "Date",
-            "Shares",
-            "Price per Share",
-            "Total (CZK)",
-            "Stamp Tax (CZK)",
-            "Conversion Fee (CZK)",
-            "French Transaction Tax (CZK)",
-        )
-
-        tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings')
-        tree.grid(row=0, column=0, sticky='nsew')
-        self.trades_tree = tree
-
-        # Tree column for expand/collapse icons
-        tree.heading("#0", text="")
-        tree.column("#0", width=30, stretch=False)
-
-        # Headings
-        tree.heading("Name", text="Name")
-        tree.column("Name", anchor=tk.W, width=200)
-
-        tree.heading("Ticker", text="Ticker")
-        tree.column("Ticker", anchor=tk.W, width=40)
-
-        tree.heading("Shares Before / To", text="Shares Before / To")
-        tree.column("Shares Before / To", anchor=tk.E, width=120)
-
-        tree.heading("Total Before / To (CZK)", text="Total Before / To (CZK)")
-        tree.column("Total Before / To (CZK)", anchor=tk.E, width=150)
-
-        tree.heading("Trade Type", text="Trade Type")
-        tree.column("Trade Type", anchor=tk.W, width=90)
-
-        tree.heading("Date", text="Date")
-        tree.column("Date", anchor=tk.W, width=110)
-
-        tree.heading("Shares", text="Shares")
-        tree.column("Shares", anchor=tk.E, width=90)
-
-        tree.heading("Price per Share", text="Price per Share")
-        tree.column("Price per Share", anchor=tk.E, width=120)
-
-        tree.heading("Total (CZK)", text="Total (CZK)")
-        tree.column("Total (CZK)", anchor=tk.E, width=110)
-
-        tree.heading("Stamp Tax (CZK)", text="Stamp Tax (CZK)")
-        tree.column("Stamp Tax (CZK)", anchor=tk.E, width=130)
-
-        tree.heading("Conversion Fee (CZK)", text="Conversion Fee (CZK)")
-        tree.column("Conversion Fee (CZK)", anchor=tk.E, width=150)
-
-        tree.heading("French Transaction Tax (CZK)", text="French Transaction Tax (CZK)")
-        tree.column("French Transaction Tax (CZK)", anchor=tk.E, width=200)
-
-        # Scrollbars
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        vsb.grid(row=0, column=1, sticky='ns')
-        tree.configure(yscrollcommand=vsb.set)
-
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
-        hsb.grid(row=1, column=0, sticky='ew')
-        tree.configure(xscrollcommand=hsb.set)
-
-        # Configure tags for coloring BUY and SELL rows
-        tree.tag_configure('buy', foreground='green')
-        tree.tag_configure('sell', foreground='red')
-
-        # Bind Ctrl+C for clipboard copy
-        tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
-        tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
-
     def update_trades_view(self):
         """Populate the trades tree with grouped parents and detailed child trades."""
-        if not hasattr(self, 'trades_tree') or self.trades_tree is None:
-            return
-        tree = self.trades_tree
-        # Clear
-        for item in tree.get_children():
-            tree.delete(item)
-
-        if not self.db or not self.db.conn:
-            return
-
         # Parse date range
         date_from_str = self.date_from_var.get().strip()
         date_to_str = self.date_to_var.get().strip()
@@ -727,73 +641,9 @@ class TradingToolsApp:
             # If parsing fails, attempt to load everything
             start_ts = 0
             end_ts = int(datetime.now().timestamp())
-
-        try:
-            # Get all ISINs that have trades in the filter period with aggregated sums
-            parents = self.db.trades_repo.get_summary_grouped_by_isin(start_ts, end_ts)
-            
-            for parent in parents:
-                isin_id, name, ticker, filter_shares, filter_total_czk, filter_stamp_tax, filter_conversion_fee, filter_french_tax = parent
-                parent_iid = f"tr_parent_{isin_id}"
-                
-                # Get cumulative totals before filter start (up to start_ts - 1)
-                shares_before, total_before = self.db.trades_repo.get_cumulative_totals_by_isin(isin_id, start_ts - 1)
-                
-                # Get cumulative totals up to filter end
-                shares_to, total_to = self.db.trades_repo.get_cumulative_totals_by_isin(isin_id, end_ts)
-                
-                # Insert parent row with calculated values
-                tree.insert("", tk.END, iid=parent_iid, text="", values=(
-                    name or "",
-                    ticker or "",
-                    f"{shares_before:.4f} / {shares_to:.4f}",
-                    f"{total_before:.2f} / {total_to:.2f}",
-                    "",  # Trade Type (empty for parent)
-                    "",  # Date (empty for parent)
-                    f"{filter_shares:.4f}",
-                    "",  # Price per Share (empty for parent)
-                    f"{filter_total_czk:.2f}",
-                    f"{filter_stamp_tax:.2f}",
-                    f"{filter_conversion_fee:.2f}",
-                    f"{filter_french_tax:.2f}"
-                ))
-
-                # Child trades for this ISIN within range
-                filter_trades = self.db.trades_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
-                for r in filter_trades:
-                    # Indices based on trades table layout
-                    ts = r[1]
-                    trade_type_val = r[4]
-                    num_shares = r[5]
-                    price_per_share = r[6]
-                    currency_of_price = r[7]
-                    total_czk = r[8]
-                    stamp_tax_czk = r[9]
-                    conversion_fee_czk = r[10]
-                    french_tax_czk = r[11]
-
-                    dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
-                    trade_type_str = "BUY" if int(trade_type_val) == 1 else ("SELL" if int(trade_type_val) == 2 else "?")
-                    
-                    # Determine tag for coloring
-                    tag = 'buy' if int(trade_type_val) == 1 else ('sell' if int(trade_type_val) == 2 else '')
-
-                    tree.insert(parent_iid, tk.END, tags=(tag,), values=(
-                        "",  # Name
-                        "",  # Ticker
-                        "",  # Shares Before / To
-                        "",  # Total Before / To (CZK)
-                        trade_type_str,
-                        dt_str,
-                        f"{num_shares:.7f}",
-                        f"{price_per_share:.2f} {currency_of_price}",
-                        f"{total_czk:.2f}",
-                        f"{stamp_tax_czk:.2f}",
-                        f"{conversion_fee_czk:.2f}",
-                        f"{french_tax_czk:.2f}"
-                    ))
-        except Exception as e:
-            messagebox.showerror("Database Error", f"Error loading trades: {e}")
+        
+        # Delegate to the TradesView
+        self.trades_view.update_view(start_ts, end_ts)
 
     # Backward-compatible alias for requested name with typos
     def update_trases_wiew(self):
@@ -920,45 +770,6 @@ class TradingToolsApp:
         ttk.Entry(summary_frame, textvariable=self.dividend_tax_var, state='readonly', width=15, justify='right').grid(row=1, column=2, padx=5, pady=5, sticky="ew")
         ttk.Entry(summary_frame, textvariable=self.dividend_net_var, state='readonly', width=15, justify='right').grid(row=1, column=3, padx=5, pady=5, sticky="ew")
 
-    def create_interests_view(self, parent_frame: ttk.Frame):
-        """Creates a view for interests data, split horizontally into Treeview and Summary."""
-
-        parent_frame.grid_columnconfigure(0, weight=1)
-        parent_frame.grid_rowconfigure(0, weight=1) # Treeview (expands) 
-        parent_frame.grid_rowconfigure(1, weight=0) # Summary Panel (fixed height)
-
-        # --- Top Part: Treeview for Interests (Row 0) ---
-        treeview_frame = ttk.Frame(parent_frame)
-        treeview_frame.grid(row=0, column=0, sticky="nsew")
-        
-        interest_columns = ("Date Time", "Type", "Total (CZK)")
-        self.create_treeview(treeview_frame, "interests_tree", interest_columns)
-        
-        # Set specific column widths for the interests table
-        self.interests_tree.column("Date Time", anchor=tk.W, width=150)
-        self.interests_tree.column("Type", anchor=tk.W, width=120)
-        self.interests_tree.column("Total (CZK)", anchor=tk.E, width=100)
-
-        # --- Bottom Part: Summary Panel (Row 1) ---
-        summary_frame = ttk.LabelFrame(parent_frame, text="Interests Summary")
-        summary_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0), padx=2)
-        
-        # Configure grid for summary frame (columns needed for 2 labels and 2 fields)
-        summary_frame.grid_columnconfigure(0, weight=1) # Label column
-        summary_frame.grid_columnconfigure(1, weight=1) # Entry column (align right)
-
-        # Interest on Cash
-        ttk.Label(summary_frame, text="Interest on cash:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        ttk.Entry(summary_frame, textvariable=self.interest_on_cash_var, state='readonly', width=20, justify='right').grid(row=0, column=1, padx=(0, 10), pady=5, sticky="e")
-
-        # Share Lending Interest
-        ttk.Label(summary_frame, text="Share lending interest:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        ttk.Entry(summary_frame, textvariable=self.share_lending_interest_var, state='readonly', width=20, justify='right').grid(row=1, column=1, padx=(0, 10), pady=5, sticky="e")
-
-        # Unknown Interest
-        ttk.Label(summary_frame, text="Unknown interest:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        ttk.Entry(summary_frame, textvariable=self.unknown_interest_var, state='readonly', width=20, justify='right').grid(row=2, column=1, padx=(0, 10), pady=5, sticky="e")
-
     def create_realized_income_view(self, parent_frame: ttk.Frame):
         """Create view for realized income with FIFO calculation results."""
         parent_frame.grid_columnconfigure(0, weight=1)
@@ -1078,72 +889,23 @@ class TradingToolsApp:
     ###########################################################
 
     def update_interests_view(self):
-        """
-        Fetches interests data from the DB based on current date filters 
-        and updates the Treeview and Summary fields.
-        """
-        # Ensure DB connection exists and repository is initialized
-        if not self.db.conn or not self.db.interests_repo:
-            self.interests_tree.delete(*self.interests_tree.get_children())
-            self.interest_on_cash_var.set("0.00 CZK")
-            self.share_lending_interest_var.set("0.00 CZK")
-            self.unknown_interest_var.set("0.00 CZK")
-            return
-
+        """Update the interests view with current filter dates."""
         date_from_str = self.date_from_var.get()
         date_to_str = self.date_to_var.get()
         
         try:
-            # 1. Convert date strings to Unix timestamps for DB query
-            # Note: We append time to ensure the full date range is covered
             start_dt_str = f"{date_from_str} 00:00:00"
             end_dt_str = f"{date_to_str} 23:59:59"
             
             start_ts = self.db.timestr_to_timestamp(start_dt_str)
             end_ts = self.db.timestr_to_timestamp(end_dt_str)
-            
-            # 2. Fetch data from repository
-            # Data format: (id, timestamp, type, id_string, total_czk)
-            interest_records = self.db.interests_repo.get_by_date_range(start_ts, end_ts)
-            
-            # 3. Process and display data
-            self.interests_tree.delete(*self.interests_tree.get_children())
-
-            for _, timestamp, type_int, _, total_czk in interest_records:
-                # Convert timestamp back to display string
-                dt_obj = self.db.timestamp_to_datetime(timestamp)
-                timestamp_str = dt_obj.strftime("%d.%m.%Y %H:%M:%S")
-                
-                # Convert integer type back to human-readable string
-                interest_type = InterestType(type_int)
-                type_str = ""
-                if interest_type == InterestType.CASH_INTEREST:
-                    type_str = "Interest on cash"
-                elif interest_type == InterestType.LENDING_INTEREST:
-                    type_str = "Share lending interest"
-                else:
-                    type_str = "Unknown"
-
-                # Insert into Treeview
-                self.interests_tree.insert('', tk.END, values=(
-                    timestamp_str,
-                    type_str,
-                    f"{total_czk:.2f}"
-                ))
-            
-            # 4. Update Summary Fields
-            summary = self.db.interests_repo.get_total_interest_by_type(start_ts, end_ts)
-            total_cash_interest = summary.get(InterestType.CASH_INTEREST, 0.0)
-            self.interest_on_cash_var.set(f"{total_cash_interest:.2f} CZK")
-            total_share_lending = summary.get(InterestType.LENDING_INTEREST, 0.0)
-            self.share_lending_interest_var.set(f"{total_share_lending:.2f} CZK")
-            total_unknown = summary.get(InterestType.UNKNOWN, 0.0)
-            self.unknown_interest_var.set(f"{total_unknown:.2f} CZK")
-
-        except ValueError as e:
-            messagebox.showerror("Chyba filtru", f"Chyba při parsování data: {e}. Zkontrolujte formát (YYYY-MM-DD).")
-        except Exception as e:
-            messagebox.showerror("Chyba databáze", f"Chyba při načítání úroků z databáze: {e}")
+        except Exception:
+            # If parsing fails, attempt to load everything
+            start_ts = 0
+            end_ts = int(datetime.now().timestamp())
+        
+        # Delegate to the InterestsView
+        self.interests_view.update_view(start_ts, end_ts)
 
     def update_dividends_view(self):
         """
