@@ -8,5 +8,6 @@ from .base_view import BaseView
 from .trades_view import TradesView
 from .interests_view import InterestsView
 from .realized_income_view import RealizedIncomeView
+from .dividends_view import DividendsView
 
-__all__ = ['BaseView', 'TradesView', 'InterestsView', 'RealizedIncomeView']
+__all__ = ['BaseView', 'TradesView', 'InterestsView', 'RealizedIncomeView', 'DividendsView']

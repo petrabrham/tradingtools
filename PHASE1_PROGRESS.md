@@ -137,6 +137,80 @@
 **Target after Phase 1:** ~850 lines (needs ~222 more line reduction)
 
 **Remaining:** DividendsView extraction (~240 lines estimated)
+
+---
+
+## Completed: DividendsView Extraction
+
+### What Was Done
+
+1. **Created DividendsView Class**
+   - Created `views/dividends_view.py` (430 lines)
+   - Extracted `create_dividends_view()` → `DividendsView.create_view()`
+   - Extracted `update_dividends_view()` → `DividendsView.update_view()`
+   - Implemented summary variable management via `set_summary_variables()`
+   - Integrated tax calculation modes (JSON vs CSV)
+   - Maintained country summary functionality
+
+2. **Integrated DividendsView into App**
+   - Added import: `from views.dividends_view import DividendsView`
+   - Initialized DividendsView in `__init__`: `self.dividends_view = DividendsView(self.db, self.root, self.tax_rates_loader, self.country_resolver, self.use_json_tax_rates)`
+   - Set summary variables before creating view
+   - Modified `create_widgets()` to use `self.dividends_view.create_view(tab_dividends)`
+   - Simplified `update_dividends_view()` to delegate to DividendsView
+
+### Results
+
+**Line Count Reduction:**
+- **After RealizedIncomeView:** 1,072 lines
+- **After DividendsView:** 763 lines
+- **Reduction:** 309 lines (20.0%)
+
+**Code Organization:**
+- ✅ DividendsView is now self-contained in its own module
+- ✅ Summary variables properly managed (gross, tax, net)
+- ✅ Country summary table functionality preserved
+- ✅ Tax calculation modes (JSON/CSV) working correctly
+- ✅ All functionality preserved and working
+
+### Files Changed
+
+1. **New Files:**
+   - `views/dividends_view.py`
+
+2. **Modified Files:**
+   - `app.py` (reduced by 309 lines)
+   - `views/__init__.py` (added DividendsView export)
+
+---
+
+## Phase 1 Complete! 🎉
+
+**Final Results:**
+- **Original:** 1,548 lines
+- **Final:** 763 lines
+- **Total Reduction:** 785 lines (50.7%)
+
+**View Extractions:**
+1. TradesView: -158 lines (10.2%)
+2. InterestsView: -80 lines (5.2%)
+3. RealizedIncomeView: -238 lines (15.4%)
+4. DividendsView: -309 lines (20.0%)
+
+**Created Modules:**
+- `views/base_view.py` (92 lines) - Abstract base class
+- `views/trades_view.py` (225 lines) - Trades display
+- `views/interests_view.py` (175 lines) - Interest income display
+- `views/realized_income_view.py` (215 lines) - FIFO P&L calculations
+- `views/dividends_view.py` (430 lines) - Dividend income with country summary
+
+**Benefits Achieved:**
+- ✅ Much more maintainable codebase
+- ✅ Clear separation of concerns
+- ✅ Reusable BaseView pattern
+- ✅ All functionality preserved
+- ✅ Application tested and working
+- ✅ Exceeded target reduction (850 lines → achieved 763 lines)
 - **Reduction:** 80 lines (5.8%)
 - **Total Reduction from Original:** 238 lines (15.4%)
 
