@@ -101,10 +101,18 @@ class TradesRepository(BaseRepository):
         return cur.fetchall()
 
     def get_summary_grouped_by_isin(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
-        """Return summary rows grouped by ISIN with total shares, ordered by security name."""
+        """Return summary rows grouped by ISIN with aggregated values for the date range.
+        
+        Returns tuple: (isin_id, name, ticker, total_shares, total_czk, stamp_tax_czk, 
+                       conversion_fee_czk, french_transaction_tax_czk)
+        """
         sql = (
             "SELECT s.id AS isin_id, s.name, s.ticker, "
-            "COALESCE(SUM(t.number_of_shares), 0.0) AS total_shares "
+            "COALESCE(SUM(t.number_of_shares), 0.0) AS total_shares, "
+            "COALESCE(SUM(t.total_czk), 0.0) AS total_czk, "
+            "COALESCE(SUM(t.stamp_tax_czk), 0.0) AS stamp_tax_czk, "
+            "COALESCE(SUM(t.conversion_fee_czk), 0.0) AS conversion_fee_czk, "
+            "COALESCE(SUM(t.french_transaction_tax_czk), 0.0) AS french_transaction_tax_czk "
             "FROM trades t "
             "JOIN securities s ON t.isin_id = s.id "
             "WHERE t.timestamp >= ? AND t.timestamp <= ? "
@@ -113,6 +121,22 @@ class TradesRepository(BaseRepository):
         )
         cur = self.execute(sql, (start_timestamp, end_timestamp))
         return cur.fetchall()
+
+    def get_cumulative_totals_by_isin(self, isin_id: int, up_to_timestamp: int) -> Tuple[float, float]:
+        """Return cumulative shares and total_czk for a specific ISIN up to a given timestamp.
+        
+        Returns tuple: (cumulative_shares, cumulative_total_czk)
+        """
+        sql = (
+            "SELECT "
+            "COALESCE(SUM(number_of_shares), 0.0) AS cumulative_shares, "
+            "COALESCE(SUM(total_czk), 0.0) AS cumulative_total_czk "
+            "FROM trades "
+            "WHERE isin_id = ? AND timestamp <= ? "
+        )
+        cur = self.execute(sql, (isin_id, up_to_timestamp))
+        result = cur.fetchone()
+        return result if result else (0.0, 0.0)
 
     def calculate_realized_income(self, start_timestamp: int, end_timestamp: int) -> List[dict]:
         """
@@ -128,9 +152,12 @@ class TradesRepository(BaseRepository):
             "SELECT DISTINCT s.id, s.name, s.ticker "
             "FROM trades t "
             "JOIN securities s ON t.isin_id = s.id "
+            "WHERE t.trade_type = ? "
+            "AND t.timestamp >= ? "
+            "AND t.timestamp <= ? "
             "ORDER BY s.name COLLATE NOCASE"
         )
-        cur = self.execute(sql_isins)
+        cur = self.execute(sql_isins, (TradeType.SELL, start_timestamp, end_timestamp))
         isins = cur.fetchall()
         
         results = []

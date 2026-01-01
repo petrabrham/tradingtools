@@ -335,8 +335,10 @@ class TradingToolsApp:
                 self.db.create_database(file_path)
                 self.update_title()
                 self.update_menu_states()
-                self.update_views()
                 self.update_year_list()
+                self.init_date_filters_from_db()
+                self.update_filters()
+                self.update_views()
                 
                 # Update UI to reflect loaded mode
                 self.update_exchange_rate_display()
@@ -354,8 +356,10 @@ class TradingToolsApp:
                 self.db.open_database(file_path)
                 self.update_title()
                 self.update_menu_states()
-                self.update_views()
                 self.update_year_list()
+                self.init_date_filters_from_db()
+                self.update_filters()
+                self.update_views()
                 
                 # Update UI to reflect loaded mode
                 self.update_exchange_rate_display()
@@ -627,7 +631,8 @@ class TradingToolsApp:
         columns = (
             "Name",
             "Ticker",
-            "Sum of Shares",
+            "Shares Before / To",
+            "Total Before / To (CZK)",
             "Trade Type",
             "Date",
             "Shares",
@@ -651,10 +656,13 @@ class TradingToolsApp:
         tree.column("Name", anchor=tk.W, width=200)
 
         tree.heading("Ticker", text="Ticker")
-        tree.column("Ticker", anchor=tk.W, width=100)
+        tree.column("Ticker", anchor=tk.W, width=40)
 
-        tree.heading("Sum of Shares", text="Sum of Shares")
-        tree.column("Sum of Shares", anchor=tk.E, width=120)
+        tree.heading("Shares Before / To", text="Shares Before / To")
+        tree.column("Shares Before / To", anchor=tk.E, width=120)
+
+        tree.heading("Total Before / To (CZK)", text="Total Before / To (CZK)")
+        tree.column("Total Before / To (CZK)", anchor=tk.E, width=150)
 
         tree.heading("Trade Type", text="Trade Type")
         tree.column("Trade Type", anchor=tk.W, width=90)
@@ -689,6 +697,10 @@ class TradingToolsApp:
         hsb.grid(row=1, column=0, sticky='ew')
         tree.configure(xscrollcommand=hsb.set)
 
+        # Configure tags for coloring BUY and SELL rows
+        tree.tag_configure('buy', foreground='green')
+        tree.tag_configure('sell', foreground='red')
+
         # Bind Ctrl+C for clipboard copy
         tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
         tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
@@ -717,26 +729,44 @@ class TradingToolsApp:
             end_ts = int(datetime.now().timestamp())
 
         try:
-            # Parent rows: grouped by ISIN with sum of shares
+            # Get all ISINs that have trades in the filter period with aggregated sums
             parents = self.db.trades_repo.get_summary_grouped_by_isin(start_ts, end_ts)
+            
             for parent in parents:
-                isin_id, name, ticker, total_shares = parent
+                isin_id, name, ticker, filter_shares, filter_total_czk, filter_stamp_tax, filter_conversion_fee, filter_french_tax = parent
                 parent_iid = f"tr_parent_{isin_id}"
+                
+                # Get cumulative totals before filter start (up to start_ts - 1)
+                shares_before, total_before = self.db.trades_repo.get_cumulative_totals_by_isin(isin_id, start_ts - 1)
+                
+                # Get cumulative totals up to filter end
+                shares_to, total_to = self.db.trades_repo.get_cumulative_totals_by_isin(isin_id, end_ts)
+                
+                # Insert parent row with calculated values
                 tree.insert("", tk.END, iid=parent_iid, text="", values=(
                     name or "",
                     ticker or "",
-                    f"{total_shares:.4f}",
-                    "", "", "", "", "", "", "", ""
+                    f"{shares_before:.4f} / {shares_to:.4f}",
+                    f"{total_before:.2f} / {total_to:.2f}",
+                    "",  # Trade Type (empty for parent)
+                    "",  # Date (empty for parent)
+                    f"{filter_shares:.4f}",
+                    "",  # Price per Share (empty for parent)
+                    f"{filter_total_czk:.2f}",
+                    f"{filter_stamp_tax:.2f}",
+                    f"{filter_conversion_fee:.2f}",
+                    f"{filter_french_tax:.2f}"
                 ))
 
                 # Child trades for this ISIN within range
-                rows = self.db.trades_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
-                for r in rows:
+                filter_trades = self.db.trades_repo.get_by_isin_and_date_range(isin_id, start_ts, end_ts)
+                for r in filter_trades:
                     # Indices based on trades table layout
                     ts = r[1]
                     trade_type_val = r[4]
                     num_shares = r[5]
                     price_per_share = r[6]
+                    currency_of_price = r[7]
                     total_czk = r[8]
                     stamp_tax_czk = r[9]
                     conversion_fee_czk = r[10]
@@ -744,15 +774,19 @@ class TradingToolsApp:
 
                     dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
                     trade_type_str = "BUY" if int(trade_type_val) == 1 else ("SELL" if int(trade_type_val) == 2 else "?")
+                    
+                    # Determine tag for coloring
+                    tag = 'buy' if int(trade_type_val) == 1 else ('sell' if int(trade_type_val) == 2 else '')
 
-                    tree.insert(parent_iid, tk.END, values=(
+                    tree.insert(parent_iid, tk.END, tags=(tag,), values=(
                         "",  # Name
                         "",  # Ticker
-                        "",  # Sum of Shares
+                        "",  # Shares Before / To
+                        "",  # Total Before / To (CZK)
                         trade_type_str,
                         dt_str,
-                        f"{num_shares:.4f}",
-                        f"{price_per_share:.4f}",
+                        f"{num_shares:.7f}",
+                        f"{price_per_share:.2f} {currency_of_price}",
                         f"{total_czk:.2f}",
                         f"{stamp_tax_czk:.2f}",
                         f"{conversion_fee_czk:.2f}",
@@ -1478,6 +1512,16 @@ class TradingToolsApp:
             if self.year_combobox:
                 self.year_combobox.configure(values=[])
                 self.year_combobox.set('')
+
+    def init_date_filters_from_db(self):
+        """Initialize date filters to the first available year from the database."""
+        if not self.db.conn or not self.year_combobox:
+            return
+        year_str = self.year_combobox.get()
+        if year_str:
+            year = int(year_str)
+            self.date_from_var.set(f"{year}-01-01")
+            self.date_to_var.set(f"{year}-12-31")
 
     ###########################################################
     # Widgets command handlers
