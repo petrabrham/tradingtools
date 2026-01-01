@@ -16,7 +16,7 @@ from views.realized_income_view import RealizedIncomeView
 from views.dividends_view import DividendsView
 from dialogs.exchange_rate_dialog import ExchangeRateDialog
 from dialogs.import_rates_dialog import ImportRatesDialog
-from ui.menu_manager import MenuManager
+from ui import MenuManager, FilterManager, copy_treeview_to_clipboard
 
 class TradingToolsApp:
 
@@ -72,12 +72,15 @@ class TradingToolsApp:
         self.realized_view = RealizedIncomeView(self.db, self.root)
         self.dividends_view = DividendsView(self.db, self.root, self.tax_rates_loader, self.country_resolver, self.use_json_tax_rates)
 
+        # Filter manager
+        self.filter_manager = FilterManager(self)
+
         self.create_widgets()
 
         # Initial state update
         self.menu_manager.update_states(self.db)
         self.update_title()
-        self.update_filters()
+        self.filter_manager.update_filters()
         self.update_views()
 
     ###########################################################
@@ -95,61 +98,9 @@ class TradingToolsApp:
     ###########################################################
     # Menu
     ###########################################################
-    def on_year_selected(self, event):
-        if not self.year_combobox:
-            return
-        year_str = self.year_combobox.get()
-        if not year_str:
-            return
-        year = int(year_str)
-        # Set date_from_var and date_to_var to first and last day of year
-        date_from = f"{year}-01-01"
-        date_to = f"{year}-12-31"
-        self.date_from_var.set(date_from)
-        self.date_to_var.set(date_to)
-        self.update_views()
-    
     def on_tax_calculation_method_changed(self):
         """Handle change in tax calculation method - refresh dividends view."""
         self.update_dividends_view()
-
-    def copy_treeview_to_clipboard(self, event):
-        """Copy selected treeview rows to clipboard as tab-separated values."""
-        widget = event.widget
-        if not isinstance(widget, ttk.Treeview):
-            return
-        
-        # Get selected items
-        selection = widget.selection()
-        if not selection:
-            return
-        
-        # Build clipboard content
-        lines = []
-        
-        # Add header row
-        columns = widget['columns']
-        if columns:
-            # Include tree column if visible
-            if widget['show'] == 'tree headings':
-                header = [''] + [widget.heading(col)['text'] for col in columns]
-            else:
-                header = [widget.heading(col)['text'] for col in columns]
-            lines.append('\t'.join(header))
-        
-        # Add data rows
-        for item_id in selection:
-            values = widget.item(item_id)['values']
-            if values:
-                lines.append('\t'.join(str(v) for v in values))
-        
-        # Copy to clipboard
-        clipboard_text = '\n'.join(lines)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(clipboard_text)
-        
-        # Show confirmation (optional)
-        print(f"Copied {len(selection)} row(s) to clipboard")
 
     ###########################################################
     # Menu Command Handlers
@@ -171,7 +122,7 @@ class TradingToolsApp:
 
                 # Use DatabaseManager to import DataFrame
                 meta = self.db.import_dataframe(df)
-                self.update_year_list()
+                self.filter_manager.update_year_list()
             except Exception as e:
                 messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")
 
@@ -212,9 +163,9 @@ class TradingToolsApp:
                 self.db.create_database(file_path)
                 self.update_title()
                 self.menu_manager.update_states(self.db)
-                self.update_year_list()
-                self.init_date_filters_from_db()
-                self.update_filters()
+                self.filter_manager.update_year_list()
+                self.filter_manager.init_date_filters_from_db()
+                self.filter_manager.update_filters()
                 self.update_views()
                 
                 # Update UI to reflect loaded mode
@@ -233,9 +184,9 @@ class TradingToolsApp:
                 self.db.open_database(file_path)
                 self.update_title()
                 self.menu_manager.update_states(self.db)
-                self.update_year_list()
-                self.init_date_filters_from_db()
-                self.update_filters()
+                self.filter_manager.update_year_list()
+                self.filter_manager.init_date_filters_from_db()
+                self.filter_manager.update_filters()
                 self.update_views()
                 
                 # Update UI to reflect loaded mode
@@ -254,7 +205,7 @@ class TradingToolsApp:
             self.update_title()
             self.menu_manager.update_states(self.db)
             self.update_views()
-            self.update_year_list()
+            self.filter_manager.update_year_list()
         except Exception as e:
             messagebox.showerror("Error", f"Error releasing database: {str(e)}")
 
@@ -361,7 +312,7 @@ class TradingToolsApp:
         ttk.Label(top_frame, text="Year:").grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
         self.year_combobox = ttk.Combobox(top_frame, state='readonly', width=10)
         self.year_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.year_combobox.bind("<<ComboboxSelected>>", self.on_year_selected)
+        self.year_combobox.bind("<<ComboboxSelected>>", self.filter_manager.on_year_selected)
 
         ttk.Label(top_frame, text="  ").grid(row=0, column=2) # Spacer
 
@@ -476,8 +427,8 @@ class TradingToolsApp:
         tree.configure(xscrollcommand=hsb.set)
 
         # Bind Ctrl+C for clipboard copy
-        tree.bind("<Control-c>", self.copy_treeview_to_clipboard)
-        tree.bind("<Control-C>", self.copy_treeview_to_clipboard)
+        tree.bind("<Control-c>", lambda e: copy_treeview_to_clipboard(e, self.root))
+        tree.bind("<Control-C>", lambda e: copy_treeview_to_clipboard(e, self.root))
 
     ###########################################################
     # Data Update Logic
@@ -526,13 +477,6 @@ class TradingToolsApp:
         # Delegate to the DividendsView
         self.dividends_view.update_view(start_ts, end_ts)
 
-    def update_filters(self):
-        """Update filter variables based on current widget states."""
-        # Currently, date_from_var and date_to_var are directly linked to Entry widgets
-        # If additional processing is needed, it can be done here
-
-        pass
-
     def update_realized_income_view(self):
         """
         Calculate and display realized income using FIFO matching.
@@ -558,34 +502,6 @@ class TradingToolsApp:
         self.update_dividends_view()
         self.update_trades_view()
         self.update_realized_income_view()
-
-    def update_year_list(self):
-        """Update the year combobox with years from all tables in the DB."""
-        if not self.db.conn:
-            if self.year_combobox:
-                self.year_combobox.configure(values=[])
-                self.year_combobox.set('')
-            return
-        try:
-            years = self.db.get_all_years_with_data()
-            year_strings = [str(y) for y in years]
-            self.year_combobox.configure(values=year_strings)
-            if year_strings:
-                self.year_combobox.set(year_strings[0])  # Select first year by default
-        except Exception:
-            if self.year_combobox:
-                self.year_combobox.configure(values=[])
-                self.year_combobox.set('')
-
-    def init_date_filters_from_db(self):
-        """Initialize date filters to the first available year from the database."""
-        if not self.db.conn or not self.year_combobox:
-            return
-        year_str = self.year_combobox.get()
-        if year_str:
-            year = int(year_str)
-            self.date_from_var.set(f"{year}-01-01")
-            self.date_to_var.set(f"{year}-12-31")
 
     ###########################################################
     # Widgets command handlers
