@@ -16,6 +16,7 @@ from views.realized_income_view import RealizedIncomeView
 from views.dividends_view import DividendsView
 from dialogs.exchange_rate_dialog import ExchangeRateDialog
 from dialogs.import_rates_dialog import ImportRatesDialog
+from ui.menu_manager import MenuManager
 
 class TradingToolsApp:
 
@@ -36,12 +37,9 @@ class TradingToolsApp:
         # Tax calculation method: True = use JSON rates, False = use CSV values
         self.use_json_tax_rates = tk.BooleanVar(value=True)
 
-        # Menu container reference (used to enable/disable items)
-        self.file_menu = None
-        self.options_menu = None
-
-        # Create menu
-        self.create_menu()
+        # Menu manager
+        self.menu_manager = MenuManager(self.root, self)
+        self.menu_manager.create_menu()
 
         # Variables for date filters
         now = datetime.now()
@@ -77,7 +75,7 @@ class TradingToolsApp:
         self.create_widgets()
 
         # Initial state update
-        self.update_menu_states()
+        self.menu_manager.update_states(self.db)
         self.update_title()
         self.update_filters()
         self.update_views()
@@ -97,41 +95,6 @@ class TradingToolsApp:
     ###########################################################
     # Menu
     ###########################################################
-    def create_menu(self):
-        menubar = tk.Menu(self.root)
-        
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        self.file_menu = file_menu
-        file_menu.add_command(label="New Database", command=self.create_database)
-        file_menu.add_command(label="Connect Database", command=self.open_database)
-        file_menu.add_command(label="Save Database Copy As...", command=self.save_database_as, state='disabled')
-        file_menu.add_command(label="Release Database", command=self.release_database, state='disabled')
-        file_menu.add_separator()
-        file_menu.add_command(label="Import CSV", command=self.open_csv_file, state='disabled')
-        file_menu.add_command(label="Import Annual Exchange Rates...", command=self.import_annual_rates, state='disabled')
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
-        
-        # Options menu
-        options_menu = tk.Menu(menubar, tearoff=0)
-        self.options_menu = options_menu
-        options_menu.add_checkbutton(
-            label="Calculate taxes from JSON config",
-            variable=self.use_json_tax_rates,
-            command=self.on_tax_calculation_method_changed
-        )
-        options_menu.add_separator()
-        # Exchange rate mode is read-only - displayed but not changeable
-        options_menu.add_command(
-            label="Exchange rate mode: (no database)",
-            state='disabled'
-        )
-        menubar.add_cascade(label="Options", menu=options_menu)
-        
-        self.root.config(menu=menubar)
-
     def on_year_selected(self, event):
         if not self.year_combobox:
             return
@@ -149,21 +112,6 @@ class TradingToolsApp:
     def on_tax_calculation_method_changed(self):
         """Handle change in tax calculation method - refresh dividends view."""
         self.update_dividends_view()
-    
-    def update_exchange_rate_display(self):
-        """Update the Options menu to show the current exchange rate mode (read-only)."""
-        if not self.options_menu or not self.db.conn:
-            return
-        
-        rate_mode = "Annual GFŘ" if self.db.use_annual_rates else "Daily CNB"
-        
-        # Find and update the exchange rate menu item (last item)
-        menu_index = self.options_menu.index('end')
-        self.options_menu.entryconfig(
-            menu_index,
-            label=f"Exchange rate mode: {rate_mode} (immutable)",
-            state='disabled'
-        )
 
     def copy_treeview_to_clipboard(self, event):
         """Copy selected treeview rows to clipboard as tab-separated values."""
@@ -202,30 +150,6 @@ class TradingToolsApp:
         
         # Show confirmation (optional)
         print(f"Copied {len(selection)} row(s) to clipboard")
-
-    def update_menu_states(self):
-        """Update menu items states based on database connection"""
-        if self.file_menu:
-            try:
-                if self.db.conn:
-                    # DB is connected
-                    self.file_menu.entryconfig("Import CSV", state='normal')
-                    self.file_menu.entryconfig("Save Database Copy As...", state='normal')
-                    self.file_menu.entryconfig("Release Database", state='normal')
-                    # Annual rates import only available for databases using annual rates
-                    if self.db.use_annual_rates:
-                        self.file_menu.entryconfig("Import Annual Exchange Rates...", state='normal')
-                    else:
-                        self.file_menu.entryconfig("Import Annual Exchange Rates...", state='disabled')
-                else:
-                    # No DB connected
-                    self.file_menu.entryconfig("Import CSV", state='disabled')
-                    self.file_menu.entryconfig("Save Database Copy As...", state='disabled')
-                    self.file_menu.entryconfig("Release Database", state='disabled')
-                    self.file_menu.entryconfig("Import Annual Exchange Rates...", state='disabled')
-            except Exception:
-                # fallback: do nothing if entryconfig fails
-                pass
 
     ###########################################################
     # Menu Command Handlers
@@ -287,14 +211,14 @@ class TradingToolsApp:
                 # Delegate to DatabaseManager
                 self.db.create_database(file_path)
                 self.update_title()
-                self.update_menu_states()
+                self.menu_manager.update_states(self.db)
                 self.update_year_list()
                 self.init_date_filters_from_db()
                 self.update_filters()
                 self.update_views()
                 
                 # Update UI to reflect loaded mode
-                self.update_exchange_rate_display()
+                self.menu_manager.update_exchange_rate_display(self.db)
             except Exception as e:
                 messagebox.showerror("Error", f"Error creating database: {str(e)}")
 
@@ -308,14 +232,14 @@ class TradingToolsApp:
                 # Delegate to DatabaseManager (which loads exchange rate mode)
                 self.db.open_database(file_path)
                 self.update_title()
-                self.update_menu_states()
+                self.menu_manager.update_states(self.db)
                 self.update_year_list()
                 self.init_date_filters_from_db()
                 self.update_filters()
                 self.update_views()
                 
                 # Update UI to reflect loaded mode
-                self.update_exchange_rate_display()
+                self.menu_manager.update_exchange_rate_display(self.db)
             except Exception as e:
                 messagebox.showerror("Error", f"Error opening database: {str(e)}")
 
@@ -328,7 +252,7 @@ class TradingToolsApp:
         try:
             self.db.release_database()
             self.update_title()
-            self.update_menu_states()
+            self.menu_manager.update_states(self.db)
             self.update_views()
             self.update_year_list()
         except Exception as e:
@@ -349,7 +273,7 @@ class TradingToolsApp:
                 # Delegate to DatabaseManager
                 self.db.save_database_as(file_path)
                 self.update_title()
-                self.update_menu_states()
+                self.menu_manager.update_states(self.db)
                 self.update_views()
             except Exception as e:
                 messagebox.showerror("Error", f"Error saving database: {str(e)}")
