@@ -68,6 +68,75 @@
 **Line Count Reduction:**
 - **After TradesView:** 1,390 lines
 - **After InterestsView:** 1,310 lines
+- **Reduction:** 80 lines (5.2%)
+
+**Code Organization:**
+- ✅ InterestsView is now self-contained in its own module
+- ✅ Summary variables properly managed
+- ✅ All functionality preserved and working
+
+### Files Changed
+
+1. **New Files:**
+   - `views/interests_view.py`
+
+2. **Modified Files:**
+   - `app.py` (reduced by 80 lines)
+   - `views/__init__.py` (added InterestsView export)
+
+---
+
+## Completed: RealizedIncomeView Extraction
+
+### What Was Done
+
+1. **Created RealizedIncomeView Class**
+   - Created `views/realized_income_view.py` (215 lines)
+   - Extracted `create_realized_income_view()` → `RealizedIncomeView.create_view()`
+   - Extracted `update_realized_income_view()` → `RealizedIncomeView.update_view()`
+   - Implemented summary variable management via `set_summary_variables()`
+
+2. **Integrated RealizedIncomeView into App**
+   - Added import: `from views.realized_income_view import RealizedIncomeView`
+   - Initialized RealizedIncomeView in `__init__`: `self.realized_view = RealizedIncomeView(self.db, self.root)`
+   - Set summary variables before creating view
+   - Modified `create_widgets()` to use `self.realized_view.create_view(tab_realized)`
+   - Simplified `update_realized_income_view()` to delegate to RealizedIncomeView
+
+### Results
+
+**Line Count Reduction:**
+- **After InterestsView:** 1,310 lines
+- **After RealizedIncomeView:** 1,072 lines
+- **Reduction:** 238 lines (15.4%)
+
+**Code Organization:**
+- ✅ RealizedIncomeView is now self-contained in its own module
+- ✅ Summary variables properly managed (P&L, buy cost, sell proceeds, unrealized shares)
+- ✅ FIFO calculation functionality preserved and working
+
+### Files Changed
+
+1. **New Files:**
+   - `views/realized_income_view.py`
+
+2. **Modified Files:**
+   - `app.py` (reduced by 238 lines)
+   - `views/__init__.py` (added RealizedIncomeView export)
+
+---
+
+## Summary So Far
+
+**Total Reduction:** 476 lines (30.7% of original 1,548 lines)
+- TradesView: -158 lines
+- InterestsView: -80 lines  
+- RealizedIncomeView: -238 lines
+
+**Current:** 1,072 lines
+**Target after Phase 1:** ~850 lines (needs ~222 more line reduction)
+
+**Remaining:** DividendsView extraction (~240 lines estimated)
 - **Reduction:** 80 lines (5.8%)
 - **Total Reduction from Original:** 238 lines (15.4%)
 
