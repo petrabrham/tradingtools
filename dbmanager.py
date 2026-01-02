@@ -12,6 +12,7 @@ from db.repositories.securities import SecuritiesRepository
 from db.repositories.interests import InterestsRepository, InterestType
 from db.repositories.dividends import DividendsRepository
 from db.repositories.trades import TradesRepository, TradeType
+from db.repositories.pairings import PairingsRepository
 from db.decorators import requires_connection, requires_repo
 
 
@@ -40,6 +41,7 @@ class DatabaseManager:
         self.interests_repo: Optional[InterestsRepository] = None
         self.dividends_repo: Optional[DividendsRepository] = None
         self.trades_repo: Optional[TradesRepository] = None
+        self.pairings_repo: Optional[PairingsRepository] = None
         
     def get_db_version(self) -> int:
         """Get the current database schema version."""
@@ -156,11 +158,13 @@ class DatabaseManager:
         self.interests_repo = InterestsRepository(self.conn, self.logger)
         self.dividends_repo = DividendsRepository(self.conn, self.logger)
         self.trades_repo = TradesRepository(self.conn, self.logger)
+        self.pairings_repo = PairingsRepository(self.conn, self.logger)
         # create tables through repositories
         self.create_securities_table()
         self.create_interests_table()
         self.create_dividends_table()
         self.create_trades_table()
+        self.create_pairings_table()
         
         # Create annual rates table if using annual exchange rates
         if self.use_annual_rates:
@@ -192,6 +196,7 @@ class DatabaseManager:
         self.interests_repo = InterestsRepository(self.conn, self.logger)
         self.dividends_repo = DividendsRepository(self.conn, self.logger)
         self.trades_repo = TradesRepository(self.conn, self.logger)
+        self.pairings_repo = PairingsRepository(self.conn, self.logger)
         
         # Check version compatibility
         db_version = self.get_db_version()
@@ -817,6 +822,12 @@ class DatabaseManager:
     def create_trades_table(self) -> None:
         """Create the `trades` table if it does not exist (delegates to repository)."""
         self.trades_repo.create_table()
+
+    @requires_connection
+    @requires_repo('pairings_repo')
+    def create_pairings_table(self) -> None:
+        """Create the `pairings` table if it does not exist (delegates to repository)."""
+        self.pairings_repo.create_table()
 
     @requires_connection
     @requires_repo('trades_repo')
