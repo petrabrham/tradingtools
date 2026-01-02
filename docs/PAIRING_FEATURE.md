@@ -763,9 +763,9 @@ For Czech tax compliance, maintain:
 
 ### Phase 2: Core Matching Logic (Week 2)
 - [x] Implement FIFO method
-- [ ] Implement LIFO method
-- [ ] Implement MaxLose method
-- [ ] Implement MaxProfit method
+- [x] Implement LIFO method
+- [x] Implement MaxLose method
+- [x] Implement MaxProfit method
 - [ ] **Implement TimeTest filter logic (lot filtering by 3+ year holding)** ⭐
 - [ ] **Implement two-pass pairing: TimeTest-filtered + Fallback method** ⭐
 - [ ] Add holding period calculation (purchase to sale date)

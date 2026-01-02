@@ -818,3 +818,86 @@ class PairingsRepository(BaseRepository):
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
         return self._apply_pairing_method(sale_trade_id, 'FIFO', 't.timestamp ASC')
+
+    def apply_lifo(self, sale_trade_id: int) -> Dict:
+        """Apply LIFO (Last-In-First-Out) method to pair a sale with purchases.
+        
+        LIFO matches the newest available purchase lots first. This method
+        is useful for minimizing short-term capital gains in certain tax situations.
+        
+        Note: If the sale already has pairings, this method will only pair the
+        remaining unpaired quantity. To replace existing pairings, delete them
+        first using delete_pairing() before calling this method.
+        
+        Args:
+            sale_trade_id: ID of the sale trade to pair
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'pairings_created': int,
+                'total_quantity_paired': float,
+                'error': Optional[str]
+            }
+            
+        Raises:
+            ValueError: If sale trade doesn't exist or isn't a SELL transaction
+        """
+        return self._apply_pairing_method(sale_trade_id, 'LIFO', 't.timestamp DESC')
+
+    def apply_max_lose(self, sale_trade_id: int) -> Dict:
+        """Apply MaxLose method to pair a sale with purchases.
+        
+        MaxLose matches lots with the highest cost basis first, which minimizes
+        taxable gains (or maximizes losses). This is optimal for tax minimization
+        when you want to defer tax liability.
+        
+        Note: If the sale already has pairings, this method will only pair the
+        remaining unpaired quantity. To replace existing pairings, delete them
+        first using delete_pairing() before calling this method.
+        
+        Args:
+            sale_trade_id: ID of the sale trade to pair
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'pairings_created': int,
+                'total_quantity_paired': float,
+                'error': Optional[str]
+            }
+            
+        Raises:
+            ValueError: If sale trade doesn't exist or isn't a SELL transaction
+        """
+        return self._apply_pairing_method(sale_trade_id, 'MaxLose', 't.price_for_share DESC')
+
+    def apply_max_profit(self, sale_trade_id: int) -> Dict:
+        """Apply MaxProfit method to pair a sale with purchases.
+        
+        MaxProfit matches lots with the lowest cost basis first, which maximizes
+        taxable gains. This can be useful when you want to realize gains at a
+        lower tax rate or when you have loss carryforwards to offset.
+        
+        Note: If the sale already has pairings, this method will only pair the
+        remaining unpaired quantity. To replace existing pairings, delete them
+        first using delete_pairing() before calling this method.
+        
+        Args:
+            sale_trade_id: ID of the sale trade to pair
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'pairings_created': int,
+                'total_quantity_paired': float,
+                'error': Optional[str]
+            }
+            
+        Raises:
+            ValueError: If sale trade doesn't exist or isn't a SELL transaction
+        """
+        return self._apply_pairing_method(sale_trade_id, 'MaxProfit', 't.price_for_share ASC')

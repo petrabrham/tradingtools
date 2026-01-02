@@ -1377,6 +1377,267 @@ class TestRemainingQuantityTracking(TestPairingsRepository):
         self.assertEqual(self._get_remaining_quantity(sale_big_id), 0.0)
 
 
+class TestLIFOMethod(TestPairingsRepository):
+    """Test LIFO (Last-In-First-Out) pairing method."""
+    
+    def setUp(self):
+        """Set up test data for LIFO testing."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create purchases at different times and prices (same as FIFO tests)
+        # Purchase 1: Oldest, cheapest
+        self.purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 1, 15).timestamp()), 100.0, 50.0, TradeType.BUY
+        )
+        # Purchase 2: Middle
+        self.purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 3, 20).timestamp()), 150.0, 40.0, TradeType.BUY
+        )
+        # Purchase 3: Newest, most expensive
+        self.purchase3_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 6, 10).timestamp()), 200.0, 60.0, TradeType.BUY
+        )
+        
+        # Create sale
+        self.sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 100.0, TradeType.SELL
+        )
+    
+    def test_lifo_simple_full_match(self):
+        """Test LIFO with exact match of newest lot."""
+        # Create small sale matching newest purchase
+        small_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 60.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_lifo(small_sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 1)
+        self.assertEqual(result['total_quantity_paired'], 60.0)
+        
+        pairings = self.repo.get_pairings_for_sale(small_sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase3_id)  # Newest
+        self.assertEqual(pairings[0]['method'], 'LIFO')
+    
+    def test_lifo_multiple_purchases(self):
+        """Test LIFO spanning multiple purchases (newest to oldest)."""
+        result = self.repo.apply_lifo(self.sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 2)
+        self.assertEqual(result['total_quantity_paired'], 100.0)
+        
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        self.assertEqual(len(pairings), 2)
+        
+        # LIFO: P3(60) + P2(40) = 100
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase3_id)
+        self.assertEqual(pairings[0]['quantity'], 60.0)
+        
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 40.0)
+    
+    def test_lifo_partial_lot_matching(self):
+        """Test LIFO with partial use of lots."""
+        # Sell 70 shares
+        sale_70 = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 70.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_lifo(sale_70)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 2)
+        self.assertEqual(result['total_quantity_paired'], 70.0)
+        
+        pairings = self.repo.get_pairings_for_sale(sale_70)
+        
+        # LIFO: P3(60) + partial P2(10)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase3_id)
+        self.assertEqual(pairings[0]['quantity'], 60.0)
+        
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 10.0)
+    
+    def test_lifo_order_opposite_of_fifo(self):
+        """Test that LIFO pairs in reverse order compared to FIFO."""
+        result_lifo = self.repo.apply_lifo(self.sale_id)
+        pairings_lifo = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # LIFO should use newest first
+        self.assertEqual(pairings_lifo[0]['purchase_trade_id'], self.purchase3_id)
+    
+    def test_lifo_no_available_purchases(self):
+        """Test LIFO when no purchases exist before sale."""
+        early_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2023, 1, 1).timestamp()), 180.0, 50.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_lifo(early_sale_id)
+        
+        self.assertFalse(result['success'])
+        self.assertIn('No available purchase lots', result['error'])
+
+
+class TestMaxLoseMethod(TestPairingsRepository):
+    """Test MaxLose (Highest Cost First) pairing method."""
+    
+    def setUp(self):
+        """Set up test data for MaxLose testing."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create purchases at different prices
+        # Purchase 1: Cheapest
+        self.purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 1, 15).timestamp()), 100.0, 50.0, TradeType.BUY
+        )
+        # Purchase 2: Medium price
+        self.purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 3, 20).timestamp()), 150.0, 40.0, TradeType.BUY
+        )
+        # Purchase 3: Most expensive
+        self.purchase3_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 6, 10).timestamp()), 200.0, 60.0, TradeType.BUY
+        )
+        
+        # Create sale
+        self.sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 100.0, TradeType.SELL
+        )
+    
+    def test_maxlose_simple_full_match(self):
+        """Test MaxLose with exact match of most expensive lot."""
+        small_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 60.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_max_lose(small_sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 1)
+        self.assertEqual(result['total_quantity_paired'], 60.0)
+        
+        pairings = self.repo.get_pairings_for_sale(small_sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase3_id)  # Most expensive
+        self.assertEqual(pairings[0]['method'], 'MaxLose')
+    
+    def test_maxlose_multiple_purchases(self):
+        """Test MaxLose spanning multiple purchases (highest price first)."""
+        result = self.repo.apply_max_lose(self.sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 2)
+        self.assertEqual(result['total_quantity_paired'], 100.0)
+        
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # MaxLose: P3($200, 60) + P2($150, 40) = 100
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase3_id)
+        self.assertEqual(pairings[0]['quantity'], 60.0)
+        
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 40.0)
+    
+    def test_maxlose_minimizes_gain(self):
+        """Test that MaxLose minimizes gain by using expensive lots."""
+        result = self.repo.apply_max_lose(self.sale_id)
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # MaxLose uses: 60*200 + 40*150 = 12,000 + 6,000 = 18,000
+        cost_basis = sum(p['purchase_price'] * p['quantity'] for p in pairings)
+        sale_proceeds = 180.0 * 100.0  # 18,000
+        gain = sale_proceeds - cost_basis
+        
+        self.assertEqual(cost_basis, 18000.0)
+        self.assertEqual(gain, 0.0)  # Break-even
+
+
+class TestMaxProfitMethod(TestPairingsRepository):
+    """Test MaxProfit (Lowest Cost First) pairing method."""
+    
+    def setUp(self):
+        """Set up test data for MaxProfit testing."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create purchases at different prices
+        # Purchase 1: Cheapest (should be used first)
+        self.purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 1, 15).timestamp()), 100.0, 50.0, TradeType.BUY
+        )
+        # Purchase 2: Medium price
+        self.purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 3, 20).timestamp()), 150.0, 40.0, TradeType.BUY
+        )
+        # Purchase 3: Most expensive
+        self.purchase3_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 6, 10).timestamp()), 200.0, 60.0, TradeType.BUY
+        )
+        
+        # Create sale
+        self.sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 100.0, TradeType.SELL
+        )
+    
+    def test_maxprofit_simple_full_match(self):
+        """Test MaxProfit with exact match of cheapest lot."""
+        small_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 50.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_max_profit(small_sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 1)
+        self.assertEqual(result['total_quantity_paired'], 50.0)
+        
+        pairings = self.repo.get_pairings_for_sale(small_sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase1_id)  # Cheapest
+        self.assertEqual(pairings[0]['method'], 'MaxProfit')
+    
+    def test_maxprofit_multiple_purchases(self):
+        """Test MaxProfit spanning multiple purchases (lowest price first)."""
+        result = self.repo.apply_max_profit(self.sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 3)
+        self.assertEqual(result['total_quantity_paired'], 100.0)
+        
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # MaxProfit: P1($100, 50) + P2($150, 40) + P3($200, 10) = 100
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase1_id)
+        self.assertEqual(pairings[0]['quantity'], 50.0)
+        
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 40.0)
+        
+        self.assertEqual(pairings[2]['purchase_trade_id'], self.purchase3_id)
+        self.assertEqual(pairings[2]['quantity'], 10.0)
+    
+    def test_maxprofit_maximizes_gain(self):
+        """Test that MaxProfit maximizes gain by using cheap lots."""
+        result = self.repo.apply_max_profit(self.sale_id)
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # MaxProfit uses: 50*100 + 40*150 + 10*200 = 5,000 + 6,000 + 2,000 = 13,000
+        cost_basis = sum(p['purchase_price'] * p['quantity'] for p in pairings)
+        sale_proceeds = 180.0 * 100.0  # 18,000
+        gain = sale_proceeds - cost_basis
+        
+        self.assertEqual(cost_basis, 13000.0)
+        self.assertEqual(gain, 5000.0)
+
+
 def run_tests():
     """Run all tests and display results."""
     # Create test suite
@@ -1396,6 +1657,9 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestMethodCombinations))
     suite.addTests(loader.loadTestsFromTestCase(TestFIFOMethod))
     suite.addTests(loader.loadTestsFromTestCase(TestRemainingQuantityTracking))
+    suite.addTests(loader.loadTestsFromTestCase(TestLIFOMethod))
+    suite.addTests(loader.loadTestsFromTestCase(TestMaxLoseMethod))
+    suite.addTests(loader.loadTestsFromTestCase(TestMaxProfitMethod))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)
