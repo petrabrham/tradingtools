@@ -766,6 +766,8 @@ For Czech tax compliance, maintain:
 - [x] Implement LIFO method
 - [x] Implement MaxLose method
 - [x] Implement MaxProfit method
+- [x] Modify trades view to show remaining_quantity
+- [ ] Manual pairing in trades view
 - [ ] **Implement TimeTest filter logic (lot filtering by 3+ year holding)** ⭐
 - [ ] **Implement two-pass pairing: TimeTest-filtered + Fallback method** ⭐
 - [ ] Add holding period calculation (purchase to sale date)

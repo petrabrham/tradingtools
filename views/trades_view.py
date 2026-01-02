@@ -48,6 +48,7 @@ class TradesView(BaseView):
             "Trade Type",
             "Date",
             "Shares",
+            "Remaining Shares",
             "Price per Share",
             "Total (CZK)",
             "Stamp Tax (CZK)",
@@ -84,6 +85,9 @@ class TradesView(BaseView):
 
         tree.heading("Shares", text="Shares")
         tree.column("Shares", anchor=tk.E, width=90)
+
+        tree.heading("Remaining Shares", text="Remaining Shares")
+        tree.column("Remaining Shares", anchor=tk.E, width=130)
 
         tree.heading("Price per Share", text="Price per Share")
         tree.column("Price per Share", anchor=tk.E, width=120)
@@ -157,6 +161,7 @@ class TradesView(BaseView):
                     "",  # Trade Type (empty for parent)
                     "",  # Date (empty for parent)
                     f"{filter_shares:.4f}",
+                    "",  # Remaining Shares (empty for parent)
                     "",  # Price per Share (empty for parent)
                     f"{filter_total_czk:.2f}",
                     f"{filter_stamp_tax:.2f}",
@@ -171,12 +176,13 @@ class TradesView(BaseView):
                     ts = r[1]
                     trade_type_val = r[4]
                     num_shares = r[5]
-                    price_per_share = r[6]
-                    currency_of_price = r[7]
-                    total_czk = r[8]
-                    stamp_tax_czk = r[9]
-                    conversion_fee_czk = r[10]
-                    french_tax_czk = r[11]
+                    remaining_quantity = r[6]
+                    price_per_share = r[7]
+                    currency_of_price = r[8]
+                    total_czk = r[9]
+                    stamp_tax_czk = r[10]
+                    conversion_fee_czk = r[11]
+                    french_tax_czk = r[12]
 
                     dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
                     trade_type_str = "BUY" if int(trade_type_val) == 1 else ("SELL" if int(trade_type_val) == 2 else "?")
@@ -192,6 +198,7 @@ class TradesView(BaseView):
                         trade_type_str,
                         dt_str,
                         f"{num_shares:.7f}",
+                        f"{remaining_quantity:.7f}",
                         f"{price_per_share:.2f} {currency_of_price}",
                         f"{total_czk:.2f}",
                         f"{stamp_tax_czk:.2f}",
