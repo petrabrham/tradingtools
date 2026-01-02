@@ -21,6 +21,7 @@ from unittest.mock import Mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from db.repositories.pairings import PairingsRepository
+from db.repositories.trades import TradeType
 from logger_config import setup_logger
 
 
@@ -65,8 +66,8 @@ class TestPairingsRepository(unittest.TestCase):
                 isin_id INTEGER NOT NULL,
                 timestamp INTEGER NOT NULL,
                 price_for_share REAL NOT NULL,
-                quantity REAL NOT NULL,
-                type TEXT NOT NULL,
+                number_of_shares REAL NOT NULL,
+                trade_type INTEGER NOT NULL,
                 FOREIGN KEY (isin_id) REFERENCES securities(id)
             )
         """)
@@ -82,12 +83,12 @@ class TestPairingsRepository(unittest.TestCase):
         self.conn.commit()
         return cur.lastrowid
         
-    def _create_test_trade(self, security_id, timestamp, price, quantity, trade_type='BUY'):
+    def _create_test_trade(self, security_id, timestamp, price, quantity, trade_type=TradeType.BUY):
         """Helper to create a test trade."""
         cur = self.conn.execute(
-            "INSERT INTO trades (isin_id, timestamp, price_for_share, quantity, type) "
+            "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, trade_type) "
             "VALUES (?, ?, ?, ?, ?)",
-            (security_id, timestamp, price, quantity, trade_type)
+            (security_id, timestamp, price, quantity, int(trade_type))
         )
         self.conn.commit()
         return cur.lastrowid
@@ -180,14 +181,14 @@ class TestCreatePairing(TestPairingsRepository):
             int(purchase_date.timestamp()),
             150.0,
             50.0,
-            'BUY'
+            TradeType.BUY
         )
         self.sale_id = self._create_test_trade(
             self.security_id,
             int(sale_date.timestamp()),
             200.0,
             50.0,
-            'SELL'
+            TradeType.SELL
         )
         
     def test_create_pairing_success(self):
@@ -263,15 +264,15 @@ class TestGetPairings(TestPairingsRepository):
         
         # Create multiple purchase trades
         self.purchase1_id = self._create_test_trade(
-            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, 'BUY'
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, TradeType.BUY
         )
         self.purchase2_id = self._create_test_trade(
-            self.security_id, int(datetime(2021, 6, 20).timestamp()), 180.0, 50.0, 'BUY'
+            self.security_id, int(datetime(2021, 6, 20).timestamp()), 180.0, 50.0, TradeType.BUY
         )
         
         # Create sale trade
         self.sale_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 11, 10).timestamp()), 200.0, 100.0, 'SELL'
+            self.security_id, int(datetime(2024, 11, 10).timestamp()), 200.0, 100.0, TradeType.SELL
         )
         
         # Create pairings
@@ -323,10 +324,10 @@ class TestDeletePairing(TestPairingsRepository):
         self.security_id = self._create_test_security()
         
         self.purchase_id = self._create_test_trade(
-            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 50.0, 'BUY'
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 50.0, TradeType.BUY
         )
         self.sale_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 6, 15).timestamp()), 200.0, 50.0, 'SELL'
+            self.security_id, int(datetime(2024, 6, 15).timestamp()), 200.0, 50.0, TradeType.SELL
         )
         
         self.pairing_id = self.repo.create_pairing(
@@ -371,10 +372,10 @@ class TestLockUnlock(TestPairingsRepository):
         self.security_id = self._create_test_security()
         
         self.purchase_id = self._create_test_trade(
-            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 50.0, 'BUY'
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 50.0, TradeType.BUY
         )
         self.sale_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 6, 15).timestamp()), 200.0, 50.0, 'SELL'
+            self.security_id, int(datetime(2024, 6, 15).timestamp()), 200.0, 50.0, TradeType.SELL
         )
         
         self.pairing_id = self.repo.create_pairing(
@@ -435,10 +436,10 @@ class TestLockUnlock(TestPairingsRepository):
         """Test bulk locking of pairings for a tax year."""
         # Create multiple sales in 2024
         sale1_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 3, 15).timestamp()), 200.0, 50.0, 'SELL'
+            self.security_id, int(datetime(2024, 3, 15).timestamp()), 200.0, 50.0, TradeType.SELL
         )
         sale2_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 9, 20).timestamp()), 210.0, 50.0, 'SELL'
+            self.security_id, int(datetime(2024, 9, 20).timestamp()), 210.0, 50.0, TradeType.SELL
         )
         
         # Create pairings for both sales
@@ -598,18 +599,18 @@ class TestPairingSummary(TestPairingsRepository):
         
         # Create purchases
         self.purchase1_id = self._create_test_trade(
-            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, 'BUY'
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, TradeType.BUY
         )
         self.purchase2_id = self._create_test_trade(
-            self.security_id, int(datetime(2021, 6, 20).timestamp()), 180.0, 100.0, 'BUY'
+            self.security_id, int(datetime(2021, 6, 20).timestamp()), 180.0, 100.0, TradeType.BUY
         )
         
         # Create sales in 2024
         self.sale1_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 3, 10).timestamp()), 200.0, 80.0, 'SELL'
+            self.security_id, int(datetime(2024, 3, 10).timestamp()), 200.0, 80.0, TradeType.SELL
         )
         self.sale2_id = self._create_test_trade(
-            self.security_id, int(datetime(2024, 9, 15).timestamp()), 210.0, 50.0, 'SELL'
+            self.security_id, int(datetime(2024, 9, 15).timestamp()), 210.0, 50.0, TradeType.SELL
         )
         
         # Create pairings for sale 1 (mixed time test)
@@ -669,6 +670,200 @@ class TestPairingSummary(TestPairingsRepository):
         self.assertIn('name', sale1_summary)
 
 
+class TestLotAvailability(TestPairingsRepository):
+    """Test lot availability calculation methods."""
+    
+    def setUp(self):
+        """Set up test data with multiple purchases and partial pairings."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create three purchase lots
+        self.purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, TradeType.BUY
+        )
+        self.purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2021, 6, 20).timestamp()), 180.0, 50.0, TradeType.BUY
+        )
+        self.purchase3_id = self._create_test_trade(
+            self.security_id, int(datetime(2023, 3, 10).timestamp()), 200.0, 75.0, TradeType.BUY
+        )
+        
+        # Create a sale
+        self.sale_timestamp = int(datetime(2024, 11, 10).timestamp())
+        self.sale_id = self._create_test_trade(
+            self.security_id, self.sale_timestamp, 220.0, 80.0, TradeType.SELL
+        )
+        
+        # Create partial pairings
+        # Purchase 1: 100 total, 60 paired, 40 available
+        self.repo.create_pairing(self.sale_id, self.purchase1_id, 60.0, 'FIFO')
+        
+        # Purchase 2: 50 total, 50 paired (fully used), 0 available
+        self.repo.create_pairing(self.sale_id, self.purchase2_id, 50.0, 'FIFO')
+        
+        # Purchase 3: 75 total, 0 paired, 75 available
+        
+    def test_get_available_lots_all_purchases(self):
+        """Test that get_available_lots returns all purchases before sale."""
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        self.assertEqual(len(lots), 3, "Should return all 3 purchases")
+        
+    def test_get_available_lots_correct_quantities(self):
+        """Test that available quantities are calculated correctly."""
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        # Find each lot by ID
+        lot1 = next(l for l in lots if l['id'] == self.purchase1_id)
+        lot2 = next(l for l in lots if l['id'] == self.purchase2_id)
+        lot3 = next(l for l in lots if l['id'] == self.purchase3_id)
+        
+        # Verify quantities
+        self.assertEqual(lot1['quantity'], 100.0)
+        self.assertEqual(lot1['paired_quantity'], 60.0)
+        self.assertEqual(lot1['available_quantity'], 40.0)
+        
+        self.assertEqual(lot2['quantity'], 50.0)
+        self.assertEqual(lot2['paired_quantity'], 50.0)
+        self.assertEqual(lot2['available_quantity'], 0.0)
+        
+        self.assertEqual(lot3['quantity'], 75.0)
+        self.assertEqual(lot3['paired_quantity'], 0.0)
+        self.assertEqual(lot3['available_quantity'], 75.0)
+        
+    def test_get_available_lots_includes_time_test(self):
+        """Test that available lots include time test qualification."""
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        lot1 = next(l for l in lots if l['id'] == self.purchase1_id)
+        lot2 = next(l for l in lots if l['id'] == self.purchase2_id)
+        lot3 = next(l for l in lots if l['id'] == self.purchase3_id)
+        
+        # Lot 1 (2020-01-15) and Lot 2 (2021-06-20) are > 3 years before sale (2024-11-10)
+        self.assertTrue(lot1['time_test_qualified'])
+        self.assertTrue(lot2['time_test_qualified'])
+        
+        # Lot 3 (2023-03-10) is < 3 years before sale
+        self.assertFalse(lot3['time_test_qualified'])
+        
+    def test_get_available_lots_includes_holding_period(self):
+        """Test that available lots include holding period in days."""
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        for lot in lots:
+            self.assertIn('holding_period_days', lot)
+            self.assertGreater(lot['holding_period_days'], 0)
+            
+    def test_get_available_lots_excludes_future_purchases(self):
+        """Test that purchases after the sale are excluded."""
+        # Create a purchase after the sale
+        future_purchase_id = self._create_test_trade(
+            self.security_id, 
+            int(datetime(2025, 1, 1).timestamp()), 
+            250.0, 
+            100.0, 
+            TradeType.BUY
+        )
+        
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        # Should still have only 3 lots (not 4)
+        self.assertEqual(len(lots), 3)
+        
+        # Verify future purchase is not in results
+        future_lot_ids = [l['id'] for l in lots if l['id'] == future_purchase_id]
+        self.assertEqual(len(future_lot_ids), 0, "Future purchases should be excluded")
+        
+    def test_get_available_lots_ordered_by_date(self):
+        """Test that lots are returned in chronological order."""
+        lots = self.repo.get_available_lots(self.security_id, self.sale_timestamp)
+        
+        # Verify order: purchase1 (2020) < purchase2 (2021) < purchase3 (2023)
+        self.assertEqual(lots[0]['id'], self.purchase1_id)
+        self.assertEqual(lots[1]['id'], self.purchase2_id)
+        self.assertEqual(lots[2]['id'], self.purchase3_id)
+        
+    def test_calculate_available_quantity_for_purchase(self):
+        """Test calculating available quantity for specific purchase."""
+        # Lot 1: 40 available
+        available1 = self.repo.calculate_available_quantity_for_purchase(self.purchase1_id)
+        self.assertEqual(available1, 40.0)
+        
+        # Lot 2: 0 available (fully paired)
+        available2 = self.repo.calculate_available_quantity_for_purchase(self.purchase2_id)
+        self.assertEqual(available2, 0.0)
+        
+        # Lot 3: 75 available (never paired)
+        available3 = self.repo.calculate_available_quantity_for_purchase(self.purchase3_id)
+        self.assertEqual(available3, 75.0)
+        
+    def test_calculate_available_quantity_nonexistent_purchase(self):
+        """Test calculating available quantity for nonexistent purchase."""
+        available = self.repo.calculate_available_quantity_for_purchase(99999)
+        self.assertEqual(available, 0.0)
+        
+    def test_validate_pairing_availability_success(self):
+        """Test successful validation when sufficient quantity available."""
+        # Lot 1 has 40 available, request 20
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase1_id, 20.0)
+        self.assertTrue(is_valid)
+        self.assertEqual(error, "")
+        
+    def test_validate_pairing_availability_exact_quantity(self):
+        """Test validation when requesting exact available quantity."""
+        # Lot 1 has exactly 40 available
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase1_id, 40.0)
+        self.assertTrue(is_valid)
+        
+    def test_validate_pairing_availability_insufficient(self):
+        """Test validation fails when requesting more than available."""
+        # Lot 1 has 40 available, request 50
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase1_id, 50.0)
+        self.assertFalse(is_valid)
+        self.assertIn("Insufficient quantity", error)
+        self.assertIn("40", error)
+        self.assertIn("50", error)
+        
+    def test_validate_pairing_availability_fully_paired(self):
+        """Test validation fails for fully paired lot."""
+        # Lot 2 has 0 available
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase2_id, 10.0)
+        self.assertFalse(is_valid)
+        self.assertIn("fully paired", error.lower())
+        
+    def test_validate_pairing_availability_negative_quantity(self):
+        """Test validation fails for negative quantity."""
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase1_id, -10.0)
+        self.assertFalse(is_valid)
+        self.assertIn("positive", error.lower())
+        
+    def test_validate_pairing_availability_zero_quantity(self):
+        """Test validation fails for zero quantity."""
+        is_valid, error = self.repo.validate_pairing_availability(self.purchase1_id, 0.0)
+        self.assertFalse(is_valid)
+        self.assertIn("positive", error.lower())
+        
+    def test_get_available_lots_multiple_sales(self):
+        """Test that availability reflects pairings across multiple sales."""
+        # Create a second sale
+        sale2_id = self._create_test_trade(
+            self.security_id,
+            int(datetime(2024, 12, 15).timestamp()),
+            230.0,
+            30.0,
+            TradeType.SELL
+        )
+        
+        # Pair 20 more from purchase 1 with sale 2
+        # Purchase 1 now has: 100 total, 60 + 20 = 80 paired, 20 available
+        self.repo.create_pairing(sale2_id, self.purchase1_id, 20.0, 'FIFO')
+        
+        available = self.repo.calculate_available_quantity_for_purchase(self.purchase1_id)
+        self.assertEqual(available, 20.0)
+
+
 def run_tests():
     """Run all tests and display results."""
     # Create test suite
@@ -684,6 +879,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestHoldingPeriod))
     suite.addTests(loader.loadTestsFromTestCase(TestTimeTest))
     suite.addTests(loader.loadTestsFromTestCase(TestPairingSummary))
+    suite.addTests(loader.loadTestsFromTestCase(TestLotAvailability))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)

@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import sqlite3
 from ..base import BaseRepository
+from .trades import TradeType
 
 
 class PairingsRepository(BaseRepository):
@@ -352,3 +353,121 @@ class PairingsRepository(BaseRepository):
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error checking time test: {e}")
             return False
+
+    def get_available_lots(self, security_id: int, sale_timestamp: int) -> List[Dict]:
+        """Get all available purchase lots for a security that can be paired with a sale.
+        
+        Returns purchase trades with their remaining available quantities after accounting
+        for quantities already used in other pairings.
+        
+        Args:
+            security_id: ID of the security
+            sale_timestamp: Timestamp of the sale (only purchases before this are available)
+            
+        Returns:
+            List of dictionaries with purchase trade info and available quantities:
+            {
+                'id': trade_id,
+                'timestamp': purchase_timestamp,
+                'price_for_share': price,
+                'quantity': original_quantity,
+                'paired_quantity': already_paired_quantity,
+                'available_quantity': remaining_quantity,
+                'holding_period_days': days_until_sale,
+                'time_test_qualified': bool
+            }
+        """
+        # Get all purchase trades for this security before the sale
+        sql = """
+            SELECT t.id, t.timestamp, t.price_for_share, t.number_of_shares
+            FROM trades t
+            WHERE t.isin_id = ?
+            AND t.trade_type = ?
+            AND t.timestamp < ?
+            ORDER BY t.timestamp
+        """
+        cur = self.execute(sql, (security_id, TradeType.BUY, sale_timestamp))
+        purchases = cur.fetchall()
+        
+        # Calculate paired quantities for each purchase
+        result = []
+        for purchase in purchases:
+            purchase_id, timestamp, price, original_qty = purchase
+            
+            # Get total quantity already paired from this purchase
+            paired_sql = """
+                SELECT COALESCE(SUM(quantity), 0)
+                FROM pairings
+                WHERE purchase_trade_id = ?
+            """
+            paired_cur = self.execute(paired_sql, (purchase_id,))
+            paired_qty = paired_cur.fetchone()[0]
+            
+            available_qty = original_qty - paired_qty
+            
+            # Calculate holding period and time test
+            holding_days = self.calculate_holding_period(timestamp, sale_timestamp)
+            time_qualified = self.check_time_test(timestamp, sale_timestamp)
+            
+            result.append({
+                'id': purchase_id,
+                'timestamp': timestamp,
+                'price_for_share': price,
+                'quantity': original_qty,
+                'paired_quantity': paired_qty,
+                'available_quantity': available_qty,
+                'holding_period_days': holding_days,
+                'time_test_qualified': time_qualified
+            })
+        
+        return result
+
+    def calculate_available_quantity_for_purchase(self, purchase_trade_id: int) -> float:
+        """Calculate remaining available quantity for a specific purchase lot.
+        
+        Args:
+            purchase_trade_id: ID of the purchase trade
+            
+        Returns:
+            Remaining quantity available for pairing
+        """
+        # Get original quantity
+        trade_sql = "SELECT number_of_shares FROM trades WHERE id = ?"
+        cur = self.execute(trade_sql, (purchase_trade_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            self.logger.warning(f"Purchase trade {purchase_trade_id} not found")
+            return 0.0
+        
+        original_qty = row[0]
+        
+        # Get paired quantity
+        paired_sql = "SELECT COALESCE(SUM(quantity), 0) FROM pairings WHERE purchase_trade_id = ?"
+        paired_cur = self.execute(paired_sql, (purchase_trade_id,))
+        paired_qty = paired_cur.fetchone()[0]
+        
+        return original_qty - paired_qty
+
+    def validate_pairing_availability(self, purchase_trade_id: int, requested_quantity: float) -> Tuple[bool, str]:
+        """Validate that sufficient quantity is available for a pairing.
+        
+        Args:
+            purchase_trade_id: ID of the purchase trade
+            requested_quantity: Quantity to pair
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        available = self.calculate_available_quantity_for_purchase(purchase_trade_id)
+        
+        if requested_quantity <= 0:
+            return False, "Requested quantity must be positive"
+        
+        if available <= 0:
+            return False, f"Purchase lot {purchase_trade_id} is fully paired (no quantity available)"
+        
+        if requested_quantity > available:
+            return False, f"Insufficient quantity: {available} available, {requested_quantity} requested"
+        
+        return True, ""
