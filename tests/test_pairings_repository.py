@@ -864,6 +864,162 @@ class TestLotAvailability(TestPairingsRepository):
         self.assertEqual(available, 20.0)
 
 
+class TestMethodCombinations(TestPairingsRepository):
+    """Test method combination derivation and TimeTest detection."""
+    
+    def setUp(self):
+        """Set up test data with various pairing scenarios."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create purchases with varying time test status
+        self.old_purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2020, 1, 15).timestamp()), 150.0, 100.0, TradeType.BUY
+        )
+        self.old_purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2020, 6, 20).timestamp()), 180.0, 50.0, TradeType.BUY
+        )
+        self.new_purchase_id = self._create_test_trade(
+            self.security_id, int(datetime(2023, 3, 10).timestamp()), 200.0, 75.0, TradeType.BUY
+        )
+        
+        # Create sales
+        self.sale1_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 10).timestamp()), 220.0, 100.0, TradeType.SELL
+        )
+        self.sale2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 225.0, 80.0, TradeType.SELL
+        )
+        self.sale3_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 20).timestamp()), 230.0, 50.0, TradeType.SELL
+        )
+        
+    def test_derive_method_combination_single_method_no_timetest(self):
+        """Test deriving combination for single method without TimeTest."""
+        # All pairings use FIFO, none are time-qualified
+        self.repo.create_pairing(self.sale1_id, self.new_purchase_id, 75.0, 'FIFO', False)
+        self.repo.create_pairing(self.sale1_id, self.old_purchase1_id, 25.0, 'FIFO', False)
+        
+        combination = self.repo.derive_method_combination(self.sale1_id)
+        self.assertEqual(combination, 'FIFO')
+        
+    def test_derive_method_combination_all_time_qualified(self):
+        """Test deriving combination when all lots are time-qualified."""
+        # All pairings use MaxProfit and all are time-qualified
+        self.repo.create_pairing(self.sale1_id, self.old_purchase1_id, 60.0, 'MaxProfit', True)
+        self.repo.create_pairing(self.sale1_id, self.old_purchase2_id, 40.0, 'MaxProfit', True)
+        
+        combination = self.repo.derive_method_combination(self.sale1_id)
+        self.assertEqual(combination, 'MaxProfit')
+        
+    def test_derive_method_combination_timetest_with_fallback(self):
+        """Test deriving combination for TimeTest with fallback."""
+        # MaxProfit on time-qualified, MaxLose on non-qualified
+        self.repo.create_pairing(self.sale1_id, self.old_purchase1_id, 50.0, 'MaxProfit', True, 1760)
+        self.repo.create_pairing(self.sale1_id, self.old_purchase2_id, 30.0, 'MaxProfit', True, 1604)
+        self.repo.create_pairing(self.sale1_id, self.new_purchase_id, 20.0, 'MaxLose', False, 610)
+        
+        combination = self.repo.derive_method_combination(self.sale1_id)
+        self.assertEqual(combination, 'MaxProfit+TT → MaxLose')
+        
+    def test_derive_method_combination_lifo_timetest_fifo(self):
+        """Test LIFO+TT → FIFO combination."""
+        # LIFO on time-qualified, FIFO on non-qualified
+        self.repo.create_pairing(self.sale2_id, self.old_purchase2_id, 50.0, 'LIFO', True)
+        self.repo.create_pairing(self.sale2_id, self.new_purchase_id, 30.0, 'FIFO', False)
+        
+        combination = self.repo.derive_method_combination(self.sale2_id)
+        self.assertEqual(combination, 'LIFO+TT → FIFO')
+        
+    def test_derive_method_combination_mixed_methods(self):
+        """Test deriving combination with mixed methods."""
+        # Multiple methods on non-qualified (shouldn't happen in practice, but test it)
+        self.repo.create_pairing(self.sale3_id, self.new_purchase_id, 25.0, 'FIFO', False)
+        self.repo.create_pairing(self.sale3_id, self.new_purchase_id, 25.0, 'LIFO', False)
+        
+        combination = self.repo.derive_method_combination(self.sale3_id)
+        self.assertIn('Mixed', combination)
+        
+    def test_derive_method_combination_no_pairings(self):
+        """Test deriving combination for sale with no pairings."""
+        # Create a sale but don't pair it
+        empty_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 12, 1).timestamp()), 240.0, 50.0, TradeType.SELL
+        )
+        
+        combination = self.repo.derive_method_combination(empty_sale_id)
+        self.assertEqual(combination, 'No pairings')
+        
+    def test_get_method_breakdown_timetest_scenario(self):
+        """Test getting detailed method breakdown for TimeTest scenario."""
+        # Create TimeTest scenario: MaxProfit(70) + MaxLose(30)
+        self.repo.create_pairing(self.sale1_id, self.old_purchase1_id, 50.0, 'MaxProfit', True)
+        self.repo.create_pairing(self.sale1_id, self.old_purchase2_id, 20.0, 'MaxProfit', True)
+        self.repo.create_pairing(self.sale1_id, self.new_purchase_id, 30.0, 'MaxLose', False)
+        
+        breakdown = self.repo.get_method_breakdown(self.sale1_id)
+        
+        self.assertEqual(breakdown['combination'], 'MaxProfit+TT → MaxLose')
+        self.assertEqual(breakdown['total_quantity'], 100.0)
+        
+        # Time-qualified breakdown
+        self.assertEqual(breakdown['time_qualified']['quantity'], 70.0)
+        self.assertEqual(breakdown['time_qualified']['methods']['MaxProfit'], 70.0)
+        
+        # Non-qualified breakdown
+        self.assertEqual(breakdown['non_qualified']['quantity'], 30.0)
+        self.assertEqual(breakdown['non_qualified']['methods']['MaxLose'], 30.0)
+        
+    def test_get_method_breakdown_single_method(self):
+        """Test getting breakdown for single method (no TimeTest)."""
+        # All FIFO, no time qualification
+        self.repo.create_pairing(self.sale2_id, self.new_purchase_id, 50.0, 'FIFO', False)
+        self.repo.create_pairing(self.sale2_id, self.old_purchase1_id, 30.0, 'FIFO', False)
+        
+        breakdown = self.repo.get_method_breakdown(self.sale2_id)
+        
+        self.assertEqual(breakdown['combination'], 'FIFO')
+        self.assertEqual(breakdown['total_quantity'], 80.0)
+        self.assertEqual(breakdown['time_qualified']['quantity'], 0.0)
+        self.assertEqual(breakdown['non_qualified']['quantity'], 80.0)
+        
+    def test_is_timetest_applied_true(self):
+        """Test TimeTest detection when TimeTest was applied."""
+        # Mix of qualified and non-qualified
+        self.repo.create_pairing(self.sale1_id, self.old_purchase1_id, 60.0, 'MaxProfit', True)
+        self.repo.create_pairing(self.sale1_id, self.new_purchase_id, 40.0, 'MaxLose', False)
+        
+        result = self.repo.is_timetest_applied(self.sale1_id)
+        self.assertTrue(result)
+        
+    def test_is_timetest_applied_false_all_qualified(self):
+        """Test TimeTest detection when all lots are time-qualified."""
+        # All qualified (implicit success, but not technically "applied")
+        self.repo.create_pairing(self.sale2_id, self.old_purchase1_id, 50.0, 'MaxProfit', True)
+        self.repo.create_pairing(self.sale2_id, self.old_purchase2_id, 30.0, 'MaxProfit', True)
+        
+        result = self.repo.is_timetest_applied(self.sale2_id)
+        self.assertFalse(result, "All qualified means no fallback was needed")
+        
+    def test_is_timetest_applied_false_none_qualified(self):
+        """Test TimeTest detection when no lots are time-qualified."""
+        # None qualified
+        self.repo.create_pairing(self.sale3_id, self.new_purchase_id, 50.0, 'FIFO', False)
+        
+        result = self.repo.is_timetest_applied(self.sale3_id)
+        self.assertFalse(result, "No qualified lots means TimeTest wasn't applied")
+        
+    def test_is_timetest_applied_no_pairings(self):
+        """Test TimeTest detection for sale with no pairings."""
+        empty_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 12, 1).timestamp()), 240.0, 50.0, TradeType.SELL
+        )
+        
+        result = self.repo.is_timetest_applied(empty_sale_id)
+        self.assertFalse(result)
+
+
 def run_tests():
     """Run all tests and display results."""
     # Create test suite
@@ -880,6 +1036,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestTimeTest))
     suite.addTests(loader.loadTestsFromTestCase(TestPairingSummary))
     suite.addTests(loader.loadTestsFromTestCase(TestLotAvailability))
+    suite.addTests(loader.loadTestsFromTestCase(TestMethodCombinations))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)

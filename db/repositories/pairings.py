@@ -293,6 +293,160 @@ class PairingsRepository(BaseRepository):
         columns = [desc[0] for desc in cur.description]
         return [dict(zip(columns, row)) for row in rows]
 
+    def derive_method_combination(self, sale_trade_id: int) -> str:
+        """Derive the effective method combination used for a sale.
+        
+        Analyzes all pairings for a sale and determines the method combination string.
+        For example:
+        - "FIFO" - if only one method used, no TimeTest
+        - "MaxProfit+TT → MaxLose" - if TimeTest filter applied with fallback
+        - "MaxProfit" - if all lots are time-qualified (implicit TimeTest)
+        
+        Args:
+            sale_trade_id: ID of the sale transaction
+            
+        Returns:
+            Method combination string (e.g., "FIFO", "MaxProfit+TT → MaxLose")
+        """
+        # Get all pairings for this sale
+        sql = """
+            SELECT method, time_test_qualified, quantity
+            FROM pairings
+            WHERE sale_trade_id = ?
+            ORDER BY id
+        """
+        cur = self.execute(sql, (sale_trade_id,))
+        pairings = cur.fetchall()
+        
+        if not pairings:
+            return "No pairings"
+        
+        # Group by time test status
+        time_qualified_pairings = []
+        non_qualified_pairings = []
+        
+        for method, time_qualified, quantity in pairings:
+            if time_qualified:
+                time_qualified_pairings.append((method, quantity))
+            else:
+                non_qualified_pairings.append((method, quantity))
+        
+        # Case 1: All pairings are from one method, no TimeTest split
+        if len(time_qualified_pairings) == 0:
+            # No time-qualified lots used
+            methods = list(set(p[0] for p in non_qualified_pairings))
+            if len(methods) == 1:
+                return methods[0]
+            else:
+                return "Mixed: " + ", ".join(sorted(methods))
+        
+        if len(non_qualified_pairings) == 0:
+            # All lots are time-qualified (implicit TimeTest success)
+            methods = list(set(p[0] for p in time_qualified_pairings))
+            if len(methods) == 1:
+                return methods[0]  # Could add "+TT (all)" suffix if desired
+            else:
+                return "Mixed: " + ", ".join(sorted(methods))
+        
+        # Case 2: TimeTest combination - both qualified and non-qualified lots used
+        tt_methods = list(set(p[0] for p in time_qualified_pairings))
+        fallback_methods = list(set(p[0] for p in non_qualified_pairings))
+        
+        primary = tt_methods[0] if len(tt_methods) == 1 else "Mixed(" + ",".join(sorted(tt_methods)) + ")"
+        fallback = fallback_methods[0] if len(fallback_methods) == 1 else "Mixed(" + ",".join(sorted(fallback_methods)) + ")"
+        
+        return f"{primary}+TT → {fallback}"
+
+    def get_method_breakdown(self, sale_trade_id: int) -> Dict:
+        """Get detailed breakdown of methods used for a sale.
+        
+        Args:
+            sale_trade_id: ID of the sale transaction
+            
+        Returns:
+            Dictionary with method breakdown:
+            {
+                'combination': 'MaxProfit+TT → MaxLose',
+                'time_qualified': {
+                    'quantity': 70.0,
+                    'methods': {'MaxProfit': 70.0}
+                },
+                'non_qualified': {
+                    'quantity': 30.0,
+                    'methods': {'MaxLose': 30.0}
+                },
+                'total_quantity': 100.0
+            }
+        """
+        sql = """
+            SELECT method, time_test_qualified, SUM(quantity) as qty
+            FROM pairings
+            WHERE sale_trade_id = ?
+            GROUP BY method, time_test_qualified
+        """
+        cur = self.execute(sql, (sale_trade_id,))
+        rows = cur.fetchall()
+        
+        time_qualified_methods = {}
+        non_qualified_methods = {}
+        time_qualified_qty = 0.0
+        non_qualified_qty = 0.0
+        
+        for method, time_qualified, qty in rows:
+            if time_qualified:
+                time_qualified_methods[method] = qty
+                time_qualified_qty += qty
+            else:
+                non_qualified_methods[method] = qty
+                non_qualified_qty += qty
+        
+        return {
+            'combination': self.derive_method_combination(sale_trade_id),
+            'time_qualified': {
+                'quantity': time_qualified_qty,
+                'methods': time_qualified_methods
+            },
+            'non_qualified': {
+                'quantity': non_qualified_qty,
+                'methods': non_qualified_methods
+            },
+            'total_quantity': time_qualified_qty + non_qualified_qty
+        }
+
+    def is_timetest_applied(self, sale_trade_id: int) -> bool:
+        """Check if TimeTest filter was applied to a sale.
+        
+        Returns True if the sale has both time-qualified and non-qualified pairings,
+        indicating a TimeTest filter with fallback was used.
+        
+        Args:
+            sale_trade_id: ID of the sale transaction
+            
+        Returns:
+            True if TimeTest filter was applied (has both qualified and non-qualified lots)
+        """
+        sql = """
+            SELECT 
+                SUM(CASE WHEN time_test_qualified = 1 THEN 1 ELSE 0 END) as qualified_count,
+                SUM(CASE WHEN time_test_qualified = 0 THEN 1 ELSE 0 END) as non_qualified_count
+            FROM pairings
+            WHERE sale_trade_id = ?
+        """
+        cur = self.execute(sql, (sale_trade_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            return False
+        
+        qualified_count, non_qualified_count = row
+        
+        # Handle None values (when no pairings exist)
+        if qualified_count is None or non_qualified_count is None:
+            return False
+        
+        # TimeTest filter applied if we have both types
+        return qualified_count > 0 and non_qualified_count > 0
+
     def calculate_holding_period(self, purchase_date: str, sale_date: str) -> int:
         """Calculate holding period in days between purchase and sale.
         
