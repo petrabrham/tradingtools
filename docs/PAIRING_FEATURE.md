@@ -758,11 +758,11 @@ For Czech tax compliance, maintain:
 - [x] Implement `PairingsRepository` class
 - [x] Write unit tests for repository methods
 - [x] Test lot availability calculations
-- [xS] **Implement logic to derive method combinations from grouped pairings** ⭐
+- [x] **Implement logic to derive method combinations from grouped pairings** ⭐
 - [ ] **Add helper methods to identify TimeTest usage from pairing patterns** ⭐
 
 ### Phase 2: Core Matching Logic (Week 2)
-- [ ] Implement FIFO method
+- [x] Implement FIFO method
 - [ ] Implement LIFO method
 - [ ] Implement MaxLose method
 - [ ] Implement MaxProfit method

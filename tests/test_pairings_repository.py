@@ -59,7 +59,7 @@ class TestPairingsRepository(unittest.TestCase):
             )
         """)
         
-        # Create trades table (simplified for testing)
+        # Create trades table (simplified for testing, includes remaining_quantity)
         self.conn.execute("""
             CREATE TABLE trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +67,7 @@ class TestPairingsRepository(unittest.TestCase):
                 timestamp INTEGER NOT NULL,
                 price_for_share REAL NOT NULL,
                 number_of_shares REAL NOT NULL,
+                remaining_quantity REAL NOT NULL,
                 trade_type INTEGER NOT NULL,
                 FOREIGN KEY (isin_id) REFERENCES securities(id)
             )
@@ -86,9 +87,9 @@ class TestPairingsRepository(unittest.TestCase):
     def _create_test_trade(self, security_id, timestamp, price, quantity, trade_type=TradeType.BUY):
         """Helper to create a test trade."""
         cur = self.conn.execute(
-            "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, trade_type) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (security_id, timestamp, price, quantity, int(trade_type))
+            "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, remaining_quantity, trade_type) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (security_id, timestamp, price, quantity, quantity, int(trade_type))  # remaining_quantity = quantity initially
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1020,6 +1021,362 @@ class TestMethodCombinations(TestPairingsRepository):
         self.assertFalse(result)
 
 
+class TestFIFOMethod(TestPairingsRepository):
+    """Test FIFO (First-In-First-Out) pairing method."""
+    
+    def setUp(self):
+        """Set up test data for FIFO testing."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        # Create purchases at different times and prices
+        # Purchase 1: Oldest, cheapest
+        self.purchase1_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 1, 15).timestamp()), 100.0, 50.0, TradeType.BUY
+        )
+        # Purchase 2: Middle
+        self.purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 3, 20).timestamp()), 150.0, 40.0, TradeType.BUY
+        )
+        # Purchase 3: Newest, most expensive
+        self.purchase3_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 6, 10).timestamp()), 200.0, 60.0, TradeType.BUY
+        )
+        
+        # Create sale
+        self.sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 100.0, TradeType.SELL
+        )
+    
+    def test_fifo_simple_full_match(self):
+        """Test FIFO with exact match of oldest lot."""
+        # Sell exactly the oldest purchase
+        sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 50.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 1)
+        self.assertEqual(result['total_quantity_paired'], 50.0)
+        self.assertIsNone(result['error'])
+        
+        # Verify pairing uses oldest lot
+        pairings = self.repo.get_pairings_for_sale(sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase1_id)
+        self.assertEqual(pairings[0]['quantity'], 50.0)
+        self.assertEqual(pairings[0]['method'], 'FIFO')
+    
+    def test_fifo_partial_lot_matching(self):
+        """Test FIFO with partial use of lots."""
+        # Sell 70 shares: should take 50 from purchase1, 20 from purchase2
+        sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 70.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 2)
+        self.assertEqual(result['total_quantity_paired'], 70.0)
+        
+        # Verify pairings use oldest lots first
+        pairings = self.repo.get_pairings_for_sale(sale_id)
+        self.assertEqual(len(pairings), 2)
+        
+        # First pairing: all of purchase1
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase1_id)
+        self.assertEqual(pairings[0]['quantity'], 50.0)
+        
+        # Second pairing: partial purchase2
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 20.0)
+    
+    def test_fifo_multiple_purchases(self):
+        """Test FIFO spanning all three purchases."""
+        # Sell 120 shares: 50 from p1, 40 from p2, 30 from p3
+        sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 120.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(sale_id)
+        
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pairings_created'], 3)
+        self.assertEqual(result['total_quantity_paired'], 120.0)
+        
+        pairings = self.repo.get_pairings_for_sale(sale_id)
+        self.assertEqual(len(pairings), 3)
+        
+        # Verify order: oldest to newest
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.purchase1_id)
+        self.assertEqual(pairings[0]['quantity'], 50.0)
+        
+        self.assertEqual(pairings[1]['purchase_trade_id'], self.purchase2_id)
+        self.assertEqual(pairings[1]['quantity'], 40.0)
+        
+        self.assertEqual(pairings[2]['purchase_trade_id'], self.purchase3_id)
+        self.assertEqual(pairings[2]['quantity'], 30.0)
+    
+    def test_fifo_insufficient_quantity(self):
+        """Test FIFO when not enough shares available.
+        
+        The new algorithm creates partial pairings with all available lots (150 shares),
+        then fails when trying to pair the remaining 50 shares.
+        """
+        # Try to sell 200 shares but only 150 available
+        sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 200.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(sale_id)
+        
+        self.assertFalse(result['success'])
+        # Should have paired all 3 available lots (150 shares total)
+        self.assertEqual(result['pairings_created'], 3)
+        self.assertEqual(result['total_quantity_paired'], 150.0)
+        self.assertIn('Insufficient quantity', result['error'])
+        self.assertIn('50.0', result['error'])  # Missing 50 shares
+        
+        # Verify partial pairings were created
+        pairings = self.repo.get_pairings_for_sale(sale_id)
+        self.assertEqual(len(pairings), 3)
+        self.assertEqual(sum(p['quantity'] for p in pairings), 150.0)
+    
+    def test_fifo_with_existing_pairings(self):
+        """Test FIFO when sale is already partially paired."""
+        # Manually pair 30 shares from purchase1
+        self.repo.create_pairing(self.sale_id, self.purchase1_id, 30.0, 'Manual')
+        
+        # Apply FIFO to remaining 70 shares
+        result = self.repo.apply_fifo(self.sale_id)
+        
+        self.assertTrue(result['success'])
+        # Should pair: 20 more from purchase1, 40 from purchase2, 10 from purchase3
+        self.assertEqual(result['pairings_created'], 3)
+        self.assertEqual(result['total_quantity_paired'], 70.0)
+        
+        # Total pairings: 1 manual + 3 FIFO = 4
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        self.assertEqual(len(pairings), 4)
+        self.assertEqual(sum(p['quantity'] for p in pairings), 100.0)
+    
+    def test_fifo_already_fully_paired(self):
+        """Test FIFO when sale is already fully paired."""
+        # Pair all 100 shares
+        self.repo.create_pairing(self.sale_id, self.purchase1_id, 50.0, 'Manual')
+        self.repo.create_pairing(self.sale_id, self.purchase2_id, 40.0, 'Manual')
+        self.repo.create_pairing(self.sale_id, self.purchase3_id, 10.0, 'Manual')
+        
+        result = self.repo.apply_fifo(self.sale_id)
+        
+        self.assertTrue(result['success'])  # Success, but nothing to do
+        self.assertEqual(result['pairings_created'], 0)
+        self.assertEqual(result['total_quantity_paired'], 0.0)
+        self.assertIn('already fully paired', result['error'])
+    
+    def test_fifo_no_available_purchases(self):
+        """Test FIFO when no purchases exist before sale."""
+        # Create sale before any purchases
+        early_sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2023, 1, 1).timestamp()), 180.0, 50.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(early_sale_id)
+        
+        self.assertFalse(result['success'])
+        self.assertEqual(result['pairings_created'], 0)
+        self.assertIn('No available purchase lots', result['error'])
+    
+    def test_fifo_invalid_sale_id(self):
+        """Test FIFO with non-existent sale ID."""
+        with self.assertRaises(ValueError) as context:
+            self.repo.apply_fifo(99999)
+        
+        self.assertIn('not found', str(context.exception))
+    
+    def test_fifo_buy_trade_error(self):
+        """Test FIFO with a BUY trade (should fail)."""
+        with self.assertRaises(ValueError) as context:
+            self.repo.apply_fifo(self.purchase1_id)  # This is a BUY
+        
+        self.assertIn('not a SELL', str(context.exception))
+    
+    def test_fifo_holding_period_calculation(self):
+        """Test that FIFO correctly calculates holding periods."""
+        result = self.repo.apply_fifo(self.sale_id)
+        
+        self.assertTrue(result['success'])
+        
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        
+        # Each pairing should have holding_period_days calculated
+        for p in pairings:
+            self.assertIsNotNone(p['holding_period_days'])
+            self.assertGreater(p['holding_period_days'], 0)
+        
+        # First pairing (oldest) should have longest holding period
+        self.assertGreater(pairings[0]['holding_period_days'], 
+                          pairings[1]['holding_period_days'])
+    
+    def test_fifo_time_test_qualification(self):
+        """Test that FIFO correctly marks time test qualification."""
+        # Create old purchase (> 3 years)
+        old_purchase = self._create_test_trade(
+            self.security_id, int(datetime(2020, 1, 1).timestamp()), 80.0, 30.0, TradeType.BUY
+        )
+        
+        # Create sale
+        sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 30.0, TradeType.SELL
+        )
+        
+        result = self.repo.apply_fifo(sale_id)
+        
+        self.assertTrue(result['success'])
+        
+        pairings = self.repo.get_pairings_for_sale(sale_id)
+        self.assertEqual(len(pairings), 1)
+        
+        # Should be time test qualified (> 3 years)
+        self.assertTrue(pairings[0]['time_test_qualified'])
+        self.assertGreater(pairings[0]['holding_period_days'], 1095)
+
+
+class TestRemainingQuantityTracking(TestPairingsRepository):
+    """Test that remaining_quantity is properly maintained in trades table."""
+    
+    def setUp(self):
+        """Set up test data."""
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        
+        self.purchase_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 1, 15).timestamp()), 100.0, 50.0, TradeType.BUY
+        )
+        self.sale_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 15).timestamp()), 180.0, 30.0, TradeType.SELL
+        )
+    
+    def _get_remaining_quantity(self, trade_id):
+        """Helper to get remaining_quantity for a trade."""
+        cur = self.conn.execute("SELECT remaining_quantity FROM trades WHERE id = ?", (trade_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    
+    def test_initial_remaining_quantity(self):
+        """Test that remaining_quantity is initialized to number_of_shares."""
+        purchase_remaining = self._get_remaining_quantity(self.purchase_id)
+        sale_remaining = self._get_remaining_quantity(self.sale_id)
+        
+        self.assertEqual(purchase_remaining, 50.0)
+        self.assertEqual(sale_remaining, 30.0)
+    
+    def test_create_pairing_decrements_remaining_quantity(self):
+        """Test that creating a pairing decrements remaining_quantity for both trades."""
+        # Pair 20 shares
+        self.repo.create_pairing(self.sale_id, self.purchase_id, 20.0, 'FIFO')
+        
+        # Check remaining quantities
+        purchase_remaining = self._get_remaining_quantity(self.purchase_id)
+        sale_remaining = self._get_remaining_quantity(self.sale_id)
+        
+        self.assertEqual(purchase_remaining, 30.0)  # 50 - 20
+        self.assertEqual(sale_remaining, 10.0)  # 30 - 20
+    
+    def test_delete_pairing_restores_remaining_quantity(self):
+        """Test that deleting a pairing restores remaining_quantity."""
+        # Create pairing
+        pairing_id = self.repo.create_pairing(self.sale_id, self.purchase_id, 20.0, 'FIFO')
+        
+        # Verify decremented
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 30.0)
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), 10.0)
+        
+        # Delete pairing
+        success = self.repo.delete_pairing(pairing_id)
+        self.assertTrue(success)
+        
+        # Verify restored
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 50.0)
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), 30.0)
+    
+    def test_multiple_pairings_accumulate_correctly(self):
+        """Test that multiple pairings correctly accumulate remaining_quantity changes."""
+        # Create second sale
+        sale2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 20).timestamp()), 185.0, 25.0, TradeType.SELL
+        )
+        
+        # Pair 15 from purchase to first sale
+        self.repo.create_pairing(self.sale_id, self.purchase_id, 15.0, 'FIFO')
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 35.0)
+        
+        # Pair 20 from purchase to second sale
+        self.repo.create_pairing(sale2_id, self.purchase_id, 20.0, 'FIFO')
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 15.0)  # 50 - 15 - 20
+        
+        # Check sales
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), 15.0)  # 30 - 15
+        self.assertEqual(self._get_remaining_quantity(sale2_id), 5.0)  # 25 - 20
+    
+    def test_get_available_lots_uses_remaining_quantity(self):
+        """Test that get_available_lots correctly uses remaining_quantity."""
+        # Pair some shares
+        self.repo.create_pairing(self.sale_id, self.purchase_id, 20.0, 'FIFO')
+        
+        # Create new sale to query available lots
+        sale2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 12, 1).timestamp()), 190.0, 30.0, TradeType.SELL
+        )
+        
+        available_lots = self.repo.get_available_lots(self.security_id, int(datetime(2024, 12, 1).timestamp()))
+        
+        # Should have one lot with 30 shares remaining (50 - 20)
+        self.assertEqual(len(available_lots), 1)
+        self.assertEqual(available_lots[0]['id'], self.purchase_id)
+        self.assertEqual(available_lots[0]['available_quantity'], 30.0)
+        self.assertEqual(available_lots[0]['paired_quantity'], 20.0)
+    
+    def test_calculate_available_quantity_uses_remaining_quantity(self):
+        """Test that calculate_available_quantity_for_purchase uses remaining_quantity."""
+        # Pair some shares
+        self.repo.create_pairing(self.sale_id, self.purchase_id, 25.0, 'FIFO')
+        
+        available = self.repo.calculate_available_quantity_for_purchase(self.purchase_id)
+        
+        # Should be 25 remaining (50 - 25)
+        self.assertEqual(available, 25.0)
+    
+    def test_fifo_method_maintains_remaining_quantity(self):
+        """Test that apply_fifo correctly maintains remaining_quantity."""
+        # Create additional purchases
+        purchase2_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 3, 20).timestamp()), 150.0, 40.0, TradeType.BUY
+        )
+        
+        # Create large sale that requires both purchases
+        sale_big_id = self._create_test_trade(
+            self.security_id, int(datetime(2024, 11, 25).timestamp()), 200.0, 80.0, TradeType.SELL
+        )
+        
+        # Apply FIFO
+        result = self.repo.apply_fifo(sale_big_id)
+        self.assertTrue(result['success'])
+        
+        # Check remaining quantities
+        # Purchase 1: 50 - 50 = 0 (fully used)
+        # Purchase 2: 40 - 30 = 10 (partially used)
+        # Sale: 80 - 80 = 0 (fully paired)
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 0.0)
+        self.assertEqual(self._get_remaining_quantity(purchase2_id), 10.0)
+        self.assertEqual(self._get_remaining_quantity(sale_big_id), 0.0)
+
+
 def run_tests():
     """Run all tests and display results."""
     # Create test suite
@@ -1037,6 +1394,8 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestPairingSummary))
     suite.addTests(loader.loadTestsFromTestCase(TestLotAvailability))
     suite.addTests(loader.loadTestsFromTestCase(TestMethodCombinations))
+    suite.addTests(loader.loadTestsFromTestCase(TestFIFOMethod))
+    suite.addTests(loader.loadTestsFromTestCase(TestRemainingQuantityTracking))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)

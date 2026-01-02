@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import sqlite3
 from ..base import BaseRepository
-from .trades import TradeType
+from .trades import TradeType, TradesRepository
 
 
 class PairingsRepository(BaseRepository):
@@ -11,6 +11,16 @@ class PairingsRepository(BaseRepository):
     This repository handles the pairing of sale transactions with specific purchase lots
     for optimized tax reporting using various matching methods (FIFO, LIFO, MaxLose, MaxProfit).
     """
+
+    def __init__(self, conn=None, logger=None):
+        """Initialize the PairingsRepository.
+        
+        Args:
+            conn: Optional database connection
+            logger: Optional logger instance
+        """
+        super().__init__(conn, logger)
+        self.trades_repo = TradesRepository(conn, logger)
 
     def create_table(self) -> None:
         """Create the pairings table with indexes."""
@@ -86,6 +96,11 @@ class PairingsRepository(BaseRepository):
             holding_period_days,
             notes
         ))
+        
+        # Update remaining_quantity for both purchase and sale trades
+        self.trades_repo.update_remaining_quantity(purchase_trade_id, -quantity)
+        self.trades_repo.update_remaining_quantity(sale_trade_id, -quantity)
+        
         self.commit()
         self.logger.info(f"Created pairing: sale_id={sale_trade_id}, purchase_id={purchase_trade_id}, "
                         f"quantity={quantity}, method={method}, time_test={time_test_qualified}")
@@ -149,24 +164,31 @@ class PairingsRepository(BaseRepository):
         Returns:
             True if pairing was deleted, False if it was locked or didn't exist
         """
-        # Check if pairing is locked
-        check_sql = "SELECT locked FROM pairings WHERE id = ?"
-        cur = self.execute(check_sql, (pairing_id,))
+        # Get pairing details before deletion
+        get_pairing_sql = "SELECT locked, quantity, sale_trade_id, purchase_trade_id FROM pairings WHERE id = ?"
+        cur = self.execute(get_pairing_sql, (pairing_id,))
         row = cur.fetchone()
         
         if not row:
             self.logger.warning(f"Pairing {pairing_id} not found")
             return False
         
-        if row[0]:  # locked = 1
+        locked, quantity, sale_trade_id, purchase_trade_id = row
+        
+        if locked:  # locked = 1
             self.logger.warning(f"Cannot delete locked pairing {pairing_id}")
             return False
         
         # Delete the pairing
         delete_sql = "DELETE FROM pairings WHERE id = ?"
         self.execute(delete_sql, (pairing_id,))
+        
+        # Restore remaining_quantity for both trades
+        self.trades_repo.update_remaining_quantity(purchase_trade_id, quantity)
+        self.trades_repo.update_remaining_quantity(sale_trade_id, quantity)
+        
         self.commit()
-        self.logger.info(f"Deleted pairing {pairing_id}")
+        self.logger.info(f"Deleted pairing {pairing_id}, restored {quantity} to trades")
         return True
 
     def lock_pairing(self, pairing_id: int, reason: str) -> bool:
@@ -511,8 +533,7 @@ class PairingsRepository(BaseRepository):
     def get_available_lots(self, security_id: int, sale_timestamp: int) -> List[Dict]:
         """Get all available purchase lots for a security that can be paired with a sale.
         
-        Returns purchase trades with their remaining available quantities after accounting
-        for quantities already used in other pairings.
+        Returns purchase trades with their remaining available quantities.
         
         Args:
             security_id: ID of the security
@@ -532,8 +553,9 @@ class PairingsRepository(BaseRepository):
             }
         """
         # Get all purchase trades for this security before the sale
+        # Use remaining_quantity directly from trades table (much faster!)
         sql = """
-            SELECT t.id, t.timestamp, t.price_for_share, t.number_of_shares
+            SELECT t.id, t.timestamp, t.price_for_share, t.number_of_shares, t.remaining_quantity
             FROM trades t
             WHERE t.isin_id = ?
             AND t.trade_type = ?
@@ -543,21 +565,12 @@ class PairingsRepository(BaseRepository):
         cur = self.execute(sql, (security_id, TradeType.BUY, sale_timestamp))
         purchases = cur.fetchall()
         
-        # Calculate paired quantities for each purchase
+        # Build result list
         result = []
         for purchase in purchases:
-            purchase_id, timestamp, price, original_qty = purchase
+            purchase_id, timestamp, price, original_qty, remaining_qty = purchase
             
-            # Get total quantity already paired from this purchase
-            paired_sql = """
-                SELECT COALESCE(SUM(quantity), 0)
-                FROM pairings
-                WHERE purchase_trade_id = ?
-            """
-            paired_cur = self.execute(paired_sql, (purchase_id,))
-            paired_qty = paired_cur.fetchone()[0]
-            
-            available_qty = original_qty - paired_qty
+            paired_qty = original_qty - remaining_qty
             
             # Calculate holding period and time test
             holding_days = self.calculate_holding_period(timestamp, sale_timestamp)
@@ -569,7 +582,7 @@ class PairingsRepository(BaseRepository):
                 'price_for_share': price,
                 'quantity': original_qty,
                 'paired_quantity': paired_qty,
-                'available_quantity': available_qty,
+                'available_quantity': remaining_qty,
                 'holding_period_days': holding_days,
                 'time_test_qualified': time_qualified
             })
@@ -585,8 +598,8 @@ class PairingsRepository(BaseRepository):
         Returns:
             Remaining quantity available for pairing
         """
-        # Get original quantity
-        trade_sql = "SELECT number_of_shares FROM trades WHERE id = ?"
+        # Simply read remaining_quantity from trades table
+        trade_sql = "SELECT remaining_quantity FROM trades WHERE id = ?"
         cur = self.execute(trade_sql, (purchase_trade_id,))
         row = cur.fetchone()
         
@@ -594,14 +607,7 @@ class PairingsRepository(BaseRepository):
             self.logger.warning(f"Purchase trade {purchase_trade_id} not found")
             return 0.0
         
-        original_qty = row[0]
-        
-        # Get paired quantity
-        paired_sql = "SELECT COALESCE(SUM(quantity), 0) FROM pairings WHERE purchase_trade_id = ?"
-        paired_cur = self.execute(paired_sql, (purchase_trade_id,))
-        paired_qty = paired_cur.fetchone()[0]
-        
-        return original_qty - paired_qty
+        return row[0]
 
     def validate_pairing_availability(self, purchase_trade_id: int, requested_quantity: float) -> Tuple[bool, str]:
         """Validate that sufficient quantity is available for a pairing.
@@ -625,3 +631,190 @@ class PairingsRepository(BaseRepository):
             return False, f"Insufficient quantity: {available} available, {requested_quantity} requested"
         
         return True, ""
+
+    def _get_next_available_lot(self, security_id: int, sale_timestamp: int, order_by: str, time_test_only: bool = False) -> Optional[Dict]:
+        """Get the next available purchase lot based on method criteria.
+        
+        Args:
+            security_id: ID of the security
+            sale_timestamp: Timestamp of the sale
+            order_by: SQL ORDER BY clause (e.g., 't.timestamp ASC', 't.price_for_share DESC')
+            time_test_only: If True, only return lots that meet 3-year time test
+            
+        Returns:
+            Dictionary with lot info or None if no lots available
+        """
+        # Calculate 3-year threshold if time test required
+        time_test_threshold = 0
+        if time_test_only:
+            # 3 years in seconds (accounting for leap years, approximately)
+            three_years_seconds = 3 * 365.25 * 24 * 3600
+            time_test_threshold = sale_timestamp - int(three_years_seconds)
+        
+        sql = f"""
+            SELECT t.id, t.timestamp, t.price_for_share, t.remaining_quantity
+            FROM trades t
+            WHERE t.isin_id = ?
+            AND t.trade_type = ?
+            AND t.timestamp < ?
+            AND t.remaining_quantity > 0
+            {'AND t.timestamp < ?' if time_test_only else ''}
+            ORDER BY {order_by}
+            LIMIT 1
+        """
+        
+        params = (security_id, TradeType.BUY, sale_timestamp)
+        if time_test_only:
+            params = params + (time_test_threshold,)
+        
+        cur = self.execute(sql, params)
+        row = cur.fetchone()
+        
+        if not row:
+            return None
+        
+        lot_id, timestamp, price, remaining_qty = row
+        
+        # Calculate holding period and time test qualification
+        holding_days = self.calculate_holding_period(timestamp, sale_timestamp)
+        time_qualified = self.check_time_test(timestamp, sale_timestamp)
+        
+        return {
+            'id': lot_id,
+            'timestamp': timestamp,
+            'price_for_share': price,
+            'available_quantity': remaining_qty,
+            'holding_period_days': holding_days,
+            'time_test_qualified': time_qualified
+        }
+
+    def _apply_pairing_method(self, sale_trade_id: int, method: str, order_by: str, time_test_only: bool = False) -> Dict:
+        """Apply a pairing method using the common algorithm.
+        
+        This is the core pairing algorithm used by all methods (FIFO, LIFO, MaxLose, MaxProfit).
+        The only difference between methods is the ORDER BY clause and optional time test filter.
+        
+        Algorithm:
+        0) Get sale_trade.remaining_quantity
+        1) Search for next BUY trade using method-specific query
+        2) quantity_pairing = min(sale_trade.remaining_quantity, buy_trade.remaining_quantity)
+        3) Create pairing (automatically updates remaining_quantity for both trades)
+        4) Repeat until sale_trade.remaining_quantity <= 0
+        
+        Args:
+            sale_trade_id: ID of the sale trade to pair
+            method: Pairing method name ('FIFO', 'LIFO', 'MaxLose', 'MaxProfit')
+            order_by: SQL ORDER BY clause for lot selection
+            time_test_only: If True, only use lots that meet 3-year time test
+            
+        Returns:
+            Dictionary with pairing results
+        """
+        # Get sale transaction details
+        sale_sql = """
+            SELECT t.id, t.isin_id, t.number_of_shares, t.timestamp, t.trade_type, t.remaining_quantity
+            FROM trades t
+            WHERE t.id = ?
+        """
+        cur = self.execute(sale_sql, (sale_trade_id,))
+        sale = cur.fetchone()
+        
+        if not sale:
+            raise ValueError(f"Sale trade {sale_trade_id} not found")
+        
+        sale_id, security_id, sale_qty, sale_timestamp, trade_type, remaining_to_pair = sale
+        
+        if trade_type != TradeType.SELL:
+            raise ValueError(f"Trade {sale_trade_id} is not a SELL transaction")
+        
+        # Check remaining unpaired quantity
+        if remaining_to_pair <= 0:
+            return {
+                'success': True,
+                'pairings_created': 0,
+                'total_quantity_paired': 0.0,
+                'error': f"Sale {sale_trade_id} is already fully paired"
+            }
+        
+        # Apply pairing algorithm: loop until sale is fully paired
+        pairings_created = 0
+        total_paired = 0.0
+        
+        while remaining_to_pair > 0:
+            # Step 1: Get next available lot based on method
+            lot = self._get_next_available_lot(security_id, sale_timestamp, order_by, time_test_only)
+            
+            if not lot:
+                # No more lots available
+                if pairings_created == 0:
+                    # No lots found at all
+                    error_msg = f"No available purchase lots found for security {security_id} before {sale_timestamp}"
+                else:
+                    # Some lots paired, but not enough
+                    error_msg = f"Insufficient quantity: need {remaining_to_pair} more, but no lots available"
+                
+                return {
+                    'success': False,
+                    'pairings_created': pairings_created,
+                    'total_quantity_paired': total_paired,
+                    'error': error_msg
+                }
+            
+            # Step 2: Calculate quantity to pair from this lot
+            quantity_to_pair = min(remaining_to_pair, lot['available_quantity'])
+            
+            # Step 3: Create pairing (this updates remaining_quantity in database)
+            pairing_id = self.create_pairing(
+                sale_trade_id=sale_trade_id,
+                purchase_trade_id=lot['id'],
+                quantity=quantity_to_pair,
+                method=method,
+                time_test_qualified=lot['time_test_qualified'],
+                holding_period_days=lot['holding_period_days']
+            )
+            
+            # Step 4: Read updated remaining_quantity from database
+            pairings_created += 1
+            total_paired += quantity_to_pair
+            remaining_to_pair = self.trades_repo.get_remaining_quantity(sale_trade_id)
+            
+            self.logger.debug(f"{method} pairing: sale={sale_trade_id}, purchase={lot['id']}, "
+                            f"qty={quantity_to_pair}, holding_days={lot['holding_period_days']}, "
+                            f"time_qualified={lot['time_test_qualified']}")
+        
+        self.logger.info(f"{method} method applied to sale {sale_trade_id}: "
+                        f"{pairings_created} pairings created, {total_paired} shares paired")
+        
+        return {
+            'success': True,
+            'pairings_created': pairings_created,
+            'total_quantity_paired': total_paired,
+            'error': None
+        }
+
+    def apply_fifo(self, sale_trade_id: int) -> Dict:
+        """Apply FIFO (First-In-First-Out) method to pair a sale with purchases.
+        
+        FIFO matches the oldest available purchase lots first. This is a common
+        default method in many jurisdictions.
+        
+        Note: If the sale already has pairings, this method will only pair the
+        remaining unpaired quantity. To replace existing pairings, delete them
+        first using delete_pairing() before calling this method.
+        
+        Args:
+            sale_trade_id: ID of the sale trade to pair
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'pairings_created': int,
+                'total_quantity_paired': float,
+                'error': Optional[str]
+            }
+            
+        Raises:
+            ValueError: If sale trade doesn't exist or isn't a SELL transaction
+        """
+        return self._apply_pairing_method(sale_trade_id, 'FIFO', 't.timestamp ASC')

@@ -21,6 +21,7 @@ class TradesRepository(BaseRepository):
             "id_string TEXT NOT NULL UNIQUE, "
             "trade_type INTEGER NOT NULL, "
             "number_of_shares REAL NOT NULL, "
+            "remaining_quantity REAL NOT NULL, "  # Tracks unpaired/unmatched quantity
             "price_for_share REAL NOT NULL, "
             "currency_of_price TEXT NOT NULL, "
             "total_czk REAL NOT NULL, "
@@ -34,6 +35,7 @@ class TradesRepository(BaseRepository):
         # Indexes for common queries
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_isin_id ON trades(isin_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_remaining ON trades(remaining_quantity)")
         self.commit()
 
     def insert(self,
@@ -56,15 +58,40 @@ class TradesRepository(BaseRepository):
 
         sql = (
             "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, trade_type, number_of_shares, "
-            "price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
-            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            "remaining_quantity, price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
+            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         cur = self.execute(sql, (
             timestamp, isin_id, id_string, int(trade_type), number_of_shares,
+            number_of_shares,  # Initialize remaining_quantity to full amount
             price_for_share, currency_of_price, total_czk, stamp_tax_czk,
             conversion_fee_czk, french_transaction_tax_czk
         ))
         self.commit()
         return cur.lastrowid
+
+    def update_remaining_quantity(self, trade_id: int, quantity_change: float) -> None:
+        """Update the remaining_quantity for a trade.
+        
+        Args:
+            trade_id: ID of the trade to update
+            quantity_change: Amount to change (positive to add, negative to subtract)
+        """
+        sql = "UPDATE trades SET remaining_quantity = remaining_quantity + ? WHERE id = ?"
+        self.execute(sql, (quantity_change, trade_id))
+
+    def get_remaining_quantity(self, trade_id: int) -> float:
+        """Get the current remaining_quantity for a trade.
+        
+        Args:
+            trade_id: ID of the trade
+            
+        Returns:
+            Current remaining quantity, or 0.0 if trade not found
+        """
+        sql = "SELECT remaining_quantity FROM trades WHERE id = ?"
+        cur = self.execute(sql, (trade_id,))
+        row = cur.fetchone()
+        return row[0] if row else 0.0
 
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         sql = (
