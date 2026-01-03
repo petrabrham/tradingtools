@@ -8,6 +8,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from datetime import datetime
 from .base_view import BaseView
+from db.repositories.trades import TradeType
 
 
 class TradesView(BaseView):
@@ -56,7 +57,7 @@ class TradesView(BaseView):
             "French Transaction Tax (CZK)",
         )
 
-        tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings')
+        tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', selectmode='extended')
         tree.grid(row=0, column=0, sticky='nsew')
         self.tree = tree
 
@@ -120,6 +121,9 @@ class TradesView(BaseView):
         # Bind Ctrl+C for clipboard copy
         tree.bind("<Control-c>", lambda e: self.copy_to_clipboard(e, self.root_widget))
         tree.bind("<Control-C>", lambda e: self.copy_to_clipboard(e, self.root_widget))
+        
+        # Bind right-click for context menu
+        tree.bind("<Button-3>", self._show_context_menu)
     
     def update_view(self, start_timestamp: int, end_timestamp: int) -> None:
         """
@@ -189,8 +193,12 @@ class TradesView(BaseView):
                     
                     # Determine tag for coloring
                     tag = 'buy' if int(trade_type_val) == 1 else ('sell' if int(trade_type_val) == 2 else '')
+                    
+                    # Use trade ID as iid for later retrieval
+                    trade_id = r[0]
+                    child_iid = f"tr_trade_{trade_id}"
 
-                    self.tree.insert(parent_iid, tk.END, tags=(tag,), values=(
+                    self.tree.insert(parent_iid, tk.END, iid=child_iid, tags=(tag,), values=(
                         "",  # Name
                         "",  # Ticker
                         "",  # Shares Before / To
@@ -207,3 +215,139 @@ class TradesView(BaseView):
                     ))
         except Exception as e:
             messagebox.showerror("Database Error", f"Error loading trades: {e}")
+    
+    def _show_context_menu(self, event):
+        """Show context menu on right-click."""
+        # Create context menu
+        menu = tk.Menu(self.tree, tearoff=0)
+        menu.add_command(label="Pair Selected Trades", command=self._pair_selected_trades)
+        
+        # Show menu at cursor position
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    
+    def _pair_selected_trades(self):
+        """Manually pair selected trades."""
+        if not self.db or not self.db.conn:
+            messagebox.showerror("Error", "No database connection.")
+            return
+        
+        selected_items = self.tree.selection()
+        
+        if not selected_items:
+            messagebox.showerror("Error", "No trades selected.")
+            return
+        
+        # Filter out parent rows - only process child rows (trades)
+        trade_items = []
+        for item_id in selected_items:
+            if item_id.startswith("tr_trade_"):
+                trade_items.append(item_id)
+        
+        if len(trade_items) != 2:
+            messagebox.showerror("Error", "Please select exactly 2 trades (1 BUY and 1 SELL).")
+            return
+        
+        # Extract trade IDs from iids
+        try:
+            trade_ids = [int(item_id.replace("tr_trade_", "")) for item_id in trade_items]
+        except ValueError:
+            messagebox.showerror("Error", "Invalid trade selection.")
+            return
+        
+        # Fetch trade details from database
+        try:
+            trades_data = []
+            for trade_id in trade_ids:
+                trade = self.db.trades_repo.get_by_id(trade_id)
+                if not trade:
+                    messagebox.showerror("Error", f"Trade with ID {trade_id} not found.")
+                    return
+                trades_data.append(trade)
+            
+            # Validate: exactly one BUY and one SELL
+            buy_trades = [t for t in trades_data if t[4] == TradeType.BUY]
+            sell_trades = [t for t in trades_data if t[4] == TradeType.SELL]
+            
+            if len(buy_trades) != 1 or len(sell_trades) != 1:
+                messagebox.showerror("Error", "Please select exactly 1 BUY trade and 1 SELL trade.")
+                return
+            
+            buy_trade = buy_trades[0]
+            sell_trade = sell_trades[0]
+            
+            # Validate: same security (isin_id)
+            if buy_trade[2] != sell_trade[2]:
+                messagebox.showerror("Error", "Selected trades must be for the same security.")
+                return
+            
+            # Validate: buy must be older than sell
+            buy_timestamp = buy_trade[1]
+            sell_timestamp = sell_trade[1]
+            if buy_timestamp >= sell_timestamp:
+                messagebox.showerror("Error", "BUY trade must be older than SELL trade.")
+                return
+            
+            # Get available quantities
+            buy_id = buy_trade[0]
+            sell_id = sell_trade[0]
+            buy_remaining = buy_trade[6]  # remaining_quantity
+            sell_remaining = sell_trade[6]  # remaining_quantity (should be negative or zero)
+            
+            if buy_remaining <= 0:
+                messagebox.showerror("Error", "BUY trade is fully paired (no remaining quantity).")
+                return
+            
+            if sell_remaining >= 0:
+                messagebox.showerror("Error", "SELL trade is fully paired (no remaining quantity).")
+                return
+            
+            # Determine pairing quantity (minimum of available quantities)
+            pair_quantity = min(buy_remaining, -sell_remaining)
+            
+            # Calculate holding period in days
+            holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
+            
+            # Check if time test qualified (>3 years = 1095 days, accounting for leap years)
+            time_test_qualified = holding_period_days >= 1095
+            
+            # Create the pairing
+            pairing_id = self.db.pairings_repo.create_pairing(
+                sale_trade_id=sell_id,
+                purchase_trade_id=buy_id,
+                quantity=pair_quantity,
+                method='Manual',
+                time_test_qualified=time_test_qualified,
+                holding_period_days=holding_period_days,
+                notes=None
+            )
+            
+            self.db.conn.commit()
+            
+            self.db.logger.info(
+                f"Manual pairing created: {pair_quantity:.7f} shares, "
+                f"holding period: {holding_period_days} days, "
+                f"time test qualified: {time_test_qualified}"
+            )
+            
+            # Update remaining quantities in the treeview
+            new_buy_remaining = buy_remaining - pair_quantity
+            new_sell_remaining = sell_remaining + pair_quantity
+            
+            buy_iid = f"tr_trade_{buy_id}"
+            sell_iid = f"tr_trade_{sell_id}"
+            
+            # Update the "Remaining Shares" column (index 7) in tree values
+            buy_values = list(self.tree.item(buy_iid, 'values'))
+            buy_values[7] = f"{new_buy_remaining:.7f}"
+            self.tree.item(buy_iid, values=buy_values)
+            
+            sell_values = list(self.tree.item(sell_iid, 'values'))
+            sell_values[7] = f"{new_sell_remaining:.7f}"
+            self.tree.item(sell_iid, values=sell_values)
+            
+        except Exception as e:
+            self.db.conn.rollback()
+            messagebox.showerror("Error", f"Failed to create pairing: {e}")

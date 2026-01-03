@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import sqlite3
 from enum import IntEnum
 from ..base import BaseRepository
@@ -92,6 +92,20 @@ class TradesRepository(BaseRepository):
         cur = self.execute(sql, (trade_id,))
         row = cur.fetchone()
         return row[0] if row else 0.0
+    
+    def get_by_id(self, trade_id: int) -> Optional[Tuple]:
+        """Get a trade by its ID.
+        
+        Args:
+            trade_id: ID of the trade to retrieve
+            
+        Returns:
+            Trade record as tuple, or None if not found
+        """
+        sql = "SELECT * FROM trades WHERE id = ?"
+        cur = self.execute(sql, (trade_id,))
+        return cur.fetchone()
+
 
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         sql = (

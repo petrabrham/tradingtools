@@ -99,7 +99,7 @@ class PairingsRepository(BaseRepository):
         
         # Update remaining_quantity for both purchase and sale trades
         self.trades_repo.update_remaining_quantity(purchase_trade_id, -quantity)
-        self.trades_repo.update_remaining_quantity(sale_trade_id, -quantity)
+        self.trades_repo.update_remaining_quantity(sale_trade_id, quantity)
         
         self.commit()
         self.logger.info(f"Created pairing: sale_id={sale_trade_id}, purchase_id={purchase_trade_id}, "
@@ -185,7 +185,7 @@ class PairingsRepository(BaseRepository):
         
         # Restore remaining_quantity for both trades
         self.trades_repo.update_remaining_quantity(purchase_trade_id, quantity)
-        self.trades_repo.update_remaining_quantity(sale_trade_id, quantity)
+        self.trades_repo.update_remaining_quantity(sale_trade_id, -quantity)
         
         self.commit()
         self.logger.info(f"Deleted pairing {pairing_id}, restored {quantity} to trades")
