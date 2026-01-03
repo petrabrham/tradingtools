@@ -72,11 +72,13 @@ class TradesRepository(BaseRepository):
     def update_remaining_quantity(self, trade_id: int, quantity_change: float) -> None:
         """Update the remaining_quantity for a trade.
         
+        Rounds the result to 10 decimal places to avoid floating-point precision errors.
+        
         Args:
             trade_id: ID of the trade to update
             quantity_change: Amount to change (positive to add, negative to subtract)
         """
-        sql = "UPDATE trades SET remaining_quantity = remaining_quantity + ? WHERE id = ?"
+        sql = "UPDATE trades SET remaining_quantity = ROUND(remaining_quantity + ?, 10) WHERE id = ?"
         self.execute(sql, (quantity_change, trade_id))
 
     def get_remaining_quantity(self, trade_id: int) -> float:

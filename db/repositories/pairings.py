@@ -5,6 +5,10 @@ from ..base import BaseRepository
 from .trades import TradeType, TradesRepository
 from config.config_loader import get_time_test_holding_period_years
 
+# Maximum acceptable quantity error for floating-point comparisons
+# Quantities below this threshold are considered zero
+QUANTITY_EPSILON = 1e-10
+
 
 class PairingsRepository(BaseRepository):
     """Repository for managing trade pairings between purchases and sales.
@@ -77,7 +81,7 @@ class PairingsRepository(BaseRepository):
         Raises:
             ValueError: If required parameters are invalid
         """
-        if quantity <= 0:
+        if quantity <= QUANTITY_EPSILON:
             raise ValueError("Quantity must be positive")
         if method not in ('FIFO', 'LIFO', 'MaxLose', 'MaxProfit', 'Manual'):
             raise ValueError(f"Invalid method: {method}")
@@ -99,8 +103,15 @@ class PairingsRepository(BaseRepository):
         ))
         
         # Update remaining_quantity for both purchase and sale trades
-        self.trades_repo.update_remaining_quantity(purchase_trade_id, -quantity)
-        self.trades_repo.update_remaining_quantity(sale_trade_id, quantity)
+        # Database design: BUY quantities are POSITIVE, SELL quantities are NEGATIVE
+        # This allows: SELECT SUM(number_of_shares) to get net position without conditional logic
+        #
+        # When creating a pairing:
+        #   - BUY: 50 remaining -> pair 20 -> 30 remaining (decrease: 50 + (-20) = 30)
+        #   - SELL: -30 remaining -> pair 20 -> -10 remaining (increase: -30 + 20 = -10)
+        # Both moves towards zero as shares are paired.
+        self.trades_repo.update_remaining_quantity(purchase_trade_id, -quantity)  # Decrease BUY
+        self.trades_repo.update_remaining_quantity(sale_trade_id, quantity)      # Increase SELL
         
         self.commit()
         self.logger.info(f"Created pairing: sale_id={sale_trade_id}, purchase_id={purchase_trade_id}, "
@@ -185,8 +196,12 @@ class PairingsRepository(BaseRepository):
         self.execute(delete_sql, (pairing_id,))
         
         # Restore remaining_quantity for both trades
-        self.trades_repo.update_remaining_quantity(purchase_trade_id, quantity)
-        self.trades_repo.update_remaining_quantity(sale_trade_id, -quantity)
+        # When deleting a pairing, reverse the pairing operation:
+        #   - BUY: 30 remaining -> unpair 20 -> 50 remaining (increase: 30 + 20 = 50)
+        #   - SELL: -10 remaining -> unpair 20 -> -30 remaining (decrease: -10 + (-20) = -30)
+        # Both restore to their original unpaired state.
+        self.trades_repo.update_remaining_quantity(purchase_trade_id, quantity)   # Increase BUY
+        self.trades_repo.update_remaining_quantity(sale_trade_id, -quantity)     # Decrease SELL
         
         self.commit()
         self.logger.info(f"Deleted pairing {pairing_id}, restored {quantity} to trades")
@@ -626,10 +641,10 @@ class PairingsRepository(BaseRepository):
         """
         available = self.calculate_available_quantity_for_purchase(purchase_trade_id)
         
-        if requested_quantity <= 0:
+        if requested_quantity <= QUANTITY_EPSILON:
             return False, "Requested quantity must be positive"
         
-        if available <= 0:
+        if available <= QUANTITY_EPSILON:
             return False, f"Purchase lot {purchase_trade_id} is fully paired (no quantity available)"
         
         if requested_quantity > available:
@@ -671,7 +686,7 @@ class PairingsRepository(BaseRepository):
             WHERE t.isin_id = ?
             AND t.trade_type = ?
             AND t.timestamp < ?
-            AND t.remaining_quantity > 0
+            AND t.remaining_quantity > {QUANTITY_EPSILON}
             {'AND t.timestamp < ?' if time_test_only else ''}
             ORDER BY {order_by}
             LIMIT 1
@@ -713,7 +728,7 @@ class PairingsRepository(BaseRepository):
         1) Search for next BUY trade using method-specific query
         2) quantity_pairing = min(sale_trade.remaining_quantity, buy_trade.remaining_quantity)
         3) Create pairing (automatically updates remaining_quantity for both trades)
-        4) Repeat until sale_trade.remaining_quantity <= 0
+        4) Repeat until sale_trade.remaining_quantity <= QUANTITY_EPSILON
         
         Args:
             sale_trade_id: ID of the sale trade to pair
@@ -726,7 +741,7 @@ class PairingsRepository(BaseRepository):
         """
         # Get sale transaction details
         sale_sql = """
-            SELECT t.id, t.isin_id, t.number_of_shares, t.timestamp, t.trade_type, t.remaining_quantity
+            SELECT t.id, t.isin_id, t.number_of_shares, t.timestamp, t.trade_type, ABS(t.remaining_quantity)
             FROM trades t
             WHERE t.id = ?
         """
@@ -742,7 +757,8 @@ class PairingsRepository(BaseRepository):
             raise ValueError(f"Trade {sale_trade_id} is not a SELL transaction")
         
         # Check remaining unpaired quantity
-        if remaining_to_pair <= 0:
+        # Note: remaining_to_pair is positive - because we took ABS() above in SQL
+        if remaining_to_pair <= QUANTITY_EPSILON:
             return {
                 'success': True,
                 'pairings_created': 0,
@@ -754,7 +770,7 @@ class PairingsRepository(BaseRepository):
         pairings_created = 0
         total_paired = 0.0
         
-        while remaining_to_pair > 0:
+        while remaining_to_pair > QUANTITY_EPSILON:
             # Step 1: Get next available lot based on method
             lot = self._get_next_available_lot(security_id, sale_timestamp, order_by, time_test_only)
             
@@ -787,14 +803,23 @@ class PairingsRepository(BaseRepository):
                 holding_period_days=lot['holding_period_days']
             )
             
-            # Step 4: Read updated remaining_quantity from database
-            pairings_created += 1
-            total_paired += quantity_to_pair
-            remaining_to_pair = self.trades_repo.get_remaining_quantity(sale_trade_id)
-            
-            self.logger.debug(f"{method} pairing: sale={sale_trade_id}, purchase={lot['id']}, "
-                            f"qty={quantity_to_pair}, holding_days={lot['holding_period_days']}, "
-                            f"time_qualified={lot['time_test_qualified']}")
+            # Step 4: Update counters only if pairing was created successfully
+            if pairing_id:
+                pairings_created += 1
+                total_paired += quantity_to_pair
+                remaining_to_pair -= quantity_to_pair
+                
+                self.logger.debug(f"{method} pairing: sale={sale_trade_id}, purchase={lot['id']}, "
+                                f"qty={quantity_to_pair}, holding_days={lot['holding_period_days']}, "
+                                f"time_qualified={lot['time_test_qualified']}")
+            else:
+                self.logger.error(f"Failed to create pairing for sale {sale_trade_id} with purchase {lot['id']}")
+                return {
+                    'success': False,
+                    'pairings_created': pairings_created,
+                    'total_quantity_paired': total_paired,
+                    'error': f"Failed to create pairing record"
+                }
         
         self.logger.info(f"{method} method applied to sale {sale_trade_id}: "
                         f"{pairings_created} pairings created, {total_paired} shares paired")

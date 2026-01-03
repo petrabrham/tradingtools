@@ -85,11 +85,17 @@ class TestPairingsRepository(unittest.TestCase):
         return cur.lastrowid
         
     def _create_test_trade(self, security_id, timestamp, price, quantity, trade_type=TradeType.BUY):
-        """Helper to create a test trade."""
+        """Helper to create a test trade.
+        
+        Note: For SELL trades, quantity should be passed as positive but will be stored as negative.
+        """
+        # Store sell quantities as negative to allow SUM(number_of_shares) for net position
+        stored_quantity = -quantity if trade_type == TradeType.SELL else quantity
+        
         cur = self.conn.execute(
             "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, remaining_quantity, trade_type) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (security_id, timestamp, price, quantity, quantity, int(trade_type))  # remaining_quantity = quantity initially
+            (security_id, timestamp, price, stored_quantity, stored_quantity, int(trade_type))  # remaining_quantity = quantity initially
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1273,11 +1279,11 @@ class TestRemainingQuantityTracking(TestPairingsRepository):
         purchase_remaining = self._get_remaining_quantity(self.purchase_id)
         sale_remaining = self._get_remaining_quantity(self.sale_id)
         
-        self.assertEqual(purchase_remaining, 50.0)
-        self.assertEqual(sale_remaining, 30.0)
+        self.assertEqual(purchase_remaining, 50.0)   # BUY: positive
+        self.assertEqual(sale_remaining, -30.0)     # SELL: negative
     
     def test_create_pairing_decrements_remaining_quantity(self):
-        """Test that creating a pairing decrements remaining_quantity for both trades."""
+        """Test that creating a pairing updates remaining_quantity correctly."""
         # Pair 20 shares
         self.repo.create_pairing(self.sale_id, self.purchase_id, 20.0, 'FIFO')
         
@@ -1285,25 +1291,25 @@ class TestRemainingQuantityTracking(TestPairingsRepository):
         purchase_remaining = self._get_remaining_quantity(self.purchase_id)
         sale_remaining = self._get_remaining_quantity(self.sale_id)
         
-        self.assertEqual(purchase_remaining, 30.0)  # 50 - 20
-        self.assertEqual(sale_remaining, 10.0)  # 30 - 20
+        self.assertEqual(purchase_remaining, 30.0)  # BUY: 50 - 20 = 30
+        self.assertEqual(sale_remaining, -10.0)     # SELL: -30 + 20 = -10
     
     def test_delete_pairing_restores_remaining_quantity(self):
         """Test that deleting a pairing restores remaining_quantity."""
         # Create pairing
         pairing_id = self.repo.create_pairing(self.sale_id, self.purchase_id, 20.0, 'FIFO')
         
-        # Verify decremented
-        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 30.0)
-        self.assertEqual(self._get_remaining_quantity(self.sale_id), 10.0)
+        # Verify updated
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 30.0)   # BUY: 50 - 20
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), -10.0)     # SELL: -30 + 20
         
         # Delete pairing
         success = self.repo.delete_pairing(pairing_id)
         self.assertTrue(success)
         
         # Verify restored
-        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 50.0)
-        self.assertEqual(self._get_remaining_quantity(self.sale_id), 30.0)
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 50.0)   # BUY: restored
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), -30.0)     # SELL: restored
     
     def test_multiple_pairings_accumulate_correctly(self):
         """Test that multiple pairings correctly accumulate remaining_quantity changes."""
@@ -1314,15 +1320,15 @@ class TestRemainingQuantityTracking(TestPairingsRepository):
         
         # Pair 15 from purchase to first sale
         self.repo.create_pairing(self.sale_id, self.purchase_id, 15.0, 'FIFO')
-        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 35.0)
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 35.0)  # BUY: 50 - 15
         
         # Pair 20 from purchase to second sale
         self.repo.create_pairing(sale2_id, self.purchase_id, 20.0, 'FIFO')
-        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 15.0)  # 50 - 15 - 20
+        self.assertEqual(self._get_remaining_quantity(self.purchase_id), 15.0)  # BUY: 50 - 15 - 20
         
-        # Check sales
-        self.assertEqual(self._get_remaining_quantity(self.sale_id), 15.0)  # 30 - 15
-        self.assertEqual(self._get_remaining_quantity(sale2_id), 5.0)  # 25 - 20
+        # Check sales (both negative, increasing towards zero)
+        self.assertEqual(self._get_remaining_quantity(self.sale_id), -15.0)  # SELL: -30 + 15
+        self.assertEqual(self._get_remaining_quantity(sale2_id), -5.0)  # SELL: -25 + 20
     
     def test_get_available_lots_uses_remaining_quantity(self):
         """Test that get_available_lots correctly uses remaining_quantity."""
