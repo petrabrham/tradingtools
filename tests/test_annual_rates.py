@@ -1,5 +1,5 @@
 """Test script for annual exchange rates feature"""
-from cnb_rate import cnb_rate
+from config.cnb_rate import cnb_rate
 import datetime
 
 print("Annual Exchange Rates Test")

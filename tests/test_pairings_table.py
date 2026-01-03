@@ -11,7 +11,7 @@ from datetime import datetime
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dbmanager import DatabaseManager
+from db.dbmanager import DatabaseManager
 
 def test_pairings_table_creation():
     """Test creating the pairings table."""

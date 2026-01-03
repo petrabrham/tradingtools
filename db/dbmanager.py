@@ -5,9 +5,9 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import pandas as pd
-from cnb_rate import cnb_rate
+from config.cnb_rate import cnb_rate
 import logging
-from logger_config import setup_logger
+from config.logger_config import setup_logger
 from db.repositories.securities import SecuritiesRepository
 from db.repositories.interests import InterestsRepository, InterestType
 from db.repositories.dividends import DividendsRepository

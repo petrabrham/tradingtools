@@ -5,7 +5,7 @@ from tkcalendar import DateEntry
 import pandas as pd
 import sys
 import os
-from dbmanager import DatabaseManager
+from db.dbmanager import DatabaseManager
 from datetime import datetime, timedelta
 from db.repositories.interests import InterestType
 from config.tax_rates_loader import TaxRatesLoader

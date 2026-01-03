@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from db.repositories.pairings import PairingsRepository
 from db.repositories.trades import TradeType
-from logger_config import setup_logger
+from config.logger_config import setup_logger
 
 
 class TestPairingsRepository(unittest.TestCase):
