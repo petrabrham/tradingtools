@@ -767,9 +767,9 @@ For Czech tax compliance, maintain:
 - [x] Implement MaxLose method
 - [x] Implement MaxProfit method
 - [x] Modify trades view to show remaining_quantity
-- [ ] Manual pairing in trades view
+- [x] Manual pairing in trades view
 - [ ] **Implement TimeTest filter logic (lot filtering by 3+ year holding)** ⭐
-- [ ] **Implement two-pass pairing: TimeTest-filtered + Fallback method** ⭐
+- [rejected] **Implement two-pass pairing: TimeTest-filtered + Fallback method** ⭐
 - [ ] Add holding period calculation (purchase to sale date)
 - [ ] Add time test qualification check (> 3 years)
 - [ ] Add validation for partial matches

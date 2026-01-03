@@ -901,3 +901,91 @@ class PairingsRepository(BaseRepository):
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
         return self._apply_pairing_method(sale_trade_id, 'MaxProfit', 't.price_for_share ASC')
+    
+    def manual_pair(self, sale_trade_id: int, purchase_trade_id: int) -> Dict:
+        """Manually pair a specific sale with a specific purchase.
+        
+        Validates both trades and creates a pairing if valid. Returns detailed
+        information about the pairing or error.
+        
+        Args:
+            sale_trade_id: ID of the sale trade
+            purchase_trade_id: ID of the purchase trade
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'quantity_paired': float,
+                'holding_period_days': int,
+                'time_test_qualified': bool,
+                'error': Optional[str]
+            }
+        """
+        try:
+            # Fetch both trades
+            buy_trade = self.trades_repo.get_by_id(purchase_trade_id)
+            sell_trade = self.trades_repo.get_by_id(sale_trade_id)
+            
+            if not buy_trade:
+                return {'success': False, 'error': f'Purchase trade {purchase_trade_id} not found'}
+            if not sell_trade:
+                return {'success': False, 'error': f'Sale trade {sale_trade_id} not found'}
+            
+            # Validate trade types
+            if buy_trade[4] != TradeType.BUY:
+                return {'success': False, 'error': 'First trade must be a BUY'}
+            if sell_trade[4] != TradeType.SELL:
+                return {'success': False, 'error': 'Second trade must be a SELL'}
+            
+            # Validate same security
+            if buy_trade[2] != sell_trade[2]:
+                return {'success': False, 'error': 'Trades must be for the same security'}
+            
+            # Validate chronological order
+            buy_timestamp = buy_trade[1]
+            sell_timestamp = sell_trade[1]
+            if buy_timestamp >= sell_timestamp:
+                return {'success': False, 'error': 'BUY trade must be older than SELL trade'}
+            
+            # Check available quantities
+            buy_remaining = buy_trade[6]
+            sell_remaining = sell_trade[6]
+            
+            if buy_remaining <= 0:
+                return {'success': False, 'error': 'BUY trade is fully paired'}
+            if sell_remaining >= 0:
+                return {'success': False, 'error': 'SELL trade is fully paired'}
+            
+            # Calculate pairing quantity
+            pair_quantity = min(buy_remaining, -sell_remaining)
+            
+            # Calculate holding period
+            holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
+            time_test_qualified = holding_period_days >= 1095
+            
+            # Create the pairing
+            self.create_pairing(
+                sale_trade_id=sale_trade_id,
+                purchase_trade_id=purchase_trade_id,
+                quantity=pair_quantity,
+                method='Manual',
+                time_test_qualified=time_test_qualified,
+                holding_period_days=holding_period_days,
+                notes=None
+            )
+            
+            self.commit()
+            
+            return {
+                'success': True,
+                'quantity_paired': pair_quantity,
+                'holding_period_days': holding_period_days,
+                'time_test_qualified': time_test_qualified,
+                'error': None
+            }
+            
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.exception("Error in manual_pair")
+            return {'success': False, 'error': str(e)}

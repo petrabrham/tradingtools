@@ -7,6 +7,7 @@ Shows hierarchical trade data grouped by security with buy/sell details.
 from tkinter import ttk, messagebox
 import tkinter as tk
 from datetime import datetime
+from typing import Tuple, Optional
 from .base_view import BaseView
 from db.repositories.trades import TradeType
 
@@ -220,13 +221,88 @@ class TradesView(BaseView):
         """Show context menu on right-click."""
         # Create context menu
         menu = tk.Menu(self.tree, tearoff=0)
-        menu.add_command(label="Pair Selected Trades", command=self._pair_selected_trades)
+        
+        # Check if pairing is possible with current selection
+        can_pair, _ = self._validate_pairing_selection()
+        
+        # Add command - enable only if valid selection
+        menu.add_command(
+            label="Pair Selected Trades",
+            command=self._pair_selected_trades,
+            state=tk.NORMAL if can_pair else tk.DISABLED
+        )
         
         # Show menu at cursor position
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+    
+    def _validate_pairing_selection(self) -> Tuple[bool, Optional[str]]:
+        """Validate if current selection can be paired.
+        
+        Returns:
+            Tuple of (can_pair: bool, error_message: Optional[str])
+        """
+        selected_items = self.tree.selection()
+        
+        if not selected_items:
+            return False, "No trades selected"
+        
+        # Filter trade items (exclude parent rows)
+        trade_items = [item for item in selected_items if item.startswith("tr_trade_")]
+        
+        if len(trade_items) != 2:
+            return False, "Must select exactly 2 trades"
+        
+        # Get values from tree for both trades
+        try:
+            trade1_values = self.tree.item(trade_items[0], 'values')
+            trade2_values = self.tree.item(trade_items[1], 'values')
+            
+            # Extract trade info from tree values
+            # Index 4 = Trade Type, Index 5 = Date, Index 7 = Remaining Shares
+            type1 = trade1_values[4]
+            type2 = trade2_values[4]
+            date1 = trade1_values[5]
+            date2 = trade2_values[5]
+            remaining1 = float(trade1_values[7])
+            remaining2 = float(trade2_values[7])
+            
+            # Check one BUY and one SELL
+            if not ((type1 == "BUY" and type2 == "SELL") or (type1 == "SELL" and type2 == "BUY")):
+                return False, "Must select 1 BUY and 1 SELL"
+            
+            # Check both have remaining quantity
+            if type1 == "BUY":
+                if remaining1 <= 0:
+                    return False, "BUY trade fully paired"
+                if remaining2 >= 0:
+                    return False, "SELL trade fully paired"
+            else:  # type1 == "SELL"
+                if remaining1 >= 0:
+                    return False, "SELL trade fully paired"
+                if remaining2 <= 0:
+                    return False, "BUY trade fully paired"
+            
+            # Check same security (same parent)
+            parent1 = self.tree.parent(trade_items[0])
+            parent2 = self.tree.parent(trade_items[1])
+            if parent1 != parent2:
+                return False, "Trades must be for same security"
+            
+            # Check chronological order (BUY before SELL)
+            if type1 == "BUY":
+                if date1 >= date2:
+                    return False, "BUY must be older than SELL"
+            else:  # type1 == "SELL"
+                if date2 >= date1:
+                    return False, "BUY must be older than SELL"
+            
+            return True, None
+            
+        except (IndexError, ValueError) as e:
+            return False, f"Invalid selection: {e}"
     
     def _pair_selected_trades(self):
         """Manually pair selected trades."""
@@ -235,119 +311,56 @@ class TradesView(BaseView):
             return
         
         selected_items = self.tree.selection()
-        
-        if not selected_items:
-            messagebox.showerror("Error", "No trades selected.")
-            return
-        
-        # Filter out parent rows - only process child rows (trades)
-        trade_items = []
-        for item_id in selected_items:
-            if item_id.startswith("tr_trade_"):
-                trade_items.append(item_id)
+        trade_items = [item for item in selected_items if item.startswith("tr_trade_")]
         
         if len(trade_items) != 2:
-            messagebox.showerror("Error", "Please select exactly 2 trades (1 BUY and 1 SELL).")
-            return
+            return  # Should not happen as menu item is disabled
         
-        # Extract trade IDs from iids
+        # Extract trade IDs
         try:
-            trade_ids = [int(item_id.replace("tr_trade_", "")) for item_id in trade_items]
+            trade_ids = [int(item.replace("tr_trade_", "")) for item in trade_items]
         except ValueError:
             messagebox.showerror("Error", "Invalid trade selection.")
             return
         
-        # Fetch trade details from database
-        try:
-            trades_data = []
-            for trade_id in trade_ids:
-                trade = self.db.trades_repo.get_by_id(trade_id)
-                if not trade:
-                    messagebox.showerror("Error", f"Trade with ID {trade_id} not found.")
-                    return
-                trades_data.append(trade)
-            
-            # Validate: exactly one BUY and one SELL
-            buy_trades = [t for t in trades_data if t[4] == TradeType.BUY]
-            sell_trades = [t for t in trades_data if t[4] == TradeType.SELL]
-            
-            if len(buy_trades) != 1 or len(sell_trades) != 1:
-                messagebox.showerror("Error", "Please select exactly 1 BUY trade and 1 SELL trade.")
-                return
-            
-            buy_trade = buy_trades[0]
-            sell_trade = sell_trades[0]
-            
-            # Validate: same security (isin_id)
-            if buy_trade[2] != sell_trade[2]:
-                messagebox.showerror("Error", "Selected trades must be for the same security.")
-                return
-            
-            # Validate: buy must be older than sell
-            buy_timestamp = buy_trade[1]
-            sell_timestamp = sell_trade[1]
-            if buy_timestamp >= sell_timestamp:
-                messagebox.showerror("Error", "BUY trade must be older than SELL trade.")
-                return
-            
-            # Get available quantities
-            buy_id = buy_trade[0]
-            sell_id = sell_trade[0]
-            buy_remaining = buy_trade[6]  # remaining_quantity
-            sell_remaining = sell_trade[6]  # remaining_quantity (should be negative or zero)
-            
-            if buy_remaining <= 0:
-                messagebox.showerror("Error", "BUY trade is fully paired (no remaining quantity).")
-                return
-            
-            if sell_remaining >= 0:
-                messagebox.showerror("Error", "SELL trade is fully paired (no remaining quantity).")
-                return
-            
-            # Determine pairing quantity (minimum of available quantities)
-            pair_quantity = min(buy_remaining, -sell_remaining)
-            
-            # Calculate holding period in days
-            holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
-            
-            # Check if time test qualified (>3 years = 1095 days, accounting for leap years)
-            time_test_qualified = holding_period_days >= 1095
-            
-            # Create the pairing
-            pairing_id = self.db.pairings_repo.create_pairing(
-                sale_trade_id=sell_id,
-                purchase_trade_id=buy_id,
-                quantity=pair_quantity,
-                method='Manual',
-                time_test_qualified=time_test_qualified,
-                holding_period_days=holding_period_days,
-                notes=None
-            )
-            
-            self.db.conn.commit()
-            
-            self.db.logger.info(
-                f"Manual pairing created: {pair_quantity:.7f} shares, "
-                f"holding period: {holding_period_days} days, "
-                f"time test qualified: {time_test_qualified}"
-            )
-            
-            # Update remaining quantities in the treeview
-            new_buy_remaining = buy_remaining - pair_quantity
-            new_sell_remaining = sell_remaining + pair_quantity
-            
-            buy_iid = f"tr_trade_{buy_id}"
-            sell_iid = f"tr_trade_{sell_id}"
-            
-            # Update the "Remaining Shares" column (index 7) in tree values
-            buy_values = list(self.tree.item(buy_iid, 'values'))
-            buy_values[7] = f"{new_buy_remaining:.7f}"
-            self.tree.item(buy_iid, values=buy_values)
-            
-            sell_values = list(self.tree.item(sell_iid, 'values'))
-            sell_values[7] = f"{new_sell_remaining:.7f}"
-            self.tree.item(sell_iid, values=sell_values)
-            
-        except Exception as e:
-            self.db.conn.rollback()
-            messagebox.showerror("Error", f"Failed to create pairing: {e}")
+        # Determine which is BUY and which is SELL from tree values
+        type1 = self.tree.item(trade_items[0], 'values')[4]
+        type2 = self.tree.item(trade_items[1], 'values')[4]
+        
+        if type1 == "BUY":
+            buy_id, sell_id = trade_ids[0], trade_ids[1]
+            buy_iid, sell_iid = trade_items[0], trade_items[1]
+        else:
+            buy_id, sell_id = trade_ids[1], trade_ids[0]
+            buy_iid, sell_iid = trade_items[1], trade_items[0]
+        
+        # Get current remaining quantities from tree
+        buy_remaining = float(self.tree.item(buy_iid, 'values')[7])
+        sell_remaining = float(self.tree.item(sell_iid, 'values')[7])
+        
+        # Call manual_pair from repository
+        result = self.db.pairings_repo.manual_pair(sell_id, buy_id)
+        
+        if not result['success']:
+            messagebox.showerror("Pairing Failed", result['error'])
+            return
+        
+        # Log success
+        self.db.logger.info(
+            f"Manual pairing created: {result['quantity_paired']:.7f} shares, "
+            f"holding period: {result['holding_period_days']} days, "
+            f"time test qualified: {result['time_test_qualified']}"
+        )
+        
+        # Update remaining quantities in treeview
+        pair_quantity = result['quantity_paired']
+        new_buy_remaining = buy_remaining - pair_quantity
+        new_sell_remaining = sell_remaining + pair_quantity
+        
+        buy_values = list(self.tree.item(buy_iid, 'values'))
+        buy_values[7] = f"{new_buy_remaining:.7f}"
+        self.tree.item(buy_iid, values=buy_values)
+        
+        sell_values = list(self.tree.item(sell_iid, 'values'))
+        sell_values[7] = f"{new_sell_remaining:.7f}"
+        self.tree.item(sell_iid, values=sell_values)
