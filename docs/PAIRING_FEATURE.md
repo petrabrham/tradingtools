@@ -782,7 +782,7 @@ For Czech tax compliance, maintain:
 - [ ] Validate locked pairings cannot be modified
 
 ### Phase 3: UI Development (Week 3-4)
-- [ ] Create `PairsView` class with time interval selector
+- [X] Create `PairsView` class with time interval selector
 - [ ] Implement Pairs view layout (sales list, available lots, current pairings)
 - [ ] **Add time test visual indicators (⏰✓/⏰✗ icons, green highlighting)** ⭐
 - [ ] **Display holding period in years/days for each lot** ⭐

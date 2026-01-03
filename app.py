@@ -14,6 +14,7 @@ from views.trades_view import TradesView
 from views.interests_view import InterestsView
 from views.realized_income_view import RealizedIncomeView
 from views.dividends_view import DividendsView
+from views.pairs_view import PairsView
 from dialogs.exchange_rate_dialog import ExchangeRateDialog
 from dialogs.import_rates_dialog import ImportRatesDialog
 from ui import MenuManager, FilterManager, copy_treeview_to_clipboard
@@ -71,6 +72,7 @@ class TradingToolsApp:
         self.interests_view = InterestsView(self.db, self.root)
         self.realized_view = RealizedIncomeView(self.db, self.root)
         self.dividends_view = DividendsView(self.db, self.root, self.tax_rates_loader, self.country_resolver, self.use_json_tax_rates)
+        self.pairs_view = PairsView(self.db, self.root)
 
         # Filter manager
         self.filter_manager = FilterManager(self)
@@ -382,6 +384,11 @@ class TradingToolsApp:
         )
         self.realized_view.create_view(tab_realized)
 
+        # --- 7. Tab 5: Pairs View ---
+        tab_pairs = ttk.Frame(self.notebook)
+        self.notebook.add(tab_pairs, text="Pairs")
+        self.pairs_view.create_view(tab_pairs)
+
     def update_trades_view(self):
         """Populate the trades tree with grouped parents and detailed child trades."""
         # Parse date range
@@ -495,6 +502,23 @@ class TradingToolsApp:
         # Delegate to view
         self.realized_view.update_view(start_ts, end_ts)
 
+    def update_pairs_view(self):
+        """
+        Update the pairs view with current filter dates.
+        """
+        # Parse date range
+        date_from_str = self.date_from_var.get().strip()
+        date_to_str = self.date_to_var.get().strip()
+        try:
+            start_ts = DatabaseManager.timestr_to_timestamp(f"{date_from_str} 00:00:00")
+            end_ts = DatabaseManager.timestr_to_timestamp(f"{date_to_str} 23:59:59")
+        except Exception:
+            start_ts = 0
+            end_ts = int(datetime.now().timestamp())
+        
+        # Delegate to view
+        self.pairs_view.update_view(start_ts, end_ts)
+
     def update_views(self):
         """Update all views with data from the database."""
         # This function calls specific update functions for each view
@@ -502,6 +526,7 @@ class TradingToolsApp:
         self.update_dividends_view()
         self.update_trades_view()
         self.update_realized_income_view()
+        self.update_pairs_view()
 
     ###########################################################
     # Widgets command handlers

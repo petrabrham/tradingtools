@@ -37,10 +37,7 @@ class PairsView(BaseView):
         self.sales_tree = None
         self.lots_tree = None
         self.pairings_tree = None
-        self.start_date_entry = None
-        self.end_date_entry = None
-        self.security_filter_var = None
-        self.status_filter_var = None
+        self.timetest_var = None
         
         # State
         self.current_sale_id = None
@@ -54,96 +51,29 @@ class PairsView(BaseView):
         Args:
             parent_frame: The parent frame to create the view in
         """
-        # Configure parent frame
+        # Configure parent frame - 3 rows
         parent_frame.grid_columnconfigure(0, weight=1)
-        parent_frame.grid_rowconfigure(2, weight=1)
+        parent_frame.grid_columnconfigure(1, weight=1)
+        parent_frame.grid_rowconfigure(0, weight=2)  # Row 0: Sales and Lots (larger)
+        parent_frame.grid_rowconfigure(1, weight=1)  # Row 1: Current Pairings
+        parent_frame.grid_rowconfigure(2, weight=0)  # Row 2: Actions (fixed height)
         
-        # Create top section: Time interval selector
-        self._create_interval_selector(parent_frame)
+        # Row 0, Column 0: Sales list
+        self._create_sales_panel(parent_frame)
         
-        # Create filter section
-        self._create_filter_section(parent_frame)
+        # Row 0, Column 1: Available purchase lots
+        self._create_lots_panel(parent_frame)
         
-        # Create main section: Sales list and details
-        self._create_main_section(parent_frame)
+        # Row 1: Current pairings (full width)
+        self._create_pairings_panel(parent_frame)
         
-        # Create bottom section: Action buttons
+        # Row 2: Action buttons
         self._create_action_section(parent_frame)
-    
-    def _create_interval_selector(self, parent_frame: ttk.Frame) -> None:
-        """Create the time interval selector section."""
-        interval_frame = ttk.LabelFrame(parent_frame, text="Time Interval", padding=10)
-        interval_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        
-        # Start date
-        ttk.Label(interval_frame, text="Start Date:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        self.start_date_entry = ttk.Entry(interval_frame, width=12)
-        self.start_date_entry.grid(row=0, column=1, padx=5, pady=2)
-        self.start_date_entry.insert(0, "2024-01-01")
-        
-        # End date
-        ttk.Label(interval_frame, text="End Date:").grid(row=0, column=2, padx=5, pady=2, sticky="w")
-        self.end_date_entry = ttk.Entry(interval_frame, width=12)
-        self.end_date_entry.grid(row=0, column=3, padx=5, pady=2)
-        self.end_date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
-        
-        # Load button
-        load_btn = ttk.Button(interval_frame, text="Load Sales", command=self._load_sales_in_interval)
-        load_btn.grid(row=0, column=4, padx=10, pady=2)
-        
-        # Current year shortcut
-        current_year_btn = ttk.Button(interval_frame, text="Current Year", 
-                                       command=self._set_current_year)
-        current_year_btn.grid(row=0, column=5, padx=5, pady=2)
-        
-        # Previous year shortcut
-        prev_year_btn = ttk.Button(interval_frame, text="Previous Year", 
-                                    command=self._set_previous_year)
-        prev_year_btn.grid(row=0, column=6, padx=5, pady=2)
-    
-    def _create_filter_section(self, parent_frame: ttk.Frame) -> None:
-        """Create the filter section."""
-        filter_frame = ttk.LabelFrame(parent_frame, text="Filters", padding=10)
-        filter_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
-        
-        # Security filter
-        ttk.Label(filter_frame, text="Security:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        self.security_filter_var = tk.StringVar(value="All")
-        security_combo = ttk.Combobox(filter_frame, textvariable=self.security_filter_var, 
-                                      width=30, state="readonly")
-        security_combo['values'] = ["All"]
-        security_combo.grid(row=0, column=1, padx=5, pady=2)
-        
-        # Status filter
-        ttk.Label(filter_frame, text="Pairing Status:").grid(row=0, column=2, padx=5, pady=2, sticky="w")
-        self.status_filter_var = tk.StringVar(value="All")
-        status_combo = ttk.Combobox(filter_frame, textvariable=self.status_filter_var, 
-                                    width=20, state="readonly")
-        status_combo['values'] = ["All", "Unpaired", "Partially Paired", "Fully Paired", "Locked"]
-        status_combo.grid(row=0, column=3, padx=5, pady=2)
-        
-        # Apply filter button
-        filter_btn = ttk.Button(filter_frame, text="Apply Filters", command=self._apply_filters)
-        filter_btn.grid(row=0, column=4, padx=10, pady=2)
-    
-    def _create_main_section(self, parent_frame: ttk.Frame) -> None:
-        """Create the main section with sales list and details panels."""
-        main_frame = ttk.Frame(parent_frame)
-        main_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
-        main_frame.grid_rowconfigure(0, weight=1)
-        
-        # Left panel: Sales list
-        self._create_sales_panel(main_frame)
-        
-        # Right panel: Available lots and current pairings
-        self._create_details_panel(main_frame)
     
     def _create_sales_panel(self, parent_frame: ttk.Frame) -> None:
         """Create the sales list panel."""
         sales_frame = ttk.LabelFrame(parent_frame, text="Sales Transactions", padding=5)
-        sales_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        sales_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 2), pady=5)
         sales_frame.grid_columnconfigure(0, weight=1)
         sales_frame.grid_rowconfigure(0, weight=1)
         
@@ -197,24 +127,10 @@ class PairsView(BaseView):
         # Bind selection event
         self.sales_tree.bind('<<TreeviewSelect>>', self._on_sale_selected)
     
-    def _create_details_panel(self, parent_frame: ttk.Frame) -> None:
-        """Create the details panel with available lots and current pairings."""
-        details_frame = ttk.Frame(parent_frame)
-        details_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        details_frame.grid_columnconfigure(0, weight=1)
-        details_frame.grid_rowconfigure(0, weight=1)
-        details_frame.grid_rowconfigure(1, weight=1)
-        
-        # Top: Available purchase lots
-        self._create_lots_panel(details_frame)
-        
-        # Bottom: Current pairings
-        self._create_pairings_panel(details_frame)
-    
     def _create_lots_panel(self, parent_frame: ttk.Frame) -> None:
         """Create the available purchase lots panel."""
         lots_frame = ttk.LabelFrame(parent_frame, text="Available Purchase Lots", padding=5)
-        lots_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        lots_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=5)
         lots_frame.grid_columnconfigure(0, weight=1)
         lots_frame.grid_rowconfigure(0, weight=1)
         
@@ -250,35 +166,58 @@ class PairsView(BaseView):
     
     def _create_pairings_panel(self, parent_frame: ttk.Frame) -> None:
         """Create the current pairings panel."""
-        pairings_frame = ttk.LabelFrame(parent_frame, text="Current Pairings", padding=5)
-        pairings_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        pairings_frame = ttk.LabelFrame(parent_frame, text="Current Pairs", padding=5)
+        pairings_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
         pairings_frame.grid_columnconfigure(0, weight=1)
         pairings_frame.grid_rowconfigure(0, weight=1)
         
-        # Pairings treeview
-        columns = ("Purchase Date", "Quantity", "Method", "Holding", "TimeTest", "Locked")
+        # Pairings treeview with expanded columns
+        columns = ("🔒", "Sale Date", "Purchase Date", "Security", "Ticker", 
+                   "Holding Period", "⏰", "Quantity", "Purchase Price", "Sale Price", 
+                   "P&L (CZK)", "Method", "Lock Reason")
         self.pairings_tree = ttk.Treeview(pairings_frame, columns=columns, show='headings', 
                                           selectmode='browse')
         self.pairings_tree.grid(row=0, column=0, sticky='nsew')
         
         # Configure columns
-        self.pairings_tree.heading("Purchase Date", text="Purchase Date")
-        self.pairings_tree.column("Purchase Date", anchor=tk.W, width=100)
+        self.pairings_tree.heading("🔒", text="🔒")
+        self.pairings_tree.column("🔒", anchor=tk.CENTER, width=30)
         
-        self.pairings_tree.heading("Quantity", text="Quantity Paired")
-        self.pairings_tree.column("Quantity", anchor=tk.E, width=100)
+        self.pairings_tree.heading("Sale Date", text="Sale Date")
+        self.pairings_tree.column("Sale Date", anchor=tk.W, width=90)
+        
+        self.pairings_tree.heading("Purchase Date", text="Purchase Date")
+        self.pairings_tree.column("Purchase Date", anchor=tk.W, width=90)
+        
+        self.pairings_tree.heading("Security", text="Security")
+        self.pairings_tree.column("Security", anchor=tk.W, width=150)
+        
+        self.pairings_tree.heading("Ticker", text="Ticker")
+        self.pairings_tree.column("Ticker", anchor=tk.W, width=60)
+        
+        self.pairings_tree.heading("Holding Period", text="Holding Period")
+        self.pairings_tree.column("Holding Period", anchor=tk.W, width=110)
+        
+        self.pairings_tree.heading("⏰", text="⏰")
+        self.pairings_tree.column("⏰", anchor=tk.CENTER, width=30)
+        
+        self.pairings_tree.heading("Quantity", text="Quantity")
+        self.pairings_tree.column("Quantity", anchor=tk.E, width=80)
+        
+        self.pairings_tree.heading("Purchase Price", text="Purchase Price")
+        self.pairings_tree.column("Purchase Price", anchor=tk.E, width=110)
+        
+        self.pairings_tree.heading("Sale Price", text="Sale Price")
+        self.pairings_tree.column("Sale Price", anchor=tk.E, width=110)
+        
+        self.pairings_tree.heading("P&L (CZK)", text="P&L (CZK)")
+        self.pairings_tree.column("P&L (CZK)", anchor=tk.E, width=100)
         
         self.pairings_tree.heading("Method", text="Method")
-        self.pairings_tree.column("Method", anchor=tk.W, width=100)
+        self.pairings_tree.column("Method", anchor=tk.W, width=80)
         
-        self.pairings_tree.heading("Holding", text="Holding Period")
-        self.pairings_tree.column("Holding", anchor=tk.W, width=120)
-        
-        self.pairings_tree.heading("TimeTest", text="⏰")
-        self.pairings_tree.column("TimeTest", anchor=tk.CENTER, width=40)
-        
-        self.pairings_tree.heading("Locked", text="🔒")
-        self.pairings_tree.column("Locked", anchor=tk.CENTER, width=40)
+        self.pairings_tree.heading("Lock Reason", text="Lock Reason")
+        self.pairings_tree.column("Lock Reason", anchor=tk.W, width=150)
         
         # Scrollbars
         vsb = ttk.Scrollbar(pairings_frame, orient="vertical", command=self.pairings_tree.yview)
@@ -288,7 +227,7 @@ class PairsView(BaseView):
     def _create_action_section(self, parent_frame: ttk.Frame) -> None:
         """Create the action buttons section."""
         action_frame = ttk.LabelFrame(parent_frame, text="Actions", padding=10)
-        action_frame.grid(row=3, column=0, sticky="ew", padx=5, pady=5)
+        action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
         
         # Method selection
         ttk.Label(action_frame, text="Method:").grid(row=0, column=0, padx=5, pady=2)
@@ -298,24 +237,30 @@ class PairsView(BaseView):
         method_combo['values'] = ["FIFO", "LIFO", "MaxLose", "MaxProfit"]
         method_combo.grid(row=0, column=1, padx=5, pady=2)
         
+        # TimeTest filter checkbox
+        self.timetest_var = tk.BooleanVar(value=False)
+        timetest_check = ttk.Checkbutton(action_frame, text="Time Test Only (3+ years)", 
+                                         variable=self.timetest_var)
+        timetest_check.grid(row=0, column=2, padx=10, pady=2)
+        
         # Apply method button
         apply_btn = ttk.Button(action_frame, text="Apply Method to Selected Sale", 
                                command=self._apply_method_to_selected)
-        apply_btn.grid(row=0, column=2, padx=10, pady=2)
+        apply_btn.grid(row=0, column=3, padx=10, pady=2)
         
         # Apply to interval button
         apply_interval_btn = ttk.Button(action_frame, text="Apply to All Unpaired in Interval", 
                                         command=self._apply_method_to_interval)
-        apply_interval_btn.grid(row=0, column=3, padx=5, pady=2)
+        apply_interval_btn.grid(row=0, column=4, padx=5, pady=2)
         
         # Delete pairing button
         delete_btn = ttk.Button(action_frame, text="Delete Selected Pairing", 
                                 command=self._delete_selected_pairing)
-        delete_btn.grid(row=0, column=4, padx=5, pady=2)
+        delete_btn.grid(row=0, column=5, padx=5, pady=2)
         
         # Refresh button
         refresh_btn = ttk.Button(action_frame, text="Refresh", command=self.refresh_view)
-        refresh_btn.grid(row=0, column=5, padx=5, pady=2)
+        refresh_btn.grid(row=0, column=6, padx=5, pady=2)
     
     def update_view(self, start_timestamp: int, end_timestamp: int) -> None:
         """
@@ -328,31 +273,15 @@ class PairsView(BaseView):
         self.current_start_timestamp = start_timestamp
         self.current_end_timestamp = end_timestamp
         
-        # Update date entries
-        start_date = datetime.fromtimestamp(start_timestamp).strftime("%Y-%m-%d")
-        end_date = datetime.fromtimestamp(end_timestamp).strftime("%Y-%m-%d")
-        
-        self.start_date_entry.delete(0, tk.END)
-        self.start_date_entry.insert(0, start_date)
-        
-        self.end_date_entry.delete(0, tk.END)
-        self.end_date_entry.insert(0, end_date)
-        
         # Load sales
         self._load_sales_in_interval()
     
     def _load_sales_in_interval(self) -> None:
         """Load all sale transactions in the selected time interval."""
         try:
-            # Parse dates
-            start_date = self.start_date_entry.get()
-            end_date = self.end_date_entry.get()
-            
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            
-            self.current_start_timestamp = int(start_dt.timestamp())
-            self.current_end_timestamp = int(end_dt.timestamp())
+            # Check if timestamps are set
+            if self.current_start_timestamp is None or self.current_end_timestamp is None:
+                return
             
             # Clear existing data
             self.clear_view()
@@ -365,10 +294,10 @@ class PairsView(BaseView):
             for sale in sales_data:
                 self._insert_sale_row(sale)
             
+            start_date = datetime.fromtimestamp(self.current_start_timestamp).strftime("%Y-%m-%d")
+            end_date = datetime.fromtimestamp(self.current_end_timestamp).strftime("%Y-%m-%d")
             self.logger.info(f"Loaded {len(sales_data)} sales from {start_date} to {end_date}")
             
-        except ValueError as e:
-            messagebox.showerror("Date Error", f"Invalid date format. Use YYYY-MM-DD.\n{e}")
         except Exception as e:
             self.logger.error(f"Error loading sales: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to load sales: {e}")
@@ -538,37 +467,116 @@ class PairsView(BaseView):
             self.pairings_tree.delete(item)
         
         try:
+            # Get sale info
+            sale = self.trades_repo.get_by_id(sale_trade_id)
+            if not sale:
+                return
+            
+            # Get security info
+            security_sql = "SELECT name, ticker FROM securities WHERE id = ?"
+            cur = self.db.conn.execute(security_sql, (sale['isin_id'],))
+            security_row = cur.fetchone()
+            security_name = security_row[0] if security_row else "Unknown"
+            ticker = security_row[1] if security_row else "Unknown"
+            
             # Get pairings
-            pairings = self.pairings_repo.get_pairings_for_purchase(sale_trade_id)
+            sql = """
+                SELECT 
+                    p.id,
+                    p.quantity,
+                    p.method,
+                    p.holding_period_days,
+                    p.time_test_qualified,
+                    p.locked,
+                    p.locked_reason,
+                    p.purchase_trade_id,
+                    pt.timestamp as purchase_timestamp,
+                    pt.price_for_share as purchase_price,
+                    pt.currency_of_price as purchase_currency,
+                    st.timestamp as sale_timestamp,
+                    st.price_for_share as sale_price,
+                    st.currency_of_price as sale_currency
+                FROM pairings p
+                JOIN trades pt ON p.purchase_trade_id = pt.id
+                JOIN trades st ON p.sale_trade_id = st.id
+                WHERE p.sale_trade_id = ?
+                ORDER BY pt.timestamp
+            """
+            cur = self.db.conn.execute(sql, (sale_trade_id,))
+            pairings = cur.fetchall()
             
             for pairing in pairings:
+                pairing_id = pairing[0]
+                quantity = pairing[1]
+                method = pairing[2]
+                holding_days = pairing[3]
+                time_qualified = pairing[4]
+                locked = pairing[5]
+                locked_reason = pairing[6] if pairing[6] else ""
+                purchase_timestamp = pairing[8]
+                purchase_price = pairing[9]
+                purchase_currency = pairing[10]
+                sale_timestamp = pairing[11]
+                sale_price = pairing[12]
+                sale_currency = pairing[13]
+                
+                # Format dates
+                purchase_date = datetime.fromtimestamp(purchase_timestamp).strftime("%Y-%m-%d")
+                sale_date = datetime.fromtimestamp(sale_timestamp).strftime("%Y-%m-%d")
+                
                 # Format holding period
-                years = pairing['holding_period_days'] / 365.25
-                holding_str = f"{years:.1f} years ({pairing['holding_period_days']} days)"
+                years = holding_days / 365.25
+                holding_str = f"{years:.1f} years ({holding_days} days)"
                 
                 # Time test icon
-                timetest_icon = "✓" if pairing['time_test_qualified'] else "✗"
+                timetest_icon = "✓" if time_qualified else "✗"
                 
                 # Locked icon
-                locked_icon = "🔒" if pairing['locked'] else ""
+                locked_icon = "🔒" if locked else ""
                 
-                # Get purchase date
-                purchase = self.trades_repo.get_by_id(pairing['purchase_trade_id'])
-                purchase_date = datetime.fromtimestamp(purchase['timestamp']).strftime("%Y-%m-%d")
+                # Format prices with currency
+                purchase_price_str = f"{purchase_price:.2f} {purchase_currency}"
+                sale_price_str = f"{sale_price:.2f} {sale_currency}"
+                
+                # Calculate P&L in CZK
+                # Get total_czk values for both trades
+                purchase_trade = self.trades_repo.get_by_id(pairing[7])
+                sale_trade = self.trades_repo.get_by_id(sale_trade_id)
+                
+                # Calculate P&L: (sale_total - purchase_total) proportional to quantity
+                purchase_total_czk = purchase_trade['total_czk'] if purchase_trade else 0
+                sale_total_czk = sale_trade['total_czk'] if sale_trade else 0
+                
+                # Calculate per-share P&L in CZK
+                purchase_qty = abs(purchase_trade['number_of_shares']) if purchase_trade else 1
+                sale_qty = abs(sale_trade['number_of_shares']) if sale_trade else 1
+                
+                purchase_czk_per_share = abs(purchase_total_czk) / purchase_qty if purchase_qty > 0 else 0
+                sale_czk_per_share = abs(sale_total_czk) / sale_qty if sale_qty > 0 else 0
+                
+                pnl_czk = (sale_czk_per_share - purchase_czk_per_share) * abs(quantity)
+                pnl_str = f"{pnl_czk:,.2f}"
                 
                 values = (
+                    locked_icon,
+                    sale_date,
                     purchase_date,
-                    f"{pairing['quantity']:.6f}",
-                    pairing['method'],
+                    security_name,
+                    ticker,
                     holding_str,
                     timetest_icon,
-                    locked_icon
+                    f"{abs(quantity):.6f}",
+                    purchase_price_str,
+                    sale_price_str,
+                    pnl_str,
+                    method,
+                    locked_reason
                 )
                 
                 item_id = self.pairings_tree.insert('', 'end', values=values)
                 
                 # Store pairing ID
-                self.pairings_tree.set(item_id, "#0", pairing['id'])
+                self.pairings_tree.set(item_id, "#0", pairing_id)
             
         except Exception as e:
             self.logger.error(f"Error loading pairings: {e}", exc_info=True)
@@ -691,27 +699,6 @@ class PairsView(BaseView):
         except Exception as e:
             self.logger.error(f"Error deleting pairing: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to delete pairing: {e}")
-    
-    def _apply_filters(self) -> None:
-        """Apply the current filter settings."""
-        # TODO: Implement filtering logic
-        self._load_sales_in_interval()
-    
-    def _set_current_year(self) -> None:
-        """Set the interval to the current year."""
-        year = datetime.now().year
-        self.start_date_entry.delete(0, tk.END)
-        self.start_date_entry.insert(0, f"{year}-01-01")
-        self.end_date_entry.delete(0, tk.END)
-        self.end_date_entry.insert(0, f"{year}-12-31")
-    
-    def _set_previous_year(self) -> None:
-        """Set the interval to the previous year."""
-        year = datetime.now().year - 1
-        self.start_date_entry.delete(0, tk.END)
-        self.start_date_entry.insert(0, f"{year}-01-01")
-        self.end_date_entry.delete(0, tk.END)
-        self.end_date_entry.insert(0, f"{year}-12-31")
     
     def refresh_view(self) -> None:
         """Refresh all data in the view after changes."""
