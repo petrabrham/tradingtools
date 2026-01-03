@@ -273,8 +273,9 @@ class PairsView(BaseView):
         self.current_start_timestamp = start_timestamp
         self.current_end_timestamp = end_timestamp
         
-        # Load sales
+        # Load all data independently
         self._load_sales_in_interval()
+        self._load_current_pairings(start_timestamp, end_timestamp)
     
     def _load_sales_in_interval(self) -> None:
         """Load all sale transactions in the selected time interval."""
@@ -389,10 +390,8 @@ class PairsView(BaseView):
         elif sale['status'] == "Fully Paired":
             tag = "paired"
         
-        item_id = self.sales_tree.insert('', 'end', values=values, tags=(tag,))
-        
-        # Store sale ID in item
-        self.sales_tree.set(item_id, "#0", sale['id'])
+        # Store sale ID using iid parameter
+        item_id = self.sales_tree.insert('', 'end', iid=str(sale['id']), values=values, tags=(tag,))
         
         # Configure tags
         self.sales_tree.tag_configure("unpaired", background="#ffe6e6")
@@ -404,14 +403,13 @@ class PairsView(BaseView):
         if not selection:
             return
         
-        # Get sale ID
+        # Get sale ID from item iid
         item = selection[0]
-        sale_id = int(self.sales_tree.set(item, "#0"))
+        sale_id = int(item)
         self.current_sale_id = sale_id
         
-        # Load details for this sale
+        # Load available lots for this sale
         self._load_available_lots(sale_id)
-        self._load_current_pairings(sale_id)
     
     def _load_available_lots(self, sale_trade_id: int) -> None:
         """Load available purchase lots for the selected sale."""
@@ -449,10 +447,8 @@ class PairsView(BaseView):
                 
                 # Tag for color coding time-qualified lots
                 tag = "timetest" if lot['time_test_qualified'] else ""
-                item_id = self.lots_tree.insert('', 'end', values=values, tags=(tag,))
-                
-                # Store lot ID
-                self.lots_tree.set(item_id, "#0", lot['id'])
+                # Store lot ID using iid parameter
+                item_id = self.lots_tree.insert('', 'end', iid=str(lot['id']), values=values, tags=(tag,))
             
             # Configure tag for time-qualified lots
             self.lots_tree.tag_configure("timetest", background="#ccffcc")
@@ -460,26 +456,39 @@ class PairsView(BaseView):
         except Exception as e:
             self.logger.error(f"Error loading available lots: {e}", exc_info=True)
     
-    def _load_current_pairings(self, sale_trade_id: int) -> None:
-        """Load existing pairings for the selected sale."""
+    def _load_current_pairings(self, start_timestamp: int = None, end_timestamp: int = None) -> None:
+        """Load all pairings in the date range."""
         # Clear existing
         for item in self.pairings_tree.get_children():
             self.pairings_tree.delete(item)
         
+        if not self.db.conn:
+            self.logger.warning("No database connection - cannot load pairings")
+            self.pairings_tree.insert('', 'end', values=(
+                "", "", "", "No database connection", "", "", "", "", "", "", "", "", ""
+            ))
+            return
+        
+        # Use stored timestamps if not provided
+        if start_timestamp is None:
+            start_timestamp = self.current_start_timestamp
+        if end_timestamp is None:
+            end_timestamp = self.current_end_timestamp
+            
+        if start_timestamp is None or end_timestamp is None:
+            self.logger.warning("No date range set - cannot load pairings")
+            self.pairings_tree.insert('', 'end', values=(
+                "", "", "", "No date range selected - use main filter", "", "", "", "", "", "", "", "", ""
+            ))
+            return
+        
         try:
-            # Get sale info
-            sale = self.trades_repo.get_by_id(sale_trade_id)
-            if not sale:
-                return
+            # Log the date range being queried
+            start_date_str = datetime.fromtimestamp(start_timestamp).strftime("%Y-%m-%d")
+            end_date_str = datetime.fromtimestamp(end_timestamp).strftime("%Y-%m-%d")
+            self.logger.info(f"Loading pairings for date range: {start_date_str} to {end_date_str}")
             
-            # Get security info
-            security_sql = "SELECT name, ticker FROM securities WHERE id = ?"
-            cur = self.db.conn.execute(security_sql, (sale['isin_id'],))
-            security_row = cur.fetchone()
-            security_name = security_row[0] if security_row else "Unknown"
-            ticker = security_row[1] if security_row else "Unknown"
-            
-            # Get pairings
+            # Single SQL query to fetch all pairing data with JOINs, filtered by sale date
             sql = """
                 SELECT 
                     p.id,
@@ -489,36 +498,69 @@ class PairsView(BaseView):
                     p.time_test_qualified,
                     p.locked,
                     p.locked_reason,
-                    p.purchase_trade_id,
+                    st.timestamp as sale_timestamp,
                     pt.timestamp as purchase_timestamp,
+                    s.name as security_name,
+                    s.ticker,
                     pt.price_for_share as purchase_price,
                     pt.currency_of_price as purchase_currency,
-                    st.timestamp as sale_timestamp,
+                    pt.number_of_shares as purchase_qty,
+                    pt.total_czk as purchase_total_czk,
                     st.price_for_share as sale_price,
-                    st.currency_of_price as sale_currency
+                    st.currency_of_price as sale_currency,
+                    st.number_of_shares as sale_qty,
+                    st.total_czk as sale_total_czk
                 FROM pairings p
                 JOIN trades pt ON p.purchase_trade_id = pt.id
                 JOIN trades st ON p.sale_trade_id = st.id
-                WHERE p.sale_trade_id = ?
-                ORDER BY pt.timestamp
+                JOIN securities s ON st.isin_id = s.id
+                WHERE st.timestamp >= ? AND st.timestamp <= ?
+                ORDER BY st.timestamp DESC, pt.timestamp
             """
-            cur = self.db.conn.execute(sql, (sale_trade_id,))
+            
+            cur = self.db.conn.execute(sql, (start_timestamp, end_timestamp))
             pairings = cur.fetchall()
             
-            for pairing in pairings:
-                pairing_id = pairing[0]
-                quantity = pairing[1]
-                method = pairing[2]
-                holding_days = pairing[3]
-                time_qualified = pairing[4]
-                locked = pairing[5]
-                locked_reason = pairing[6] if pairing[6] else ""
-                purchase_timestamp = pairing[8]
-                purchase_price = pairing[9]
-                purchase_currency = pairing[10]
-                sale_timestamp = pairing[11]
-                sale_price = pairing[12]
-                sale_currency = pairing[13]
+            self.logger.info(f"Loading pairings: found {len(pairings)} pairs in date range")
+            
+            if len(pairings) == 0:
+                # Check if there are ANY pairings in the database
+                count_sql = "SELECT COUNT(*) FROM pairings"
+                count_cur = self.db.conn.execute(count_sql)
+                total_count = count_cur.fetchone()[0]
+                
+                if total_count > 0:
+                    # There are pairings, but none in this date range
+                    self.pairings_tree.insert('', 'end', values=(
+                        "", "", "", f"No pairings in date range ({total_count} total in database)", "", "", "", "", "", "", "", "", ""
+                    ))
+                else:
+                    # No pairings at all
+                    self.pairings_tree.insert('', 'end', values=(
+                        "", "", "", "No pairings found - create some using the actions below", "", "", "", "", "", "", "", "", ""
+                    ))
+                return
+            
+            for row in pairings:
+                pairing_id = row[0]
+                quantity = row[1]
+                method = row[2]
+                holding_days = row[3]
+                time_qualified = row[4]
+                locked = row[5]
+                locked_reason = row[6] if row[6] else ""
+                sale_timestamp = row[7]
+                purchase_timestamp = row[8]
+                security_name = row[9]
+                ticker = row[10]
+                purchase_price = row[11]
+                purchase_currency = row[12]
+                purchase_qty = row[13]
+                purchase_total_czk = row[14]
+                sale_price = row[15]
+                sale_currency = row[16]
+                sale_qty = row[17]
+                sale_total_czk = row[18]
                 
                 # Format dates
                 purchase_date = datetime.fromtimestamp(purchase_timestamp).strftime("%Y-%m-%d")
@@ -538,21 +580,12 @@ class PairsView(BaseView):
                 purchase_price_str = f"{purchase_price:.2f} {purchase_currency}"
                 sale_price_str = f"{sale_price:.2f} {sale_currency}"
                 
-                # Calculate P&L in CZK
-                # Get total_czk values for both trades
-                purchase_trade = self.trades_repo.get_by_id(pairing[7])
-                sale_trade = self.trades_repo.get_by_id(sale_trade_id)
+                # Calculate P&L in CZK (per-share basis * quantity paired)
+                purchase_qty_abs = abs(purchase_qty) if purchase_qty else 1
+                sale_qty_abs = abs(sale_qty) if sale_qty else 1
                 
-                # Calculate P&L: (sale_total - purchase_total) proportional to quantity
-                purchase_total_czk = purchase_trade['total_czk'] if purchase_trade else 0
-                sale_total_czk = sale_trade['total_czk'] if sale_trade else 0
-                
-                # Calculate per-share P&L in CZK
-                purchase_qty = abs(purchase_trade['number_of_shares']) if purchase_trade else 1
-                sale_qty = abs(sale_trade['number_of_shares']) if sale_trade else 1
-                
-                purchase_czk_per_share = abs(purchase_total_czk) / purchase_qty if purchase_qty > 0 else 0
-                sale_czk_per_share = abs(sale_total_czk) / sale_qty if sale_qty > 0 else 0
+                purchase_czk_per_share = abs(purchase_total_czk) / purchase_qty_abs if purchase_qty_abs > 0 else 0
+                sale_czk_per_share = abs(sale_total_czk) / sale_qty_abs if sale_qty_abs > 0 else 0
                 
                 pnl_czk = (sale_czk_per_share - purchase_czk_per_share) * abs(quantity)
                 pnl_str = f"{pnl_czk:,.2f}"
@@ -573,10 +606,8 @@ class PairsView(BaseView):
                     locked_reason
                 )
                 
-                item_id = self.pairings_tree.insert('', 'end', values=values)
-                
-                # Store pairing ID
-                self.pairings_tree.set(item_id, "#0", pairing_id)
+                # Store pairing ID using iid parameter
+                item_id = self.pairings_tree.insert('', 'end', iid=str(pairing_id), values=values)
             
         except Exception as e:
             self.logger.error(f"Error loading pairings: {e}", exc_info=True)
@@ -675,9 +706,9 @@ class PairsView(BaseView):
             messagebox.showwarning("No Selection", "Please select a pairing to delete.")
             return
         
-        # Get pairing ID
+        # Get pairing ID from item iid
         item = selection[0]
-        pairing_id = int(self.pairings_tree.set(item, "#0"))
+        pairing_id = int(item)
         
         # Check if locked
         if self.pairings_repo.is_pairing_locked(pairing_id):
@@ -702,10 +733,12 @@ class PairsView(BaseView):
     
     def refresh_view(self) -> None:
         """Refresh all data in the view after changes."""
-        self._load_sales_in_interval()
-        if self.current_sale_id:
-            self._load_available_lots(self.current_sale_id)
-            self._load_current_pairings(self.current_sale_id)
+        # Reload everything with current timestamps
+        if self.current_start_timestamp and self.current_end_timestamp:
+            self._load_sales_in_interval()
+            self._load_current_pairings(self.current_start_timestamp, self.current_end_timestamp)
+            if self.current_sale_id:
+                self._load_available_lots(self.current_sale_id)
     
     def clear_view(self) -> None:
         """Clear all items from the tree views."""
