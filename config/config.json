@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "TradingTools application configuration",
+  "metadata": {
+    "last_updated": "2026-01-03",
+    "version": "1.0"
+  },
+  "tax": {
+    "czech_republic": {
+      "capital_gains": {
+        "default_rate": 0.15,
+        "description": "Standard capital gains tax rate (15%)"
+      },
+      "time_test_exemption": {
+        "holding_period_years": 3,
+        "description": "Minimum holding period in years for tax exemption on capital gains",
+        "notes": [
+          "Securities held for more than 3 years are exempt from capital gains tax",
+          "Time is calculated from purchase date to sale date (calendar-based)",
+          "Example: Buy 2021-01-15, Sell 2024-01-16 = EXEMPT (3 years + 1 day)",
+          "Example: Buy 2021-01-15, Sell 2024-01-15 = TAXABLE (exactly 3 years)",
+          "Leap years are handled automatically using calendar dates"
+        ],
+        "legal_reference": "Czech Income Tax Act § 4(1)(w)"
+      }
+    }
+  },
+  "pairing": {
+    "methods": [
+      "FIFO",
+      "LIFO",
+      "MaxLose",
+      "MaxProfit",
+      "Manual"
+    ],
+    "default_method": "FIFO",
+    "description": "Available methods for pairing purchase lots with sales"
+  }
+}

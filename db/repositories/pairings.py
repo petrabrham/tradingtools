@@ -3,6 +3,7 @@ from typing import List, Dict, Optional, Tuple
 import sqlite3
 from ..base import BaseRepository
 from .trades import TradeType, TradesRepository
+from config.config_loader import get_time_test_holding_period_years
 
 
 class PairingsRepository(BaseRepository):
@@ -491,17 +492,18 @@ class PairingsRepository(BaseRepository):
             return 0
 
     def check_time_test(self, purchase_date: str, sale_date: str) -> bool:
-        """Check if a purchase-sale pair meets 3-year time test (Czech tax exemption).
+        """Check if a purchase-sale pair meets time test for tax exemption.
         
         The test is based on calendar dates, not a fixed number of days. 
-        For example, shares purchased on Jan 15, 2020 qualify on Jan 16, 2023 (after 3 full years).
+        For example, with 3-year requirement, shares purchased on Jan 15, 2020 
+        qualify on Jan 16, 2023 (after 3 full years).
         
         Args:
             purchase_date: Purchase date as ISO string or timestamp
             sale_date: Sale date as ISO string or timestamp
             
         Returns:
-            True if holding period exceeds 3 years (calendar-based)
+            True if holding period exceeds required years (calendar-based)
         """
         try:
             # Convert to datetime objects
@@ -515,16 +517,19 @@ class PairingsRepository(BaseRepository):
             else:
                 sale_dt = datetime.fromisoformat(str(sale_date))
             
-            # Calculate the date exactly 3 years after purchase
+            # Get required holding period from config
+            required_years = get_time_test_holding_period_years()
+            
+            # Calculate the date exactly N years after purchase
             # Handle Feb 29 leap year edge case
             try:
-                three_years_later = purchase_dt.replace(year=purchase_dt.year + 3)
+                years_later = purchase_dt.replace(year=purchase_dt.year + required_years)
             except ValueError:
-                # Feb 29 in a leap year -> Feb 28 three years later if not a leap year
-                three_years_later = purchase_dt.replace(year=purchase_dt.year + 3, day=28)
+                # Feb 29 in a leap year -> Feb 28 N years later if not a leap year
+                years_later = purchase_dt.replace(year=purchase_dt.year + required_years, day=28)
             
-            # Qualify if sale is AFTER the 3-year anniversary (not on the same day)
-            return sale_dt > three_years_later
+            # Qualify if sale is AFTER the N-year anniversary (not on the same day)
+            return sale_dt > years_later
             
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error checking time test: {e}")
@@ -644,12 +649,21 @@ class PairingsRepository(BaseRepository):
         Returns:
             Dictionary with lot info or None if no lots available
         """
-        # Calculate 3-year threshold if time test required
+        # Calculate time test threshold if required
         time_test_threshold = 0
         if time_test_only:
-            # 3 years in seconds (accounting for leap years, approximately)
-            three_years_seconds = 3 * 365.25 * 24 * 3600
-            time_test_threshold = sale_timestamp - int(three_years_seconds)
+            # Calculate exact date threshold using config
+            required_years = get_time_test_holding_period_years()
+            sale_dt = datetime.fromtimestamp(sale_timestamp)
+            
+            # Calculate the date exactly N years before sale
+            try:
+                threshold_dt = sale_dt.replace(year=sale_dt.year - required_years)
+            except ValueError:
+                # Feb 29 in leap year -> Feb 28 in non-leap year
+                threshold_dt = sale_dt.replace(year=sale_dt.year - required_years, day=28)
+            
+            time_test_threshold = int(threshold_dt.timestamp())
         
         sql = f"""
             SELECT t.id, t.timestamp, t.price_for_share, t.remaining_quantity
@@ -962,7 +976,7 @@ class PairingsRepository(BaseRepository):
             
             # Calculate holding period
             holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
-            time_test_qualified = holding_period_days >= 1095
+            time_test_qualified = self.check_time_test(buy_timestamp, sell_timestamp)
             
             # Create the pairing
             self.create_pairing(

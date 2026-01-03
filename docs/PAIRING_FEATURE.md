@@ -759,7 +759,7 @@ For Czech tax compliance, maintain:
 - [x] Write unit tests for repository methods
 - [x] Test lot availability calculations
 - [x] **Implement logic to derive method combinations from grouped pairings** ⭐
-- [ ] **Add helper methods to identify TimeTest usage from pairing patterns** ⭐
+- [rejected] **Add helper methods to identify TimeTest usage from pairing patterns** ⭐
 
 ### Phase 2: Core Matching Logic (Week 2)
 - [x] Implement FIFO method
@@ -768,10 +768,10 @@ For Czech tax compliance, maintain:
 - [x] Implement MaxProfit method
 - [x] Modify trades view to show remaining_quantity
 - [x] Manual pairing in trades view
-- [ ] **Implement TimeTest filter logic (lot filtering by 3+ year holding)** ⭐
+- [rejected] **Implement TimeTest filter logic (lot filtering by 3+ year holding)** ⭐
 - [rejected] **Implement two-pass pairing: TimeTest-filtered + Fallback method** ⭐
-- [ ] Add holding period calculation (purchase to sale date)
-- [ ] Add time test qualification check (> 3 years)
+- [x] Add holding period calculation (purchase to sale date)
+- [x] Add time test qualification check (> 3 years)
 - [ ] Add validation for partial matches
 - [ ] Handle cross-year pairings
 - [ ] Implement time interval pairing logic
