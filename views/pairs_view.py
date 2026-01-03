@@ -278,25 +278,48 @@ class PairsView(BaseView):
         self._load_current_pairings(start_timestamp, end_timestamp)
     
     def _load_sales_in_interval(self) -> None:
-        """Load all sale transactions in the selected time interval."""
+        """
+        Load all SELL transactions in the selected time interval that match the date filter.
+        Only transactions with timestamps between current_start_timestamp and current_end_timestamp are included.
+        """
         try:
             # Check if timestamps are set
             if self.current_start_timestamp is None or self.current_end_timestamp is None:
+                self.logger.warning("Cannot load sales - no date filter set")
                 return
             
-            # Clear existing data
-            self.clear_view()
+            # Clear existing sales data only
+            for item in self.sales_tree.get_children():
+                self.sales_tree.delete(item)
             
-            # Load sales from database
+            # Also clear lots tree since no sale is selected
+            for item in self.lots_tree.get_children():
+                self.lots_tree.delete(item)
+            
+            # Reset current sale selection
+            self.current_sale_id = None
+            
+            # Load sales from database with date filter
+            start_date = datetime.fromtimestamp(self.current_start_timestamp).strftime("%Y-%m-%d")
+            end_date = datetime.fromtimestamp(self.current_end_timestamp).strftime("%Y-%m-%d")
+            self.logger.info(f"Loading sales transactions for date range: {start_date} to {end_date}")
+            
             sales_data = self._get_sales_in_interval(self.current_start_timestamp, 
                                                      self.current_end_timestamp)
             
-            # Populate sales tree
+            if not sales_data:
+                self.logger.info(f"No sales found in date range {start_date} to {end_date}")
+                # Show informative message in empty tree
+                self.sales_tree.insert('', 'end', values=(
+                    f"No sales in date range {start_date} to {end_date}", 
+                    "", "", "", "", "", "", "", "", ""
+                ))
+                return
+            
+            # Populate sales tree with filtered data
             for sale in sales_data:
                 self._insert_sale_row(sale)
             
-            start_date = datetime.fromtimestamp(self.current_start_timestamp).strftime("%Y-%m-%d")
-            end_date = datetime.fromtimestamp(self.current_end_timestamp).strftime("%Y-%m-%d")
             self.logger.info(f"Loaded {len(sales_data)} sales from {start_date} to {end_date}")
             
         except Exception as e:
@@ -304,7 +327,24 @@ class PairsView(BaseView):
             messagebox.showerror("Error", f"Failed to load sales: {e}")
     
     def _get_sales_in_interval(self, start_timestamp: int, end_timestamp: int) -> List[Dict]:
-        """Get all SELL trades in the time interval with pairing status."""
+        """
+        Get all SELL trades in the time interval with pairing status.
+        
+        Args:
+            start_timestamp: Start of date range (Unix timestamp)
+            end_timestamp: End of date range (Unix timestamp)
+            
+        Returns:
+            List of sale dictionaries with pairing information
+        """
+        if not self.db.conn:
+            self.logger.warning("No database connection - cannot load sales")
+            return []
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
         sql = """
             SELECT 
                 t.id,
@@ -320,7 +360,7 @@ class PairsView(BaseView):
             WHERE t.trade_type = ?
             AND t.timestamp >= ?
             AND t.timestamp <= ?
-            ORDER BY t.timestamp DESC
+            ORDER BY s.name, t.timestamp DESC
         """
         
         cur = self.db.conn.execute(sql, (TradeType.SELL, start_timestamp, end_timestamp))
@@ -330,24 +370,31 @@ class PairsView(BaseView):
         for row in rows:
             sale_id = row[0]
             
-            # Get pairing info
-            pairings = self.pairings_repo.get_pairings_for_purchase(sale_id)
-            is_locked = self.pairings_repo.is_pairing_locked(sale_id) if pairings else False
-            
-            # Determine status
+            # Determine status from remaining quantity
             remaining_qty = abs(row[5])
             total_qty = abs(row[4])
+            
+            # Get pairing info (with connection check)
+            pairings = []
+            is_locked = False
+            method = ""
+            
+            if self.db.conn:
+                try:
+                    pairings = self.pairings_repo.get_pairings_for_purchase(sale_id)
+                    is_locked = self.pairings_repo.is_pairing_locked(sale_id) if pairings else False
+                    if pairings:
+                        method = self.pairings_repo.derive_method_combination(sale_id)
+                except Exception as e:
+                    self.logger.warning(f"Error getting pairing info for sale {sale_id}: {e}")
+            
+            # Determine status
             if remaining_qty < 1e-10:
                 status = "Fully Paired"
             elif remaining_qty >= total_qty - 1e-10:
                 status = "Unpaired"
             else:
                 status = "Partially Paired"
-            
-            # Get method combination if paired
-            method = ""
-            if pairings:
-                method = self.pairings_repo.derive_method_combination(sale_id)
             
             result.append({
                 'id': sale_id,
@@ -417,14 +464,33 @@ class PairsView(BaseView):
         for item in self.lots_tree.get_children():
             self.lots_tree.delete(item)
         
+        if not self.db.conn:
+            self.logger.warning("No database connection - cannot load available lots")
+            return
+        
+        # Update repository connections if needed
+        if not self.trades_repo.conn:
+            self.trades_repo.conn = self.db.conn
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
         try:
             # Get sale info
             sale = self.trades_repo.get_by_id(sale_trade_id)
             if not sale:
                 return
             
+            # Convert tuple to dict if needed
+            if isinstance(sale, tuple):
+                # Typical trade row: (id, isin_id, timestamp, trade_type, number_of_shares, ...)
+                sale_isin_id = sale[1]
+                sale_timestamp = sale[2]
+            else:
+                sale_isin_id = sale['isin_id']
+                sale_timestamp = sale['timestamp']
+            
             # Get available lots
-            lots = self.pairings_repo.get_available_lots(sale['isin_id'], sale['timestamp'])
+            lots = self.pairings_repo.get_available_lots(sale_isin_id, sale_timestamp)
             
             for lot in lots:
                 # Format holding period
