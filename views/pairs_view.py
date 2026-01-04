@@ -4,7 +4,7 @@ Pairs view for managing trade pairings between purchases and sales.
 Allows users to view unpaired sales, available purchase lots, and create/manage pairings.
 """
 
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import tkinter as tk
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -163,6 +163,13 @@ class PairsView(BaseView):
         vsb = ttk.Scrollbar(lots_frame, orient="vertical", command=self.lots_tree.yview)
         vsb.grid(row=0, column=1, sticky='ns')
         self.lots_tree.configure(yscrollcommand=vsb.set)
+        
+        # Create context menu for manual pairing
+        self.lots_context_menu = tk.Menu(self.lots_tree, tearoff=0)
+        self.lots_context_menu.add_command(label="Pair Manually", command=self._pair_manually)
+        
+        # Bind right-click to show context menu
+        self.lots_tree.bind("<Button-3>", self._show_lots_context_menu)
     
     def _create_pairings_panel(self, parent_frame: ttk.Frame) -> None:
         """Create the current pairings panel."""
@@ -802,6 +809,15 @@ class PairsView(BaseView):
                                        f"Sales will be processed in order from oldest to newest."):
                 return
         
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        if not self.trades_repo.conn:
+            self.trades_repo.conn = self.db.conn
+        # Also update the nested trades_repo inside pairings_repo
+        if not self.pairings_repo.trades_repo.conn:
+            self.pairings_repo.trades_repo.conn = self.db.conn
+        
         success_count = 0
         error_count = 0
         total_pairings = 0
@@ -841,24 +857,13 @@ class PairsView(BaseView):
             # Show summary
             if len(sale_ids) == 1:
                 # Single sale - show detailed result
-                if success_count > 0:
-                    messagebox.showinfo("Success", 
-                                       f"Applied {method} method:\n"
-                                       f"Pairings created: {total_pairings}\n"
-                                       f"Quantity paired: {total_quantity:.6f}")
-                else:
+                if success_count == 0:
                     messagebox.showerror("Error", f"Failed to apply {method} method")
             else:
                 # Multiple sales - show summary
                 self.logger.info(f"Batch pairing complete: {success_count} success, {error_count} errors, "
                                f"{total_pairings} total pairings, {total_quantity:.6f} total quantity")
-                messagebox.showinfo("Batch Pairing Complete", 
-                                   f"Applied {method} to {len(sale_ids)} sales:\n"
-                                   f"Successfully paired: {success_count}\n"
-                                   f"Errors: {error_count}\n"
-                                   f"Total pairings created: {total_pairings}\n"
-                                   f"Total quantity paired: {total_quantity:.6f}")
-            
+             
             self.refresh_view()
         
         except Exception as e:
@@ -1200,6 +1205,114 @@ class PairsView(BaseView):
             self._load_current_pairings(self.current_start_timestamp, self.current_end_timestamp)
             if self.current_sale_id:
                 self._load_available_lots(self.current_sale_id)
+    
+    def _show_lots_context_menu(self, event) -> None:
+        """Show context menu for lots tree on right-click."""
+        # Select the item under the cursor
+        item = self.lots_tree.identify_row(event.y)
+        if item:
+            self.lots_tree.selection_set(item)
+            self.lots_context_menu.post(event.x_root, event.y_root)
+    
+    def _pair_manually(self) -> None:
+        """Manually pair selected sale with selected purchase lot."""
+        # Check if a sale is selected
+        if not self.current_sale_id:
+            messagebox.showwarning("No Sale Selected", "Please select a sale transaction first.")
+            return
+        
+        # Check if a lot is selected
+        lot_selection = self.lots_tree.selection()
+        if not lot_selection:
+            messagebox.showwarning("No Lot Selected", "Please select a purchase lot to pair with.")
+            return
+        
+        # Get lot ID from selection
+        lot_item = lot_selection[0]
+        lot_id = int(lot_item)
+        
+        # Get lot details from tree to check available quantity
+        lot_values = self.lots_tree.item(lot_item, 'values')
+        if not lot_values or len(lot_values) < 3:
+            messagebox.showerror("Error", "Could not retrieve lot information.")
+            return
+        
+        available_qty_str = lot_values[2]  # Available Qty column
+        try:
+            purchase_available_qty = float(available_qty_str)
+        except ValueError:
+            messagebox.showerror("Error", f"Invalid available quantity: {available_qty_str}")
+            return
+        
+        # Check if lot has available quantity
+        if purchase_available_qty <= 0:
+            messagebox.showwarning("No Available Quantity", "This lot has no available quantity for pairing.")
+            return
+        
+        # Get sale's remaining quantity from the sales tree
+        sale_item = str(self.current_sale_id)
+        if not self.sales_tree.exists(sale_item):
+            messagebox.showerror("Error", "Selected sale not found in sales table.")
+            return
+        
+        sale_values = self.sales_tree.item(sale_item, 'values')
+        if not sale_values or len(sale_values) < 5:
+            messagebox.showerror("Error", "Could not retrieve sale information.")
+            return
+        
+        sale_remaining_str = sale_values[4]  # Remaining column (index 4)
+        try:
+            sale_remaining_qty = abs(float(sale_remaining_str))
+        except ValueError:
+            messagebox.showerror("Error", f"Invalid sale remaining quantity: {sale_remaining_str}")
+            return
+        
+        # Calculate maximum quantity that can be paired (minimum of both)
+        max_pair_qty = min(purchase_available_qty, sale_remaining_qty)
+        
+        # Ask user for quantity to pair
+        quantity = simpledialog.askfloat(
+            "Pair Manually",
+            f"Enter quantity to pair:\n"
+            f"Purchase available: {purchase_available_qty:.6f}\n"
+            f"Sale remaining: {sale_remaining_qty:.6f}\n"
+            f"Max pairable: {max_pair_qty:.6f}",
+            initialvalue=max_pair_qty,
+            minvalue=0.000001,
+            maxvalue=max_pair_qty
+        )
+        
+        if quantity is None:  # User cancelled
+            return
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        if not self.trades_repo.conn:
+            self.trades_repo.conn = self.db.conn
+        # Also update the nested trades_repo inside pairings_repo
+        if not self.pairings_repo.trades_repo.conn:
+            self.pairings_repo.trades_repo.conn = self.db.conn
+        
+        try:
+            # Create manual pairing
+            result = self.pairings_repo.create_manual_pairing(
+                sale_trade_id=self.current_sale_id,
+                purchase_trade_id=lot_id,
+                quantity=quantity
+            )
+            
+            if result.get('success'):
+                self.logger.info(f"Manual pairing created: sale {self.current_sale_id} with purchase {lot_id}, qty {quantity}")
+                messagebox.showinfo("Success", f"Successfully paired {quantity:.6f} shares.")
+                self.refresh_view()
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                messagebox.showerror("Error", f"Failed to create pairing:\n{error_msg}")
+        
+        except Exception as e:
+            self.logger.error(f"Error creating manual pairing: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to create pairing: {e}")
     
     def clear_view(self) -> None:
         """Clear all items from the tree views."""

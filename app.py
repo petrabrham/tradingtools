@@ -386,7 +386,7 @@ class TradingToolsApp:
 
         # --- 7. Tab 5: Pairs View ---
         tab_pairs = ttk.Frame(self.notebook)
-        self.notebook.add(tab_pairs, text="Pairs")
+        self.notebook.add(tab_pairs, text="Pairing")
         self.pairs_view.create_view(tab_pairs)
 
     def update_trades_view(self):

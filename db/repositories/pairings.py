@@ -1028,3 +1028,102 @@ class PairingsRepository(BaseRepository):
             self.conn.rollback()
             self.logger.exception("Error in manual_pair")
             return {'success': False, 'error': str(e)}
+
+    def create_manual_pairing(self, 
+                             sale_trade_id: int, 
+                             purchase_trade_id: int,
+                             quantity: float) -> Dict:
+        """Create a manual pairing with a specific quantity.
+        
+        Similar to manual_pair but allows specifying the exact quantity to pair
+        rather than pairing the maximum available amount.
+        
+        Args:
+            sale_trade_id: ID of the sale trade
+            purchase_trade_id: ID of the purchase trade
+            quantity: Specific quantity to pair
+            
+        Returns:
+            Dictionary with pairing results:
+            {
+                'success': bool,
+                'quantity_paired': float,
+                'holding_period_days': int,
+                'time_test_qualified': bool,
+                'error': Optional[str]
+            }
+        """
+        try:
+            # Validate quantity
+            if quantity <= QUANTITY_EPSILON:
+                return {'success': False, 'error': 'Quantity must be positive'}
+            
+            # Fetch both trades
+            buy_trade = self.trades_repo.get_by_id(purchase_trade_id)
+            sell_trade = self.trades_repo.get_by_id(sale_trade_id)
+            
+            if not buy_trade:
+                return {'success': False, 'error': f'Purchase trade {purchase_trade_id} not found'}
+            if not sell_trade:
+                return {'success': False, 'error': f'Sale trade {sale_trade_id} not found'}
+            
+            # Validate trade types
+            if buy_trade[4] != TradeType.BUY:
+                return {'success': False, 'error': 'Purchase must be a BUY trade'}
+            if sell_trade[4] != TradeType.SELL:
+                return {'success': False, 'error': 'Sale must be a SELL trade'}
+            
+            # Validate same security
+            if buy_trade[2] != sell_trade[2]:
+                return {'success': False, 'error': 'Trades must be for the same security'}
+            
+            # Validate chronological order
+            buy_timestamp = buy_trade[1]
+            sell_timestamp = sell_trade[1]
+            if buy_timestamp >= sell_timestamp:
+                return {'success': False, 'error': 'Purchase must be older than sale'}
+            
+            # Check available quantities
+            buy_remaining = buy_trade[6]
+            sell_remaining = sell_trade[6]
+            
+            if buy_remaining <= QUANTITY_EPSILON:
+                return {'success': False, 'error': 'Purchase lot is fully paired'}
+            if sell_remaining >= -QUANTITY_EPSILON:
+                return {'success': False, 'error': 'Sale is fully paired'}
+            
+            # Validate requested quantity doesn't exceed available
+            if quantity > buy_remaining:
+                return {'success': False, 'error': f'Quantity {quantity} exceeds available purchase quantity {buy_remaining}'}
+            if quantity > -sell_remaining:
+                return {'success': False, 'error': f'Quantity {quantity} exceeds remaining sale quantity {-sell_remaining}'}
+            
+            # Calculate holding period
+            holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
+            time_test_qualified = self.check_time_test(buy_timestamp, sell_timestamp)
+            
+            # Create the pairing
+            self.create_pairing(
+                sale_trade_id=sale_trade_id,
+                purchase_trade_id=purchase_trade_id,
+                quantity=quantity,
+                method='Manual',
+                time_test_qualified=time_test_qualified,
+                holding_period_days=holding_period_days,
+                notes=None
+            )
+            
+            self.commit()
+            
+            return {
+                'success': True,
+                'quantity_paired': quantity,
+                'holding_period_days': holding_period_days,
+                'time_test_qualified': time_test_qualified,
+                'error': None
+            }
+            
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.exception("Error in create_manual_pairing")
+            return {'success': False, 'error': str(e)}
