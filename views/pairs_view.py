@@ -478,19 +478,40 @@ class PairsView(BaseView):
             # Get sale info
             sale = self.trades_repo.get_by_id(sale_trade_id)
             if not sale:
+                self.logger.warning(f"Sale {sale_trade_id} not found in database")
                 return
+            
+            # Log the raw sale data for debugging
+            self.logger.info(f"Raw sale data for {sale_trade_id}: {sale}")
             
             # Convert tuple to dict if needed
             if isinstance(sale, tuple):
-                # Typical trade row: (id, isin_id, timestamp, trade_type, number_of_shares, ...)
-                sale_isin_id = sale[1]
-                sale_timestamp = sale[2]
+                # Trade row structure from get_by_id:
+                # Index 0: id (231)
+                # Index 1: timestamp (1733900413)
+                # Index 2: isin_id (11) <-- This is the SECURITY ID
+                # Index 3: transaction_id ('EOF24806460464')
+                # Index 4: trade_type (2)
+                sale_timestamp = sale[1]  # timestamp is at index 1
+                sale_isin_id = sale[2]     # isin_id is at index 2 (not 4!)
             else:
                 sale_isin_id = sale['isin_id']
                 sale_timestamp = sale['timestamp']
             
+            sale_date = datetime.fromtimestamp(sale_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            self.logger.info(f"Loading lots for sale {sale_trade_id}: isin_id={sale_isin_id}, timestamp={sale_timestamp} ({sale_date})")
+            
             # Get available lots
             lots = self.pairings_repo.get_available_lots(sale_isin_id, sale_timestamp)
+            
+            self.logger.info(f"Found {len(lots)} available purchase lots for sale {sale_trade_id}")
+            
+            if not lots:
+                # Show informative message when no lots available
+                self.lots_tree.insert('', 'end', values=(
+                    "No available purchase lots", "", "", "", "", ""
+                ))
+                return
             
             for lot in lots:
                 # Format holding period
@@ -521,6 +542,10 @@ class PairsView(BaseView):
             
         except Exception as e:
             self.logger.error(f"Error loading available lots: {e}", exc_info=True)
+            # Show error message in the tree
+            self.lots_tree.insert('', 'end', values=(
+                f"Error: {str(e)}", "", "", "", "", ""
+            ))
     
     def _load_current_pairings(self, start_timestamp: int = None, end_timestamp: int = None) -> None:
         """Load all pairings in the date range."""
