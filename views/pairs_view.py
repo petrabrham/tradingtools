@@ -81,7 +81,7 @@ class PairsView(BaseView):
         columns = ("Security", "Ticker", "Date", "Quantity", "Remaining", "Price", 
                    "Total", "Status", "Method", "Locked")
         self.sales_tree = ttk.Treeview(sales_frame, columns=columns, show='headings', 
-                                       selectmode='browse')
+                                       selectmode='extended')
         self.sales_tree.grid(row=0, column=0, sticky='nsew')
         
         # Configure columns
@@ -783,38 +783,83 @@ class PairsView(BaseView):
             self.logger.error(f"Error loading pairings: {e}", exc_info=True)
     
     def _apply_method_to_selected(self) -> None:
-        """Apply the selected method to the currently selected sale."""
-        if not self.current_sale_id:
-            messagebox.showwarning("No Selection", "Please select a sale transaction first.")
+        """Apply the selected method to all currently selected sales."""
+        # Get all selected sales from the tree
+        selection = self.sales_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select one or more sale transactions first.")
             return
         
         method = self.method_var.get()
         
-        try:
-            # Apply method
-            if method == "FIFO":
-                result = self.pairings_repo.apply_fifo(self.current_sale_id)
-            elif method == "LIFO":
-                result = self.pairings_repo.apply_lifo(self.current_sale_id)
-            elif method == "MaxLose":
-                result = self.pairings_repo.apply_max_lose(self.current_sale_id)
-            elif method == "MaxProfit":
-                result = self.pairings_repo.apply_max_profit(self.current_sale_id)
-            else:
-                messagebox.showerror("Error", f"Unknown method: {method}")
+        # Get sale IDs in order (as they appear in the tree, which is already sorted oldest first)
+        sale_ids = [int(item) for item in selection]
+        
+        # Confirm if multiple sales are selected
+        if len(sale_ids) > 1:
+            if not messagebox.askyesno("Confirm", 
+                                       f"Apply {method} method to {len(sale_ids)} selected sales?\n"
+                                       f"Sales will be processed in order from oldest to newest."):
                 return
+        
+        success_count = 0
+        error_count = 0
+        total_pairings = 0
+        total_quantity = 0.0
+        
+        try:
+            for sale_id in sale_ids:
+                try:
+                    # Apply method based on selection
+                    if method == "FIFO":
+                        result = self.pairings_repo.apply_fifo(sale_id)
+                    elif method == "LIFO":
+                        result = self.pairings_repo.apply_lifo(sale_id)
+                    elif method == "MaxLose":
+                        result = self.pairings_repo.apply_max_lose(sale_id)
+                    elif method == "MaxProfit":
+                        result = self.pairings_repo.apply_max_profit(sale_id)
+                    else:
+                        messagebox.showerror("Error", f"Unknown method: {method}")
+                        return
+                    
+                    if result['success']:
+                        success_count += 1
+                        total_pairings += result['pairings_created']
+                        total_quantity += result['total_quantity_paired']
+                        self.logger.info(f"Applied {method} to sale {sale_id}: "
+                                       f"{result['pairings_created']} pairings, "
+                                       f"{result['total_quantity_paired']} shares")
+                    else:
+                        error_count += 1
+                        self.logger.warning(f"Failed to apply {method} to sale {sale_id}: {result.get('error', 'Unknown error')}")
+                
+                except Exception as e:
+                    error_count += 1
+                    self.logger.error(f"Error applying method to sale {sale_id}: {e}", exc_info=True)
             
-            if result['success']:
-                self.logger.info(f"Applied {method} to sale {self.current_sale_id}: "
-                               f"{result['pairings_created']} pairings, "
-                               f"{result['total_quantity_paired']} shares")
-                messagebox.showinfo("Success", 
-                                   f"Applied {method} method:\n"
-                                   f"Pairings created: {result['pairings_created']}\n"
-                                   f"Quantity paired: {result['total_quantity_paired']:.6f}")
-                self.refresh_view()
+            # Show summary
+            if len(sale_ids) == 1:
+                # Single sale - show detailed result
+                if success_count > 0:
+                    messagebox.showinfo("Success", 
+                                       f"Applied {method} method:\n"
+                                       f"Pairings created: {total_pairings}\n"
+                                       f"Quantity paired: {total_quantity:.6f}")
+                else:
+                    messagebox.showerror("Error", f"Failed to apply {method} method")
             else:
-                messagebox.showerror("Error", f"Failed to apply {method}:\n{result['error']}")
+                # Multiple sales - show summary
+                self.logger.info(f"Batch pairing complete: {success_count} success, {error_count} errors, "
+                               f"{total_pairings} total pairings, {total_quantity:.6f} total quantity")
+                messagebox.showinfo("Batch Pairing Complete", 
+                                   f"Applied {method} to {len(sale_ids)} sales:\n"
+                                   f"Successfully paired: {success_count}\n"
+                                   f"Errors: {error_count}\n"
+                                   f"Total pairings created: {total_pairings}\n"
+                                   f"Total quantity paired: {total_quantity:.6f}")
+            
+            self.refresh_view()
         
         except Exception as e:
             self.logger.error(f"Error applying method: {e}", exc_info=True)
