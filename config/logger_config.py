@@ -59,3 +59,18 @@ def setup_logger(name: str = "trading_tools") -> logging.Logger:
     logger.addHandler(console_handler)
     
     return logger
+
+
+def get_logger(name: str = "trading_tools") -> logging.Logger:
+    """Get or create a logger with the specified name.
+    
+    This is a convenience wrapper around setup_logger that provides
+    a consistent interface for getting loggers throughout the application.
+    
+    Args:
+        name: Logger name, typically __name__ from the calling module
+        
+    Returns:
+        Configured logger instance
+    """
+    return setup_logger(name)

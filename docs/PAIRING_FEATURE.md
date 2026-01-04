@@ -89,7 +89,7 @@ The Pairing feature is built around three interconnected views that provide comp
 
 **Key functionality**:
 - Time interval selector for filtering sales by date range
-- Display all sales (paired and unpaired) with pairing status
+- Display all pairs with pairing status
 - Show available purchase lots for selected sale
 - Create/modify/delete pairings (manual and automatic methods)
 - Lock/unlock pairings for tax compliance
@@ -115,15 +115,18 @@ The Pairing feature is built around three interconnected views that provide comp
 - Project tax impact of potential sales
 
 **Key columns**:
-- Security (ISIN, ticker, name)
-- Purchase date
-- Quantity remaining (original - sold)
-- Cost basis per unit
-- Current value
-- Unrealized gain/loss
-- Holding period (years/days)
-- Time test status (⏰✓ qualified, ⏰✗ not yet, ⏰ [X days remaining])
-- Status (fully available, partially paired)
+- Locked 🔒 ... pairings.locked
+- Sale date ... pairings.sale_trade_id -> trades.timestamp
+- Purchase date ... pairings.purchase_trade_id -> trades.timestamp
+- Security (ticker, name) ... pairings.sale_trade_id -> trades.isin_id -> secirities.ticker/name
+- Holding period (years/days) ... pairings.holding_period_days
+- Time test status (⏰✓ qualified) ... pairings.time_test_qualified
+- Quantity ... pairings.quantity
+- Unit Price of purchase and currency ... pairings.purchase_trade_id -> trades.price_for_share / currency_of_price
+- Unit Price of sale and currency ... pairings.sale_trade_id -> trades.price_for_share / currency_of_price
+- P&L in CZK ... ((pairings.sale_trade_id -> trades.total_czk) - (pairings.purchase_trade_id -> trades.total_czk)) * pairings.quantity
+- method ... pairings.metrhod
+- Lock Reason ... pairing.locked_reason
 
 **Typical use cases**:
 - Planning future sales based on tax optimization
@@ -779,7 +782,7 @@ For Czech tax compliance, maintain:
 - [ ] Validate locked pairings cannot be modified
 
 ### Phase 3: UI Development (Week 3-4)
-- [ ] Create `PairsView` class with time interval selector
+- [X] Create `PairsView` class with time interval selector
 - [ ] Implement Pairs view layout (sales list, available lots, current pairings)
 - [ ] **Add time test visual indicators (⏰✓/⏰✗ icons, green highlighting)** ⭐
 - [ ] **Display holding period in years/days for each lot** ⭐

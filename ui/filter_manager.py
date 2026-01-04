@@ -28,8 +28,13 @@ class FilterManager:
             return
         year_str = self.app.year_combobox.get()
         if not year_str:
+            # If year is cleared, don't change date filters
             return
-        year = int(year_str)
+        try:
+            year = int(year_str)
+        except ValueError:
+            return
+            
         # Set date_from_var and date_to_var to first and last day of year
         date_from = f"{year}-01-01"
         date_to = f"{year}-12-31"
