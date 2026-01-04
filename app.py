@@ -533,8 +533,27 @@ class TradingToolsApp:
     ###########################################################
     def apply_filter(self):
         """Handles the logic when the filter button is pressed."""
-        # date_from = self.date_from_var.get()
-        # date_to = self.date_to_var.get()
+        # Check if the selected date range represents a full year
+        date_from_str = self.date_from_var.get()
+        date_to_str = self.date_to_var.get()
+        
+        try:
+            date_from = datetime.strptime(date_from_str, "%Y-%m-%d")
+            date_to = datetime.strptime(date_to_str, "%Y-%m-%d")
+            
+            # Check if it's a full year (Jan 1 to Dec 31 of the same year)
+            if (date_from.month == 1 and date_from.day == 1 and
+                date_to.month == 12 and date_to.day == 31 and
+                date_from.year == date_to.year):
+                # Set the year selector to this year
+                self.year_combobox.set(str(date_from.year))
+            else:
+                # Clear the year selector
+                self.year_combobox.set('')
+        except (ValueError, AttributeError):
+            # If parsing fails or year_combobox doesn't exist, just clear it
+            if self.year_combobox:
+                self.year_combobox.set('')
 
         # Calls update_views, which handles the filtering for all relevant tabs
         self.update_views()
