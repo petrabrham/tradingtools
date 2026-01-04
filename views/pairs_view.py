@@ -176,7 +176,7 @@ class PairsView(BaseView):
                    "Holding Period", "⏰", "Quantity", "Purchase Price", "Sale Price", 
                    "P&L (CZK)", "Method", "Lock Reason")
         self.pairings_tree = ttk.Treeview(pairings_frame, columns=columns, show='headings', 
-                                          selectmode='browse')
+                                          selectmode='extended')
         self.pairings_tree.grid(row=0, column=0, sticky='nsew')
         
         # Configure columns
@@ -223,44 +223,91 @@ class PairsView(BaseView):
         vsb = ttk.Scrollbar(pairings_frame, orient="vertical", command=self.pairings_tree.yview)
         vsb.grid(row=0, column=1, sticky='ns')
         self.pairings_tree.configure(yscrollcommand=vsb.set)
+        
+        hsb = ttk.Scrollbar(pairings_frame, orient="horizontal", command=self.pairings_tree.xview)
+        hsb.grid(row=1, column=0, sticky='ew')
+        self.pairings_tree.configure(xscrollcommand=hsb.set)
+        
+        # Bind selection event
+        self.pairings_tree.bind('<<TreeviewSelect>>', self._on_pairing_selected)
     
     def _create_action_section(self, parent_frame: ttk.Frame) -> None:
         """Create the action buttons section."""
-        action_frame = ttk.LabelFrame(parent_frame, text="Actions", padding=10)
-        action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        # Main container frame
+        action_container = ttk.Frame(parent_frame)
+        action_container.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        action_container.grid_columnconfigure(0, weight=1)
+        action_container.grid_columnconfigure(1, weight=1)
+        action_container.grid_columnconfigure(2, weight=0)
         
-        # Method selection
-        ttk.Label(action_frame, text="Method:").grid(row=0, column=0, padx=5, pady=2)
+        # LEFT: Sales Action
+        sales_frame = ttk.LabelFrame(action_container, text="Sales Action", padding=10)
+        sales_frame.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        
+        # Row 0: Method selection and TimeTest checkbox
+        ttk.Label(sales_frame, text="Method:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
         self.method_var = tk.StringVar(value="FIFO")
-        method_combo = ttk.Combobox(action_frame, textvariable=self.method_var, 
-                                    width=15, state="readonly")
+        method_combo = ttk.Combobox(sales_frame, textvariable=self.method_var, 
+                                    width=12, state="readonly")
         method_combo['values'] = ["FIFO", "LIFO", "MaxLose", "MaxProfit"]
-        method_combo.grid(row=0, column=1, padx=5, pady=2)
+        method_combo.grid(row=0, column=1, padx=5, pady=2, sticky="w")
         
-        # TimeTest filter checkbox
         self.timetest_var = tk.BooleanVar(value=False)
-        timetest_check = ttk.Checkbutton(action_frame, text="Time Test Only (3+ years)", 
+        timetest_check = ttk.Checkbutton(sales_frame, text="Time Test Only (3+ years)", 
                                          variable=self.timetest_var)
-        timetest_check.grid(row=0, column=2, padx=10, pady=2)
+        timetest_check.grid(row=0, column=2, padx=5, pady=2, sticky="w")
         
-        # Apply method button
-        apply_btn = ttk.Button(action_frame, text="Apply Method to Selected Sale", 
-                               command=self._apply_method_to_selected)
-        apply_btn.grid(row=0, column=3, padx=10, pady=2)
+        # Row 1: Buttons
+        pair_selected_btn = ttk.Button(sales_frame, text="Pair Selected Sale", 
+                                       command=self._apply_method_to_selected)
+        pair_selected_btn.grid(row=1, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
         
-        # Apply to interval button
-        apply_interval_btn = ttk.Button(action_frame, text="Apply to All Unpaired in Interval", 
-                                        command=self._apply_method_to_interval)
-        apply_interval_btn.grid(row=0, column=4, padx=5, pady=2)
+        pair_all_btn = ttk.Button(sales_frame, text="Pair All Sales", 
+                                  command=self._apply_method_to_interval)
+        pair_all_btn.grid(row=1, column=2, padx=5, pady=2, sticky="ew")
         
-        # Delete pairing button
-        delete_btn = ttk.Button(action_frame, text="Delete Selected Pairing", 
-                                command=self._delete_selected_pairing)
-        delete_btn.grid(row=0, column=5, padx=5, pady=2)
+        # MIDDLE: Pair Action
+        pair_frame = ttk.LabelFrame(action_container, text="Pair Action", padding=10)
+        pair_frame.grid(row=0, column=1, sticky="ew", padx=5)
+        
+        # Row 0: Lock reason editbox
+        ttk.Label(pair_frame, text="Lock Reason:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.lock_reason_var = tk.StringVar(value="Manually locked")
+        lock_reason_entry = ttk.Entry(pair_frame, textvariable=self.lock_reason_var, width=25)
+        lock_reason_entry.grid(row=0, column=1, columnspan=3, padx=5, pady=2, sticky="ew")
+        
+        # Row 1: Buttons
+        unpair_selected_btn = ttk.Button(pair_frame, text="Unpair Selected", 
+                                         command=self._unpair_selected)
+        unpair_selected_btn.grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+        
+        unpair_all_btn = ttk.Button(pair_frame, text="Unpair All", 
+                                     command=self._unpair_all)
+        unpair_all_btn.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+        
+        lock_selected_btn = ttk.Button(pair_frame, text="Lock Selected", 
+                                       command=self._lock_selected)
+        lock_selected_btn.grid(row=1, column=2, padx=2, pady=2, sticky="ew")
+        
+        lock_all_btn = ttk.Button(pair_frame, text="Lock All", 
+                                  command=self._lock_all)
+        lock_all_btn.grid(row=1, column=3, padx=2, pady=2, sticky="ew")
+        
+        unlock_selected_btn = ttk.Button(pair_frame, text="Unlock Selected", 
+                                         command=self._unlock_selected)
+        unlock_selected_btn.grid(row=1, column=4, padx=2, pady=2, sticky="ew")
+        
+        unlock_all_btn = ttk.Button(pair_frame, text="Unlock All", 
+                                     command=self._unlock_all)
+        unlock_all_btn.grid(row=1, column=5, padx=2, pady=2, sticky="ew")
+        
+        # RIGHT: Refresh
+        refresh_frame = ttk.LabelFrame(action_container, text="Refresh", padding=10)
+        refresh_frame.grid(row=0, column=2, sticky="ew", padx=(5, 0))
         
         # Refresh button
-        refresh_btn = ttk.Button(action_frame, text="Refresh", command=self.refresh_view)
-        refresh_btn.grid(row=0, column=6, padx=5, pady=2)
+        refresh_btn = ttk.Button(refresh_frame, text="Refresh", command=self.refresh_view)
+        refresh_btn.grid(row=0, column=0, padx=5, pady=2, sticky="ew")
     
     def update_view(self, start_timestamp: int, end_timestamp: int) -> None:
         """
@@ -308,12 +355,6 @@ class PairsView(BaseView):
                                                      self.current_end_timestamp)
             
             if not sales_data:
-                self.logger.info(f"No sales found in date range {start_date} to {end_date}")
-                # Show informative message in empty tree
-                self.sales_tree.insert('', 'end', values=(
-                    f"No sales in date range {start_date} to {end_date}", 
-                    "", "", "", "", "", "", "", "", ""
-                ))
                 return
             
             # Populate sales tree with filtered data
@@ -360,7 +401,7 @@ class PairsView(BaseView):
             WHERE t.trade_type = ?
             AND t.timestamp >= ?
             AND t.timestamp <= ?
-            ORDER BY s.name, t.timestamp DESC
+            ORDER BY s.name, t.timestamp ASC
         """
         
         cur = self.db.conn.execute(sql, (TradeType.SELL, start_timestamp, end_timestamp))
@@ -457,6 +498,63 @@ class PairsView(BaseView):
         
         # Load available lots for this sale
         self._load_available_lots(sale_id)
+        
+        # Select matching pairings in the pairings tree
+        self._select_pairings_for_sale(sale_id)
+    
+    def _select_pairings_for_sale(self, sale_id: int) -> None:
+        """Select all pairings in the pairings tree that belong to the given sale."""
+        # Clear current selection
+        self.pairings_tree.selection_remove(*self.pairings_tree.selection())
+        
+        # Find and select all items tagged with this sale_id
+        tag = f"sale_{sale_id}"
+        matching_items = []
+        
+        for item in self.pairings_tree.get_children():
+            item_tags = self.pairings_tree.item(item, 'tags')
+            if tag in item_tags:
+                matching_items.append(item)
+        
+        if matching_items:
+            # Select all matching items
+            self.pairings_tree.selection_set(matching_items)
+            # Scroll to the first selected item
+            self.pairings_tree.see(matching_items[0])
+    
+    def _on_pairing_selected(self, event) -> None:
+        """Handle selection of a pairing - select corresponding purchase lot."""
+        selection = self.pairings_tree.selection()
+        if not selection:
+            return
+        
+        # Clear current lot selection
+        self.lots_tree.selection_remove(*self.lots_tree.selection())
+        
+        # Collect all unique purchase_trade_ids from selected pairings
+        purchase_ids = set()
+        for item in selection:
+            item_tags = self.pairings_tree.item(item, 'tags')
+            for tag in item_tags:
+                if tag.startswith('purchase_'):
+                    purchase_id = int(tag.replace('purchase_', ''))
+                    purchase_ids.add(purchase_id)
+        
+        # Select matching lots in the lots tree
+        matching_lots = []
+        for item in self.lots_tree.get_children():
+            item_id = self.lots_tree.item(item, 'text')
+            try:
+                lot_id = int(item) if item else None
+                if lot_id in purchase_ids:
+                    matching_lots.append(item)
+            except (ValueError, TypeError):
+                continue
+        
+        if matching_lots:
+            self.lots_tree.selection_set(matching_lots)
+            # Scroll to the first selected lot
+            self.lots_tree.see(matching_lots[0])
     
     def _load_available_lots(self, sale_trade_id: int) -> None:
         """Load available purchase lots for the selected sale."""
@@ -482,7 +580,7 @@ class PairsView(BaseView):
                 return
             
             # Log the raw sale data for debugging
-            self.logger.info(f"Raw sale data for {sale_trade_id}: {sale}")
+            # self.logger.info(f"Raw sale data for {sale_trade_id}: {sale}")
             
             # Convert tuple to dict if needed
             if isinstance(sale, tuple):
@@ -507,10 +605,6 @@ class PairsView(BaseView):
             self.logger.info(f"Found {len(lots)} available purchase lots for sale {sale_trade_id}")
             
             if not lots:
-                # Show informative message when no lots available
-                self.lots_tree.insert('', 'end', values=(
-                    "No available purchase lots", "", "", "", "", ""
-                ))
                 return
             
             for lot in lots:
@@ -567,10 +661,6 @@ class PairsView(BaseView):
             end_timestamp = self.current_end_timestamp
             
         if start_timestamp is None or end_timestamp is None:
-            self.logger.warning("No date range set - cannot load pairings")
-            self.pairings_tree.insert('', 'end', values=(
-                "", "", "", "No date range selected - use main filter", "", "", "", "", "", "", "", "", ""
-            ))
             return
         
         try:
@@ -600,13 +690,15 @@ class PairsView(BaseView):
                     st.price_for_share as sale_price,
                     st.currency_of_price as sale_currency,
                     st.number_of_shares as sale_qty,
-                    st.total_czk as sale_total_czk
+                    st.total_czk as sale_total_czk,
+                    p.sale_trade_id,
+                    p.purchase_trade_id
                 FROM pairings p
                 JOIN trades pt ON p.purchase_trade_id = pt.id
                 JOIN trades st ON p.sale_trade_id = st.id
                 JOIN securities s ON st.isin_id = s.id
                 WHERE st.timestamp >= ? AND st.timestamp <= ?
-                ORDER BY st.timestamp DESC, pt.timestamp
+                ORDER BY st.timestamp ASC, pt.timestamp ASC
             """
             
             cur = self.db.conn.execute(sql, (start_timestamp, end_timestamp))
@@ -615,21 +707,6 @@ class PairsView(BaseView):
             self.logger.info(f"Loading pairings: found {len(pairings)} pairs in date range")
             
             if len(pairings) == 0:
-                # Check if there are ANY pairings in the database
-                count_sql = "SELECT COUNT(*) FROM pairings"
-                count_cur = self.db.conn.execute(count_sql)
-                total_count = count_cur.fetchone()[0]
-                
-                if total_count > 0:
-                    # There are pairings, but none in this date range
-                    self.pairings_tree.insert('', 'end', values=(
-                        "", "", "", f"No pairings in date range ({total_count} total in database)", "", "", "", "", "", "", "", "", ""
-                    ))
-                else:
-                    # No pairings at all
-                    self.pairings_tree.insert('', 'end', values=(
-                        "", "", "", "No pairings found - create some using the actions below", "", "", "", "", "", "", "", "", ""
-                    ))
                 return
             
             for row in pairings:
@@ -652,6 +729,8 @@ class PairsView(BaseView):
                 sale_currency = row[16]
                 sale_qty = row[17]
                 sale_total_czk = row[18]
+                sale_trade_id = row[19]
+                purchase_trade_id = row[20]
                 
                 # Format dates
                 purchase_date = datetime.fromtimestamp(purchase_timestamp).strftime("%Y-%m-%d")
@@ -697,8 +776,8 @@ class PairsView(BaseView):
                     locked_reason
                 )
                 
-                # Store pairing ID using iid parameter
-                item_id = self.pairings_tree.insert('', 'end', iid=str(pairing_id), values=values)
+                # Store pairing ID using iid parameter and sale_trade_id, purchase_trade_id as tags
+                item_id = self.pairings_tree.insert('', 'end', iid=str(pairing_id), values=values, tags=(f"sale_{sale_trade_id}", f"purchase_{purchase_trade_id}"))
             
         except Exception as e:
             self.logger.error(f"Error loading pairings: {e}", exc_info=True)
@@ -790,37 +869,283 @@ class PairsView(BaseView):
             self.logger.error(f"Error in batch pairing: {e}", exc_info=True)
             messagebox.showerror("Error", f"Batch pairing failed: {e}")
     
-    def _delete_selected_pairing(self) -> None:
-        """Delete the currently selected pairing."""
+    def _unpair_selected(self) -> None:
+        """Delete the currently selected pairing(s)."""
         selection = self.pairings_tree.selection()
         if not selection:
-            messagebox.showwarning("No Selection", "Please select a pairing to delete.")
+            messagebox.showwarning("No Selection", "Please select pairing(s) to delete.")
             return
         
-        # Get pairing ID from item iid
-        item = selection[0]
-        pairing_id = int(item)
+        # Update repository connections if needed
+        if not self.trades_repo.conn:
+            self.trades_repo.conn = self.db.conn
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        # Also update the trades_repo inside pairings_repo
+        if not self.pairings_repo.trades_repo.conn:
+            self.pairings_repo.trades_repo.conn = self.db.conn
         
-        # Check if locked
-        if self.pairings_repo.is_pairing_locked(pairing_id):
-            messagebox.showerror("Locked", "This pairing is locked and cannot be deleted.")
+        # Confirm deletion
+        if len(selection) == 1:
+            confirm_msg = "Delete this pairing?"
+        else:
+            confirm_msg = f"Delete {len(selection)} pairings?"
+        
+        if not messagebox.askyesno("Confirm", confirm_msg):
             return
         
-        if not messagebox.askyesno("Confirm", "Delete this pairing?"):
-            return
+        success_count = 0
+        locked_count = 0
+        error_count = 0
         
         try:
-            success = self.pairings_repo.delete_pairing(pairing_id)
-            if success:
-                self.logger.info(f"Deleted pairing {pairing_id}")
-                messagebox.showinfo("Success", "Pairing deleted successfully.")
-                self.refresh_view()
-            else:
-                messagebox.showerror("Error", "Failed to delete pairing.")
+            for item in selection:
+                pairing_id = int(item)
+                
+                # Check if locked
+                if self.pairings_repo.is_pairing_locked(pairing_id):
+                    locked_count += 1
+                    continue
+                
+                try:
+                    if self.pairings_repo.delete_pairing(pairing_id):
+                        success_count += 1
+                        self.logger.info(f"Deleted pairing {pairing_id}")
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error deleting pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Unpair selected: {success_count} deleted, {locked_count} locked, {error_count} errors")
+            
+            self.refresh_view()
         
         except Exception as e:
             self.logger.error(f"Error deleting pairing: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to delete pairing: {e}")
+    
+    def _unpair_all(self) -> None:
+        """Delete all pairings in the current view."""
+        all_pairings = self.pairings_tree.get_children()
+        if not all_pairings:
+            messagebox.showwarning("No Pairings", "No pairings to delete.")
+            return
+        
+        if not messagebox.askyesno("Confirm", 
+                                   f"Delete all {len(all_pairings)} pairings?\n"
+                                   f"This cannot be easily undone."):
+            return
+        
+        # Update repository connections if needed
+        if not self.trades_repo.conn:
+            self.trades_repo.conn = self.db.conn
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        # Also update the trades_repo inside pairings_repo
+        if not self.pairings_repo.trades_repo.conn:
+            self.pairings_repo.trades_repo.conn = self.db.conn
+        
+        success_count = 0
+        locked_count = 0
+        error_count = 0
+        
+        try:
+            for item in all_pairings:
+                pairing_id = int(item)
+                
+                # Skip locked pairings
+                if self.pairings_repo.is_pairing_locked(pairing_id):
+                    locked_count += 1
+                    continue
+                
+                try:
+                    if self.pairings_repo.delete_pairing(pairing_id):
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error deleting pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Unpair all: {success_count} deleted, {locked_count} locked, {error_count} errors")
+            self.refresh_view()
+        
+        except Exception as e:
+            self.logger.error(f"Error in unpair all: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Unpair all failed: {e}")
+    
+    def _lock_selected(self) -> None:
+        """Lock the selected pairing(s)."""
+        selection = self.pairings_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select pairing(s) to lock.")
+            return
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
+        reason = self.lock_reason_var.get().strip() or "Manually locked"
+        success_count = 0
+        error_count = 0
+        
+        try:
+            for item in selection:
+                pairing_id = int(item)
+                
+                try:
+                    if self.pairings_repo.lock_pairing(pairing_id, reason):
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error locking pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Lock selected: {success_count} locked, {error_count} errors")
+            
+            if len(selection) == 1:
+                if success_count == 1:
+                    messagebox.showinfo("Success", "Pairing locked successfully.")
+                else:
+                    messagebox.showerror("Error", "Failed to lock pairing.")
+
+            self.refresh_view()
+        
+        except Exception as e:
+            self.logger.error(f"Error in lock selected: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Lock selected failed: {e}")
+    
+    def _lock_all(self) -> None:
+        """Lock all pairings in the current view."""
+        all_pairings = self.pairings_tree.get_children()
+        if not all_pairings:
+            messagebox.showwarning("No Pairings", "No pairings to lock.")
+            return
+        
+        if not messagebox.askyesno("Confirm", 
+                                   f"Lock all {len(all_pairings)} pairings?"):
+            return
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
+        reason = self.lock_reason_var.get().strip() or "Bulk locked"
+        success_count = 0
+        already_locked_count = 0
+        error_count = 0
+        
+        try:
+            for item in all_pairings:
+                pairing_id = int(item)
+                
+                # Check if already locked
+                if self.pairings_repo.is_pairing_locked(pairing_id):
+                    already_locked_count += 1
+                    continue
+                
+                try:
+                    if self.pairings_repo.lock_pairing(pairing_id, reason):
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error locking pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Lock all: {success_count} locked, {already_locked_count} already locked, {error_count} errors")
+            self.refresh_view()
+        
+        except Exception as e:
+            self.logger.error(f"Error in lock all: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Lock all failed: {e}")
+    
+    def _unlock_selected(self) -> None:
+        """Unlock the selected pairing(s)."""
+        selection = self.pairings_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select pairing(s) to unlock.")
+            return
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
+        success_count = 0
+        error_count = 0
+        
+        try:
+            for item in selection:
+                pairing_id = int(item)
+                
+                try:
+                    if self.pairings_repo.unlock_pairing(pairing_id):
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error unlocking pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Unlock selected: {success_count} unlocked, {error_count} errors")
+            
+            if len(selection) == 1:
+                if success_count == 1:
+                    messagebox.showinfo("Success", "Pairing unlocked successfully.")
+                else:
+                    messagebox.showerror("Error", "Failed to unlock pairing.")
+
+            self.refresh_view()
+        
+        except Exception as e:
+            self.logger.error(f"Error in unlock selected: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Unlock selected failed: {e}")
+    
+    def _unlock_all(self) -> None:
+        """Unlock all pairings in the current view."""
+        all_pairings = self.pairings_tree.get_children()
+        if not all_pairings:
+            messagebox.showwarning("No Pairings", "No pairings to unlock.")
+            return
+        
+        if not messagebox.askyesno("Confirm", 
+                                   f"Unlock all {len(all_pairings)} pairings?"):
+            return
+        
+        # Update repository connections if needed
+        if not self.pairings_repo.conn:
+            self.pairings_repo.conn = self.db.conn
+        
+        success_count = 0
+        already_unlocked_count = 0
+        error_count = 0
+        
+        try:
+            for item in all_pairings:
+                pairing_id = int(item)
+                
+                # Check if already unlocked
+                if not self.pairings_repo.is_pairing_locked(pairing_id):
+                    already_unlocked_count += 1
+                    continue
+                
+                try:
+                    if self.pairings_repo.unlock_pairing(pairing_id):
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    self.logger.error(f"Error unlocking pairing {pairing_id}: {e}")
+                    error_count += 1
+            
+            self.logger.info(f"Unlock all: {success_count} unlocked, {already_unlocked_count} already unlocked, {error_count} errors")
+            self.refresh_view()
+        
+        except Exception as e:
+            self.logger.error(f"Error in unlock all: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Unlock all failed: {e}")
     
     def refresh_view(self) -> None:
         """Refresh all data in the view after changes."""
