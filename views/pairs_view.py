@@ -9,7 +9,7 @@ import tkinter as tk
 from datetime import datetime
 from typing import Optional, Dict, List
 from .base_view import BaseView
-from db.repositories.pairings import PairingsRepository
+from db.repositories.pairings import PairingsRepository, QUANTITY_EPSILON
 from db.repositories.trades import TradesRepository, TradeType
 from config.logger_config import get_logger
 
@@ -437,9 +437,9 @@ class PairsView(BaseView):
                     self.logger.warning(f"Error getting pairing info for sale {sale_id}: {e}")
             
             # Determine status
-            if remaining_qty < 1e-10:
+            if remaining_qty < QUANTITY_EPSILON:
                 status = "Fully Paired"
-            elif remaining_qty >= total_qty - 1e-10:
+            elif remaining_qty >= total_qty - QUANTITY_EPSILON:
                 status = "Unpaired"
             else:
                 status = "Partially Paired"
@@ -469,8 +469,8 @@ class PairsView(BaseView):
             sale['name'],
             sale['ticker'],
             date_str,
-            f"{abs(sale['quantity']):.6f}",
-            f"{abs(sale['remaining_quantity']):.6f}",
+            f"{abs(sale['quantity']):.7f}",
+            f"{abs(sale['remaining_quantity']):.7f}",
             f"{sale['price']:.2f}",
             f"{sale['total_czk']:.2f}",
             sale['status'],
@@ -1271,15 +1271,17 @@ class PairsView(BaseView):
         max_pair_qty = min(purchase_available_qty, sale_remaining_qty)
         
         # Ask user for quantity to pair
+        # Note: Use 10 decimal places to handle high-precision quantities
+        # Add QUANTITY_EPSILON tolerance to maxvalue to handle rounding differences
         quantity = simpledialog.askfloat(
             "Pair Manually",
             f"Enter quantity to pair:\n"
-            f"Purchase available: {purchase_available_qty:.6f}\n"
-            f"Sale remaining: {sale_remaining_qty:.6f}\n"
-            f"Max pairable: {max_pair_qty:.6f}",
+            f"Purchase available: {purchase_available_qty:.7f}\n"
+            f"Sale remaining: {sale_remaining_qty:.7f}\n"
+            f"Max pairable: {max_pair_qty:.7f}",
             initialvalue=max_pair_qty,
-            minvalue=0.000001,
-            maxvalue=max_pair_qty
+            minvalue=QUANTITY_EPSILON,
+            maxvalue=max_pair_qty + QUANTITY_EPSILON
         )
         
         if quantity is None:  # User cancelled

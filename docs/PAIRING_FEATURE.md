@@ -782,14 +782,14 @@ For Czech tax compliance, maintain:
 - [ ] Validate locked pairings cannot be modified
 
 ### Phase 3: UI Development (Week 3-4)
-- [X] Create `PairsView` class with time interval selector
-- [ ] Implement Pairs view layout (sales list, available lots, current pairings)
-- [ ] **Add time test visual indicators (⏰✓/⏰✗ icons, green highlighting)** ⭐
-- [ ] **Display holding period in years/days for each lot** ⭐
-- [ ] **Create Method Selection Dialog with TimeTest filter checkbox and fallback dropdown** ⭐
+- [x] Create `PairsView` class with time interval selector
+- [x] Implement Pairs view layout (sales list, available lots, current pairings)
+- [x] **Add time test visual indicators (⏰✓/⏰✗ icons, green highlighting)** ⭐
+- [x] **Display holding period in years/days for each lot** ⭐
+- [x] **Create Method Selection Dialog with TimeTest filter checkbox and fallback dropdown** ⭐
 - [ ] **Add quick TimeTest combo shortcuts in menu** ⭐
-- [ ] Display method badges in pairing details (e.g., "MaxProfit+TT → MaxLose")
-- [ ] Add lock/unlock pairing functionality with visual indicators
+- [rejected] Display method badges in pairing details (e.g., "MaxProfit+TT → MaxLose")
+- [x] Add lock/unlock pairing functionality with visual indicators
 - [ ] Create `OpenPositionsView` class
 - [ ] Implement Open Positions view (positions table, filters, summary)
 - [ ] **Add time test status column and countdown to 3 years** ⭐
