@@ -1,14 +1,15 @@
 """
-Realized Income View - FIFO P&L calculations for closed positions
+Realized Income View - Shows P&L from actual pairings
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from .base_view import BaseView
+from db.repositories.pairings import PairingsRepository
 
 
 class RealizedIncomeView(BaseView):
-    """View for displaying realized income using FIFO matching."""
+    """View for displaying realized income from actual pairings."""
     
     def __init__(self, db_manager, root):
         """
@@ -21,6 +22,7 @@ class RealizedIncomeView(BaseView):
         super().__init__(db_manager)
         self.root = root
         self.tree = None
+        self.pairings_repo = PairingsRepository(db_manager.conn)
         
         # Summary variables (will be set before create_view is called)
         self.realized_pnl_var = None
@@ -137,8 +139,8 @@ class RealizedIncomeView(BaseView):
     
     def update_view(self, start_timestamp, end_timestamp):
         """
-        Calculate and display realized income using FIFO matching.
-        Shows P&L from closed positions (buys that have been sold).
+        Calculate and display realized income from actual pairings.
+        Shows P&L from sales with pairings within the date range.
         
         Args:
             start_timestamp: Start of the date range (Unix timestamp)
@@ -150,7 +152,7 @@ class RealizedIncomeView(BaseView):
         # Clear existing data
         self.clear_view()
         
-        if not self.db or not self.db.conn or not self.db.trades_repo:
+        if not self.db or not self.db.conn:
             self.realized_pnl_var.set("0.00 CZK")
             self.total_buy_cost_var.set("0.00 CZK")
             self.total_sell_proceeds_var.set("0.00 CZK")
@@ -158,8 +160,12 @@ class RealizedIncomeView(BaseView):
             return
         
         try:
-            # Get realized income calculations
-            results = self.db.trades_repo.calculate_realized_income(start_timestamp, end_timestamp)
+            # Update repository connection if needed
+            if not self.pairings_repo.conn:
+                self.pairings_repo.conn = self.db.conn
+            
+            # Get realized income calculations from pairings
+            results = self.pairings_repo.calculate_realized_income(start_timestamp, end_timestamp)
             
             # Track totals
             total_realized_pnl = 0.0

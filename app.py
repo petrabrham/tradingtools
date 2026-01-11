@@ -15,6 +15,7 @@ from views.interests_view import InterestsView
 from views.realized_income_view import RealizedIncomeView
 from views.dividends_view import DividendsView
 from views.pairs_view import PairsView
+from views.open_positions_view import OpenPositionsView
 from dialogs.exchange_rate_dialog import ExchangeRateDialog
 from dialogs.import_rates_dialog import ImportRatesDialog
 from ui import MenuManager, FilterManager, copy_treeview_to_clipboard
@@ -73,6 +74,7 @@ class TradingToolsApp:
         self.realized_view = RealizedIncomeView(self.db, self.root)
         self.dividends_view = DividendsView(self.db, self.root, self.tax_rates_loader, self.country_resolver, self.use_json_tax_rates)
         self.pairs_view = PairsView(self.db, self.root)
+        self.open_positions_view = OpenPositionsView(self.db, self.root)
 
         # Filter manager
         self.filter_manager = FilterManager(self)
@@ -318,8 +320,9 @@ class TradingToolsApp:
 
         ttk.Label(top_frame, text="  ").grid(row=0, column=2) # Spacer
 
-        # Date 'From' Picker
-        ttk.Label(top_frame, text="Date from:").grid(row=0, column=3, padx=(10, 5), pady=5, sticky="w")
+        # Date 'From' Picker (store label and picker for hiding/disabling)
+        self.date_from_label = ttk.Label(top_frame, text="Date from:")
+        self.date_from_label.grid(row=0, column=3, padx=(10, 5), pady=5, sticky="w")
         self.date_from_picker = DateEntry(top_frame, textvariable=self.date_from_var, 
                                           date_pattern='yyyy-mm-dd', width=12)
         self.date_from_picker.grid(row=0, column=4, padx=5, pady=5, sticky="ew")
@@ -344,6 +347,9 @@ class TradingToolsApp:
         # Create the Notebook widget
         self.notebook = ttk.Notebook(bottom_frame)
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        
+        # Bind notebook tab change event to handle filter visibility
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         # --- 4. Tab 1: Trades View ---
         tab_trades = ttk.Frame(self.notebook)
@@ -388,6 +394,11 @@ class TradingToolsApp:
         tab_pairs = ttk.Frame(self.notebook)
         self.notebook.add(tab_pairs, text="Pairing")
         self.pairs_view.create_view(tab_pairs)
+
+        # --- 8. Tab 6: Open Positions View ---
+        tab_open_positions = ttk.Frame(self.notebook)
+        self.notebook.add(tab_open_positions, text="Open Positions")
+        self.open_positions_view.create_view(tab_open_positions)
 
     def update_trades_view(self):
         """Populate the trades tree with grouped parents and detailed child trades."""
@@ -519,6 +530,22 @@ class TradingToolsApp:
         # Delegate to view
         self.pairs_view.update_view(start_ts, end_ts)
 
+    def update_open_positions_view(self):
+        """
+        Update the open positions view.
+        For open positions, only the 'to' date matters (positions as of that date).
+        The 'from' date is ignored as we show all open positions from the beginning.
+        """
+        # Parse date range (only end_ts is used)
+        date_to_str = self.date_to_var.get().strip()
+        try:
+            end_ts = DatabaseManager.timestr_to_timestamp(f"{date_to_str} 23:59:59")
+        except Exception:
+            end_ts = int(datetime.now().timestamp())
+        
+        # Delegate to view (start_ts is ignored by the view, but required by interface)
+        self.open_positions_view.update_view(0, end_ts)
+
     def update_views(self):
         """Update all views with data from the database."""
         # This function calls specific update functions for each view
@@ -527,10 +554,30 @@ class TradingToolsApp:
         self.update_trades_view()
         self.update_realized_income_view()
         self.update_pairs_view()
+        self.update_open_positions_view()
 
     ###########################################################
     # Widgets command handlers
     ###########################################################
+    def on_tab_changed(self, event):
+        """
+        Handle notebook tab change event.
+        Hides/disables the 'From' date filter when Open Positions tab is active.
+        """
+        # Get the currently selected tab index
+        current_tab = self.notebook.index(self.notebook.select())
+        
+        # Tab 6 is Open Positions (0-indexed: Trades=0, Dividends=1, Interests=2, 
+        # Realized Income=3, Pairing=4, Open Positions=5)
+        if current_tab == 5:  # Open Positions tab
+            # Disable the 'From' date picker and label
+            self.date_from_label.config(foreground='gray')
+            self.date_from_picker.config(state='disabled')
+        else:
+            # Enable the 'From' date picker and label for other tabs
+            self.date_from_label.config(foreground='black')
+            self.date_from_picker.config(state='normal')
+    
     def apply_filter(self):
         """Handles the logic when the filter button is pressed."""
         # Check if the selected date range represents a full year

@@ -303,3 +303,46 @@ class TradesRepository(BaseRepository):
                 })
         
         return results
+
+    def get_open_positions(self, end_timestamp: int) -> List[Tuple]:
+        """Get all open positions (net BUY - SELL) as of a specific date.
+        
+        Returns aggregated data for each security showing:
+        - Total quantity (net position: BUY - SELL)
+        - Total cost (sum of total_czk for all trades)
+        - Average price (total_cost / total_quantity)
+        - Earliest and latest trade dates
+        
+        Args:
+            end_timestamp: End of date range (Unix timestamp) - show positions as of this date
+            
+        Returns:
+            List of tuples: (isin, name, ticker, total_quantity, 
+                           total_cost, avg_price, earliest_date, latest_date)
+        """
+        # Simple aggregation: SUM(number_of_shares) gives net position
+        # BUY trades are positive, SELL trades are negative
+        # Total cost is simply SUM(total_czk) for all trades
+        sql = """
+            SELECT 
+                s.isin,
+                s.name,
+                s.ticker,
+                SUM(t.number_of_shares) as total_quantity,
+                SUM(t.total_czk) as total_cost,
+                CASE 
+                    WHEN ABS(SUM(t.number_of_shares)) > 1e-10
+                    THEN SUM(t.total_czk) / SUM(t.number_of_shares)
+                    ELSE 0 
+                END as avg_price,
+                MIN(t.timestamp) as earliest_date,
+                MAX(t.timestamp) as latest_date
+            FROM trades t
+            JOIN securities s ON t.isin_id = s.id
+            WHERE t.timestamp <= ?
+            GROUP BY s.isin, s.name, s.ticker
+            HAVING ABS(SUM(t.number_of_shares)) > 1e-10
+            ORDER BY s.name COLLATE NOCASE
+        """
+        cur = self.execute(sql, (end_timestamp,))
+        return cur.fetchall()

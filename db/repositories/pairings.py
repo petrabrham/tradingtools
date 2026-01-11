@@ -1127,3 +1127,112 @@ class PairingsRepository(BaseRepository):
             self.conn.rollback()
             self.logger.exception("Error in create_manual_pairing")
             return {'success': False, 'error': str(e)}
+
+    def calculate_realized_income(self, start_timestamp: int, end_timestamp: int) -> List[Dict]:
+        """Calculate realized income from actual pairings within a date range.
+        
+        This method calculates realized P&L based on actual pairings between sales and purchases,
+        rather than using FIFO assumptions. Only sales within the date range are considered.
+        
+        Args:
+            start_timestamp: Start of date range (Unix timestamp)
+            end_timestamp: End of date range (Unix timestamp)
+            
+        Returns:
+            List of dictionaries with keys: isin_id, name, ticker, realized_pnl,
+            shares_sold, total_buy_cost, total_sell_proceeds, unrealized_shares
+        """
+        # Get all sales in the date range with their pairings
+        sql = """
+            SELECT 
+                s.id as isin_id,
+                s.name,
+                s.ticker,
+                st.id as sale_trade_id,
+                st.timestamp as sale_timestamp,
+                st.price_for_share as sale_price,
+                st.number_of_shares as sale_quantity,
+                st.total_czk as sale_total_czk,
+                st.stamp_tax_czk as sale_stamp_tax,
+                st.conversion_fee_czk as sale_conversion_fee,
+                st.french_transaction_tax_czk as sale_french_tax,
+                p.id as pairing_id,
+                p.quantity as paired_quantity,
+                pt.price_for_share as purchase_price,
+                pt.total_czk as purchase_total_czk,
+                pt.number_of_shares as purchase_quantity,
+                pt.stamp_tax_czk as purchase_stamp_tax,
+                pt.conversion_fee_czk as purchase_conversion_fee,
+                pt.french_transaction_tax_czk as purchase_french_tax
+            FROM trades st
+            JOIN securities s ON st.isin_id = s.id
+            LEFT JOIN pairings p ON st.id = p.sale_trade_id
+            LEFT JOIN trades pt ON p.purchase_trade_id = pt.id
+            WHERE st.trade_type = ?
+            AND st.timestamp >= ?
+            AND st.timestamp <= ?
+            ORDER BY s.id, st.timestamp, p.id
+        """
+        
+        cur = self.execute(sql, (TradeType.SELL, start_timestamp, end_timestamp))
+        rows = cur.fetchall()
+        
+        # Group results by security
+        securities = {}
+        
+        for row in rows:
+            (isin_id, name, ticker, sale_trade_id, sale_timestamp, sale_price, sale_quantity,
+             sale_total_czk, sale_stamp_tax, sale_conversion_fee, sale_french_tax,
+             pairing_id, paired_quantity, purchase_price, purchase_total_czk, purchase_quantity,
+             purchase_stamp_tax, purchase_conversion_fee, purchase_french_tax) = row
+            
+            if isin_id not in securities:
+                securities[isin_id] = {
+                    'isin_id': isin_id,
+                    'name': name,
+                    'ticker': ticker,
+                    'realized_pnl': 0.0,
+                    'shares_sold': 0.0,
+                    'total_buy_cost': 0.0,
+                    'total_sell_proceeds': 0.0,
+                    'processed_sales': set()
+                }
+            
+            sec = securities[isin_id]
+            
+            # Track unique sales to avoid double-counting shares_sold
+            if sale_trade_id not in sec['processed_sales']:
+                sec['shares_sold'] += abs(sale_quantity)
+                sec['processed_sales'].add(sale_trade_id)
+            
+            # If this sale has a pairing, calculate P&L
+            if pairing_id is not None and paired_quantity is not None:
+                # total_czk is already net price (includes all fees)
+                # For BUY: total_czk is negative (cost)
+                # For SELL: total_czk is positive (proceeds)
+                purchase_cost_per_share = abs(purchase_total_czk) / abs(purchase_quantity) if purchase_quantity else 0
+                sale_proceeds_per_share = abs(sale_total_czk) / abs(sale_quantity) if sale_quantity else 0
+                
+                # Calculate P&L for this pairing
+                pnl = (sale_proceeds_per_share - purchase_cost_per_share) * paired_quantity
+                sec['realized_pnl'] += pnl
+                
+                # Add to buy cost and sell proceeds
+                sec['total_buy_cost'] += purchase_cost_per_share * paired_quantity
+                sec['total_sell_proceeds'] += sale_proceeds_per_share * paired_quantity
+        
+        # Get unrealized shares for each security (remaining_quantity from all BUY trades)
+        for isin_id, sec in securities.items():
+            unrealized_sql = """
+                SELECT COALESCE(SUM(remaining_quantity), 0)
+                FROM trades
+                WHERE isin_id = ?
+                AND trade_type = ?
+            """
+            cur = self.execute(unrealized_sql, (isin_id, TradeType.BUY))
+            unrealized = cur.fetchone()[0]
+            sec['unrealized_shares'] = unrealized
+            # Remove helper set
+            del sec['processed_sales']
+        
+        return list(securities.values())

@@ -206,8 +206,8 @@ class TradesView(BaseView):
                         "",  # Total Before / To (CZK)
                         trade_type_str,
                         dt_str,
-                        f"{num_shares:.7f}",
-                        f"{remaining_quantity:.7f}",
+                        f"{num_shares:.9f}",
+                        f"{remaining_quantity:.9f}",
                         f"{price_per_share:.2f} {currency_of_price}",
                         f"{total_czk:.2f}",
                         f"{stamp_tax_czk:.2f}",
@@ -347,7 +347,7 @@ class TradesView(BaseView):
         
         # Log success
         self.db.logger.info(
-            f"Manual pairing created: {result['quantity_paired']:.7f} shares, "
+            f"Manual pairing created: {result['quantity_paired']:.9f} shares, "
             f"holding period: {result['holding_period_days']} days, "
             f"time test qualified: {result['time_test_qualified']}"
         )
@@ -358,9 +358,9 @@ class TradesView(BaseView):
         new_sell_remaining = sell_remaining + pair_quantity
         
         buy_values = list(self.tree.item(buy_iid, 'values'))
-        buy_values[7] = f"{new_buy_remaining:.7f}"
+        buy_values[7] = f"{new_buy_remaining:.9f}"
         self.tree.item(buy_iid, values=buy_values)
         
         sell_values = list(self.tree.item(sell_iid, 'values'))
-        sell_values[7] = f"{new_sell_remaining:.7f}"
+        sell_values[7] = f"{new_sell_remaining:.9f}"
         self.tree.item(sell_iid, values=sell_values)

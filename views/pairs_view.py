@@ -154,7 +154,7 @@ class PairsView(BaseView):
         self.lots_tree.column("Price", anchor=tk.E, width=90)
         
         self.lots_tree.heading("Holding", text="Holding Period")
-        self.lots_tree.column("Holding", anchor=tk.W, width=120)
+        self.lots_tree.column("Holding", anchor=tk.E, width=120)
         
         self.lots_tree.heading("TimeTest", text="⏰")
         self.lots_tree.column("TimeTest", anchor=tk.CENTER, width=40)
@@ -221,7 +221,7 @@ class PairsView(BaseView):
         self.pairings_tree.column("P&L (CZK)", anchor=tk.E, width=100)
         
         self.pairings_tree.heading("Method", text="Method")
-        self.pairings_tree.column("Method", anchor=tk.W, width=80)
+        self.pairings_tree.column("Method", anchor=tk.CENTER, width=80)
         
         self.pairings_tree.heading("Lock Reason", text="Lock Reason")
         self.pairings_tree.column("Lock Reason", anchor=tk.W, width=150)
@@ -469,8 +469,8 @@ class PairsView(BaseView):
             sale['name'],
             sale['ticker'],
             date_str,
-            f"{abs(sale['quantity']):.7f}",
-            f"{abs(sale['remaining_quantity']):.7f}",
+            f"{abs(sale['quantity']):.9f}",
+            f"{abs(sale['remaining_quantity']):.9f}",
             f"{sale['price']:.2f}",
             f"{sale['total_czk']:.2f}",
             sale['status'],
@@ -626,8 +626,8 @@ class PairsView(BaseView):
                 
                 values = (
                     date_str,
-                    f"{lot['quantity']:.6f}",
-                    f"{lot['available_quantity']:.6f}",
+                    f"{lot['quantity']:.9f}",
+                    f"{lot['available_quantity']:.9f}",
                     f"{lot['price_for_share']:.2f}",
                     holding_str,
                     timetest_icon
@@ -775,7 +775,7 @@ class PairsView(BaseView):
                     ticker,
                     holding_str,
                     timetest_icon,
-                    f"{abs(quantity):.6f}",
+                    f"{abs(quantity):.9f}",
                     purchase_price_str,
                     sale_price_str,
                     pnl_str,
@@ -862,7 +862,7 @@ class PairsView(BaseView):
             else:
                 # Multiple sales - show summary
                 self.logger.info(f"Batch pairing complete: {success_count} success, {error_count} errors, "
-                               f"{total_pairings} total pairings, {total_quantity:.6f} total quantity")
+                               f"{total_pairings} total pairings, {total_quantity:.9f} total quantity")
              
             self.refresh_view()
         
@@ -1276,14 +1276,15 @@ class PairsView(BaseView):
         quantity = simpledialog.askfloat(
             "Pair Manually",
             f"Enter quantity to pair:\n"
-            f"Purchase available: {purchase_available_qty:.7f}\n"
-            f"Sale remaining: {sale_remaining_qty:.7f}\n"
-            f"Max pairable: {max_pair_qty:.7f}",
+            f"Purchase available: {purchase_available_qty:.9f}\n"
+            f"Sale remaining: {sale_remaining_qty:.9f}\n"
+            f"Max pairable: {max_pair_qty:.9f}",
             initialvalue=max_pair_qty,
             minvalue=QUANTITY_EPSILON,
             maxvalue=max_pair_qty + QUANTITY_EPSILON
         )
-        
+        self.logger.info(f"Manual pairing quantity from dialog: {quantity:.9f} ({purchase_available_qty:.9f} / {sale_remaining_qty:.9f}) ")
+
         if quantity is None:  # User cancelled
             return
         
@@ -1306,7 +1307,7 @@ class PairsView(BaseView):
             
             if result.get('success'):
                 self.logger.info(f"Manual pairing created: sale {self.current_sale_id} with purchase {lot_id}, qty {quantity}")
-                messagebox.showinfo("Success", f"Successfully paired {quantity:.6f} shares.")
+                messagebox.showinfo("Success", f"Successfully paired {quantity:.9f} shares.")
                 self.refresh_view()
             else:
                 error_msg = result.get('error', 'Unknown error')
