@@ -43,6 +43,9 @@ class PairsView(BaseView):
         self.current_sale_id = None
         self.current_start_timestamp = None
         self.current_end_timestamp = None
+        
+        # Callback for when pairings change
+        self.on_pairings_changed = None
     
     def create_view(self, parent_frame: ttk.Frame) -> None:
         """
@@ -865,6 +868,10 @@ class PairsView(BaseView):
                                f"{total_pairings} total pairings, {total_quantity:.9f} total quantity")
              
             self.refresh_view()
+            
+            # Notify callback that pairings changed
+            if self.on_pairings_changed:
+                self.on_pairings_changed()
         
         except Exception as e:
             self.logger.error(f"Error applying method: {e}", exc_info=True)
@@ -970,6 +977,10 @@ class PairsView(BaseView):
             self.logger.info(f"Unpair selected: {success_count} deleted, {locked_count} locked, {error_count} errors")
             
             self.refresh_view()
+            
+            # Notify callback that pairings changed
+            if self.on_pairings_changed:
+                self.on_pairings_changed()
         
         except Exception as e:
             self.logger.error(f"Error deleting pairing: {e}", exc_info=True)
@@ -1020,6 +1031,10 @@ class PairsView(BaseView):
             
             self.logger.info(f"Unpair all: {success_count} deleted, {locked_count} locked, {error_count} errors")
             self.refresh_view()
+            
+            # Notify callback that pairings changed
+            if self.on_pairings_changed:
+                self.on_pairings_changed()
         
         except Exception as e:
             self.logger.error(f"Error in unpair all: {e}", exc_info=True)
@@ -1309,6 +1324,10 @@ class PairsView(BaseView):
                 self.logger.info(f"Manual pairing created: sale {self.current_sale_id} with purchase {lot_id}, qty {quantity}")
                 messagebox.showinfo("Success", f"Successfully paired {quantity:.9f} shares.")
                 self.refresh_view()
+                
+                # Notify callback that pairings changed
+                if self.on_pairings_changed:
+                    self.on_pairings_changed()
             else:
                 error_msg = result.get('error', 'Unknown error')
                 messagebox.showerror("Error", f"Failed to create pairing:\n{error_msg}")

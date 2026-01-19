@@ -75,6 +75,9 @@ class TradingToolsApp:
         self.dividends_view = DividendsView(self.db, self.root, self.tax_rates_loader, self.country_resolver, self.use_json_tax_rates)
         self.pairs_view = PairsView(self.db, self.root)
         self.open_positions_view = OpenPositionsView(self.db, self.root)
+        
+        # Set callback to update realized income view when pairings change
+        self.pairs_view.on_pairings_changed = self.update_realized_income_view
 
         # Filter manager
         self.filter_manager = FilterManager(self)

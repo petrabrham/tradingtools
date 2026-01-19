@@ -1128,6 +1128,65 @@ class PairingsRepository(BaseRepository):
             self.logger.exception("Error in create_manual_pairing")
             return {'success': False, 'error': str(e)}
 
+    def _get_security_pairing_aggregates(self, isin_id: int, start_timestamp: int, end_timestamp: int) -> Dict:
+        """Get aggregated pairing data for a specific security in a date range.
+        
+        Args:
+            isin_id: Security ID
+            start_timestamp: Start of date range
+            end_timestamp: End of date range
+            
+        Returns:
+            Dictionary with aggregated pairing data
+        """
+        sql = """
+            SELECT 
+                COALESCE(SUM(p.quantity), 0) as shares_paired,
+                COALESCE(SUM((ABS(pt.total_czk) / ABS(pt.number_of_shares)) * p.quantity), 0) as total_buy_cost,
+                COALESCE(SUM((ABS(st.total_czk) / ABS(st.number_of_shares)) * p.quantity), 0) as total_sell_proceeds,
+                COALESCE(SUM(ABS(pt.conversion_fee_czk) * p.quantity / ABS(pt.number_of_shares)), 0) as buy_conversion_fee,
+                COALESCE(SUM(ABS(pt.stamp_tax_czk) * p.quantity / ABS(pt.number_of_shares)), 0) as buy_stamp_tax,
+                COALESCE(SUM(ABS(pt.french_transaction_tax_czk) * p.quantity / ABS(pt.number_of_shares)), 0) as buy_french_tax,
+                COALESCE(SUM(ABS(st.conversion_fee_czk) * p.quantity / ABS(st.number_of_shares)), 0) as sell_conversion_fee,
+                COALESCE(SUM(ABS(st.stamp_tax_czk) * p.quantity / ABS(st.number_of_shares)), 0) as sell_stamp_tax,
+                COALESCE(SUM(ABS(st.french_transaction_tax_czk) * p.quantity / ABS(st.number_of_shares)), 0) as sell_french_tax
+            FROM pairings p
+            JOIN trades st ON p.sale_trade_id = st.id
+            JOIN trades pt ON p.purchase_trade_id = pt.id
+            WHERE st.isin_id = ?
+            AND st.trade_type = ?
+            AND st.timestamp >= ?
+            AND st.timestamp <= ?
+        """
+        
+        cur = self.execute(sql, (isin_id, TradeType.SELL, start_timestamp, end_timestamp))
+        row = cur.fetchone()
+        
+        if not row:
+            return {
+                'shares_paired': 0,
+                'total_buy_cost': 0,
+                'total_sell_proceeds': 0,
+                'buy_conversion_fee': 0,
+                'buy_stamp_tax': 0,
+                'buy_french_tax': 0,
+                'sell_conversion_fee': 0,
+                'sell_stamp_tax': 0,
+                'sell_french_tax': 0
+            }
+        
+        return {
+            'shares_paired': row[0],
+            'total_buy_cost': row[1],
+            'total_sell_proceeds': row[2],
+            'buy_conversion_fee': row[3],
+            'buy_stamp_tax': row[4],
+            'buy_french_tax': row[5],
+            'sell_conversion_fee': row[6],
+            'sell_stamp_tax': row[7],
+            'sell_french_tax': row[8]
+        }
+
     def calculate_realized_income(self, start_timestamp: int, end_timestamp: int) -> List[Dict]:
         """Calculate realized income from actual pairings within a date range.
         
@@ -1140,99 +1199,66 @@ class PairingsRepository(BaseRepository):
             
         Returns:
             List of dictionaries with keys: isin_id, name, ticker, realized_pnl,
-            shares_sold, total_buy_cost, total_sell_proceeds, unrealized_shares
+            shares_sold, shares_paired, total_buy_cost, total_sell_proceeds, 
+            buy/sell taxes, unrealized_shares
         """
-        # Get all sales in the date range with their pairings
-        sql = """
+        # Step 1: Get all securities with sales in the date range
+        sales_sql = """
             SELECT 
                 s.id as isin_id,
                 s.name,
                 s.ticker,
-                st.id as sale_trade_id,
-                st.timestamp as sale_timestamp,
-                st.price_for_share as sale_price,
-                st.number_of_shares as sale_quantity,
-                st.total_czk as sale_total_czk,
-                st.stamp_tax_czk as sale_stamp_tax,
-                st.conversion_fee_czk as sale_conversion_fee,
-                st.french_transaction_tax_czk as sale_french_tax,
-                p.id as pairing_id,
-                p.quantity as paired_quantity,
-                pt.price_for_share as purchase_price,
-                pt.total_czk as purchase_total_czk,
-                pt.number_of_shares as purchase_quantity,
-                pt.stamp_tax_czk as purchase_stamp_tax,
-                pt.conversion_fee_czk as purchase_conversion_fee,
-                pt.french_transaction_tax_czk as purchase_french_tax
-            FROM trades st
-            JOIN securities s ON st.isin_id = s.id
-            LEFT JOIN pairings p ON st.id = p.sale_trade_id
-            LEFT JOIN trades pt ON p.purchase_trade_id = pt.id
-            WHERE st.trade_type = ?
-            AND st.timestamp >= ?
-            AND st.timestamp <= ?
-            ORDER BY s.id, st.timestamp, p.id
+                SUM(ABS(t.number_of_shares)) as shares_sold,
+                SUM(ABS(t.remaining_quantity)) as remaining_to_pair
+            FROM trades t
+            JOIN securities s ON t.isin_id = s.id
+            WHERE t.trade_type = ?
+            AND t.timestamp >= ?
+            AND t.timestamp <= ?
+            GROUP BY s.id, s.name, s.ticker
+            ORDER BY s.name COLLATE NOCASE
         """
         
-        cur = self.execute(sql, (TradeType.SELL, start_timestamp, end_timestamp))
-        rows = cur.fetchall()
+        cur = self.execute(sales_sql, (TradeType.SELL, start_timestamp, end_timestamp))
+        sales_rows = cur.fetchall()
         
-        # Group results by security
-        securities = {}
-        
-        for row in rows:
-            (isin_id, name, ticker, sale_trade_id, sale_timestamp, sale_price, sale_quantity,
-             sale_total_czk, sale_stamp_tax, sale_conversion_fee, sale_french_tax,
-             pairing_id, paired_quantity, purchase_price, purchase_total_czk, purchase_quantity,
-             purchase_stamp_tax, purchase_conversion_fee, purchase_french_tax) = row
+        # Step 2: For each security, get pairing aggregates and unrealized shares
+        results = []
+        for row in sales_rows:
+            isin_id, name, ticker, shares_sold, remaining_to_pair = row
             
-            if isin_id not in securities:
-                securities[isin_id] = {
-                    'isin_id': isin_id,
-                    'name': name,
-                    'ticker': ticker,
-                    'realized_pnl': 0.0,
-                    'shares_sold': 0.0,
-                    'total_buy_cost': 0.0,
-                    'total_sell_proceeds': 0.0,
-                    'processed_sales': set()
-                }
+            # Get pairing aggregates for this security
+            pairing_data = self._get_security_pairing_aggregates(isin_id, start_timestamp, end_timestamp)
             
-            sec = securities[isin_id]
+            # Calculate realized P&L
+            realized_pnl = pairing_data['total_sell_proceeds'] - pairing_data['total_buy_cost']
             
-            # Track unique sales to avoid double-counting shares_sold
-            if sale_trade_id not in sec['processed_sales']:
-                sec['shares_sold'] += abs(sale_quantity)
-                sec['processed_sales'].add(sale_trade_id)
-            
-            # If this sale has a pairing, calculate P&L
-            if pairing_id is not None and paired_quantity is not None:
-                # total_czk is already net price (includes all fees)
-                # For BUY: total_czk is negative (cost)
-                # For SELL: total_czk is positive (proceeds)
-                purchase_cost_per_share = abs(purchase_total_czk) / abs(purchase_quantity) if purchase_quantity else 0
-                sale_proceeds_per_share = abs(sale_total_czk) / abs(sale_quantity) if sale_quantity else 0
-                
-                # Calculate P&L for this pairing
-                pnl = (sale_proceeds_per_share - purchase_cost_per_share) * paired_quantity
-                sec['realized_pnl'] += pnl
-                
-                # Add to buy cost and sell proceeds
-                sec['total_buy_cost'] += purchase_cost_per_share * paired_quantity
-                sec['total_sell_proceeds'] += sale_proceeds_per_share * paired_quantity
-        
-        # Get unrealized shares for each security (remaining_quantity from all BUY trades)
-        for isin_id, sec in securities.items():
+            # Get unrealized shares (open positions)
             unrealized_sql = """
                 SELECT COALESCE(SUM(remaining_quantity), 0)
                 FROM trades
                 WHERE isin_id = ?
                 AND trade_type = ?
             """
-            cur = self.execute(unrealized_sql, (isin_id, TradeType.BUY))
-            unrealized = cur.fetchone()[0]
-            sec['unrealized_shares'] = unrealized
-            # Remove helper set
-            del sec['processed_sales']
+            unrealized_cur = self.execute(unrealized_sql, (isin_id, TradeType.BUY))
+            unrealized_shares = unrealized_cur.fetchone()[0]
+            
+            results.append({
+                'isin_id': isin_id,
+                'name': name,
+                'ticker': ticker,
+                'shares_sold': shares_sold,
+                'shares_paired': pairing_data['shares_paired'],
+                'total_buy_cost': pairing_data['total_buy_cost'],
+                'total_sell_proceeds': pairing_data['total_sell_proceeds'],
+                'realized_pnl': realized_pnl,
+                'buy_conversion_fee': pairing_data['buy_conversion_fee'],
+                'buy_stamp_tax': pairing_data['buy_stamp_tax'],
+                'buy_french_tax': pairing_data['buy_french_tax'],
+                'sell_conversion_fee': pairing_data['sell_conversion_fee'],
+                'sell_stamp_tax': pairing_data['sell_stamp_tax'],
+                'sell_french_tax': pairing_data['sell_french_tax'],
+                'unrealized_shares': unrealized_shares
+            })
         
-        return list(securities.values())
+        return results
