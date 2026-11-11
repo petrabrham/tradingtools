@@ -320,7 +320,12 @@ class DatabaseManager:
         for index, row in df.iterrows():
             # Safe access to columns whether row is Series or dict-like
             action = row.get('Action') if hasattr(row, 'get') else row['Action']
-            time_str = row.get('Time') if hasattr(row, 'get') else row['Time']
+            time_str = None
+            if hasattr(row, 'get'):
+                # Broker exports use either legacy "Time" or newer "Time (UTC)".
+                time_str = row.get('Time') or row.get('Time (UTC)')
+            else:
+                time_str = row['Time'] if 'Time' in row else row['Time (UTC)']
 
             # Try to convert time string to timestamp for logging
             ts = None
@@ -1078,8 +1083,11 @@ class DatabaseManager:
         """Convert a datetime string to Unix timestamp.
         
         Args:
-            timestr: String in format "YYYY-MM-DD HH:MM:SS"
+            timestr: String in one of supported formats:
+                    - "YYYY-MM-DD HH:MM:SS" (legacy)
+                    - "YYYY-MM-DD HH:MM:SS+00:00" (UTC export)
                     e.g., "2023-12-07 16:01:12"
+                          "2026-01-05 08:00:33+00:00"
             
         Returns:
             Unix timestamp (seconds since epoch)
@@ -1087,10 +1095,18 @@ class DatabaseManager:
         Raises:
             ValueError: If the string format is invalid
         """
+        # Legacy broker export format
         try:
             dt = datetime.strptime(timestr, "%Y-%m-%d %H:%M:%S")
             return int(dt.timestamp())
+        except ValueError:
+            pass
+
+        # Newer broker export format (UTC with offset)
+        try:
+            dt = datetime.fromisoformat(timestr)
+            return int(dt.timestamp())
         except ValueError as e:
             raise ValueError(
-                f"Invalid datetime string format. Expected 'YYYY-MM-DD HH:MM:SS', got '{timestr}'"
+                f"Invalid datetime string format. Expected 'YYYY-MM-DD HH:MM:SS' or ISO datetime with offset, got '{timestr}'"
             ) from e

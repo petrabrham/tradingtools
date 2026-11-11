@@ -5,5 +5,8 @@
       "args": ["-ExecutionPolicy", "Bypass"]
     }
   },
-  "terminal.integrated.defaultProfile.windows": "PowerShell (Bypass)"
+  "terminal.integrated.defaultProfile.windows": "PowerShell (Bypass)",
+  "chat.tools.terminal.autoApprove": {
+    "Get-Headers": true
+  }
 }
