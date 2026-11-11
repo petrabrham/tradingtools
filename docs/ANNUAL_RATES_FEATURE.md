@@ -175,7 +175,7 @@ configured for annual GFŘ rates.
 
 ## Sample Data
 
-A sample rates file is provided: `sample_annual_rates_2024.txt`
+Sample annual-rate files are provided in `data/annual_rates_2023.txt` and `data/annual_rates_2024.txt`.
 
 This file contains 31 currencies with realistic 2024 rates:
 - Major currencies: USD, EUR, GBP, JPY, CHF

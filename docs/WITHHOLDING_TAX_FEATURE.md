@@ -113,7 +113,7 @@ All dividend displays use the selected calculation method:
 Run the test script to verify calculations:
 
 ```bash
-python test_tax_loader.py
+python tests/test_tax_loader.py
 ```
 
 Expected output:

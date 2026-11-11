@@ -167,7 +167,7 @@ tax = self.tax_rates_loader.calculate_tax_from_net(net, country_code)
 Run the test script:
 
 ```bash
-python test_country_resolver.py
+python tests/test_country_resolver.py
 ```
 
 Expected output shows:
