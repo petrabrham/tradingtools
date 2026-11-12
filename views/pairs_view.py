@@ -82,7 +82,7 @@ class PairsView(BaseView):
         
         # Sales treeview
         columns = ("Security", "Ticker", "Date", "Quantity", "Remaining", "Price", 
-                   "Total", "Status", "Method", "Locked")
+                   "Total", "Status")
         self.sales_tree = ttk.Treeview(sales_frame, columns=columns, show='headings', 
                                        selectmode='extended')
         self.sales_tree.grid(row=0, column=0, sticky='nsew')
@@ -111,12 +111,6 @@ class PairsView(BaseView):
         
         self.sales_tree.heading("Status", text="Status")
         self.sales_tree.column("Status", anchor=tk.W, width=100)
-        
-        self.sales_tree.heading("Method", text="Method Used")
-        self.sales_tree.column("Method", anchor=tk.W, width=150)
-        
-        self.sales_tree.heading("Locked", text="🔒")
-        self.sales_tree.column("Locked", anchor=tk.CENTER, width=40)
         
         # Scrollbars
         vsb = ttk.Scrollbar(sales_frame, orient="vertical", command=self.sales_tree.yview)
@@ -405,7 +399,7 @@ class PairsView(BaseView):
                 t.number_of_shares,
                 t.remaining_quantity,
                 t.price_for_share,
-                (t.number_of_shares * t.price_for_share * -1) as total_czk
+                t.total_czk as total_czk
             FROM trades t
             JOIN securities s ON t.isin_id = s.id
             WHERE t.trade_type = ?
@@ -425,20 +419,6 @@ class PairsView(BaseView):
             remaining_qty = abs(row[5])
             total_qty = abs(row[4])
             
-            # Get pairing info (with connection check)
-            pairings = []
-            is_locked = False
-            method = ""
-            
-            if self.db.conn:
-                try:
-                    pairings = self.pairings_repo.get_pairings_for_purchase(sale_id)
-                    is_locked = self.pairings_repo.is_pairing_locked(sale_id) if pairings else False
-                    if pairings:
-                        method = self.pairings_repo.derive_method_combination(sale_id)
-                except Exception as e:
-                    self.logger.warning(f"Error getting pairing info for sale {sale_id}: {e}")
-            
             # Determine status
             if remaining_qty < QUANTITY_EPSILON:
                 status = "Fully Paired"
@@ -456,9 +436,7 @@ class PairsView(BaseView):
                 'remaining_quantity': row[5],
                 'price': row[6],
                 'total_czk': row[7],
-                'status': status,
-                'method': method,
-                'locked': is_locked
+                'status': status
             })
         
         return result
@@ -466,7 +444,6 @@ class PairsView(BaseView):
     def _insert_sale_row(self, sale: Dict) -> None:
         """Insert a sale row into the sales tree."""
         date_str = datetime.fromtimestamp(sale['timestamp']).strftime("%Y-%m-%d")
-        locked_str = "🔒" if sale['locked'] else ""
         
         values = (
             sale['name'],
@@ -476,9 +453,7 @@ class PairsView(BaseView):
             f"{abs(sale['remaining_quantity']):.9f}",
             f"{sale['price']:.2f}",
             f"{sale['total_czk']:.2f}",
-            sale['status'],
-            sale['method'],
-            locked_str
+            sale['status']
         )
         
         # Tag for color coding
