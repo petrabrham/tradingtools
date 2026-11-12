@@ -2,8 +2,7 @@
 
 import logging
 import logging.handlers
-import os
-from datetime import datetime
+import re
 from pathlib import Path
 
 def setup_logger(name: str = "trading_tools") -> logging.Logger:
@@ -19,9 +18,8 @@ def setup_logger(name: str = "trading_tools") -> logging.Logger:
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     
-    # Generate log filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d")
-    log_file = log_dir / f"trading_tools_{timestamp}.log"
+    # Use a stable active log filename; date is handled by timed rotation.
+    log_file = log_dir / "trading_tools.log"
     
     # Create logger
     logger = logging.getLogger(name)
@@ -39,6 +37,9 @@ def setup_logger(name: str = "trading_tools") -> logging.Logger:
         backupCount=30,
         encoding='utf-8'
     )
+    # Keep rotated files with a .log extension so they match *.log ignore patterns.
+    file_handler.suffix = "%Y-%m-%d.log"
+    file_handler.extMatch = re.compile(r"^\d{4}-\d{2}-\d{2}\.log$", re.ASCII)
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
