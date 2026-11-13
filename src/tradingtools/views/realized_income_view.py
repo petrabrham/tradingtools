@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 from .base_view import BaseView
-from db.repositories.pairings import PairingsRepository
+from tradingtools.db.repositories.pairings import PairingsRepository
 
 
 class RealizedIncomeView(BaseView):

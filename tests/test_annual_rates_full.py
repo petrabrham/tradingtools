@@ -14,10 +14,7 @@ import sys
 import tempfile
 from datetime import datetime
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from db.dbmanager import DatabaseManager
+from tradingtools.db.dbmanager import DatabaseManager
 
 
 def test_annual_rates():

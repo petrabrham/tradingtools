@@ -4,14 +4,9 @@ Unit tests for TradesRepository.get_by_id method.
 
 import unittest
 import sqlite3
-import os
-import sys
 from unittest.mock import Mock
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from db.repositories.trades import TradesRepository, TradeType
+from tradingtools.db.repositories.trades import TradesRepository, TradeType
 
 
 class TestTradesGetById(unittest.TestCase):

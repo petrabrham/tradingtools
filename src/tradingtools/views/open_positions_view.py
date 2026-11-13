@@ -8,7 +8,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from datetime import datetime
 from .base_view import BaseView
-from db.repositories.trades import TradesRepository, TradeType
+from tradingtools.db.repositories.trades import TradesRepository, TradeType
 
 
 class OpenPositionsView(BaseView):

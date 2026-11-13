@@ -25,7 +25,10 @@ The `CountryResolver` class uses a three-tier approach to determine country of o
 
 ### 1. Manual Overrides (Most Reliable)
 
-Create explicit mappings in `config/country_overrides.json`:
+The tracked default mappings are in
+`src/tradingtools/resources/defaults/country_overrides.json`. At runtime, the
+application uses the per-user copy at
+`%APPDATA%\TradingTools\config\country_overrides.json`:
 
 ```json
 {
@@ -52,7 +55,7 @@ If ISIN is invalid or empty, defaults to `XX` (unknown).
 ## Usage in Code
 
 ```python
-from config.country_resolver import CountryResolver
+from tradingtools.config.country_resolver import CountryResolver
 
 # Initialize resolver
 resolver = CountryResolver()
@@ -88,7 +91,7 @@ all_overrides = resolver.get_all_overrides()
 
 ### Method 1: Edit JSON Directly
 
-Edit `config/country_overrides.json`:
+Edit `%APPDATA%\TradingTools\config\country_overrides.json`:
 
 ```json
 {

@@ -12,17 +12,12 @@ This test suite covers all methods of the PairingsRepository class, including:
 
 import unittest
 import sqlite3
-import os
-import sys
 from datetime import datetime, timedelta
 from unittest.mock import Mock
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from db.repositories.pairings import PairingsRepository
-from db.repositories.trades import TradeType
-from config.logger_config import setup_logger
+from tradingtools.db.repositories.pairings import PairingsRepository
+from tradingtools.db.repositories.trades import TradeType
+from tradingtools.config.logger_config import setup_logger
 
 
 class TestPairingsRepository(unittest.TestCase):
