@@ -1,0 +1,2 @@
+"""TradingTools desktop application."""
+

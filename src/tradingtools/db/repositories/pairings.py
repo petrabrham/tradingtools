@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Tuple
 import sqlite3
 from ..base import BaseRepository
 from .trades import TradeType, TradesRepository
-from config.config_loader import get_time_test_holding_period_years
+from tradingtools.config.config_loader import get_time_test_holding_period_years
 
 # Maximum acceptable quantity error for floating-point comparisons
 # Quantities below this threshold are considered zero

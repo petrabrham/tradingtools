@@ -9,7 +9,7 @@ import tkinter as tk
 from datetime import datetime
 from typing import Tuple, Optional
 from .base_view import BaseView
-from db.repositories.trades import TradeType
+from tradingtools.db.repositories.trades import TradeType
 
 
 class TradesView(BaseView):

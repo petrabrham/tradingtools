@@ -3,10 +3,12 @@
 import logging
 import logging.handlers
 import re
-from pathlib import Path
+import sys
+
+from tradingtools.paths import get_log_dir
 
 def setup_logger(name: str = "trading_tools") -> logging.Logger:
-    """Configure and return a logger that writes to both file and console.
+    """Configure a logger with a file handler and, when available, a console handler.
     
     Args:
         name: Logger name, used as the logger's identifier
@@ -14,11 +16,7 @@ def setup_logger(name: str = "trading_tools") -> logging.Logger:
     Returns:
         Configured logger instance
     """
-    # Create logs directory if it doesn't exist
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    # Use a stable active log filename; date is handled by timed rotation.
+    log_dir = get_log_dir()
     log_file = log_dir / "trading_tools.log"
     
     # Create logger
@@ -47,17 +45,14 @@ def setup_logger(name: str = "trading_tools") -> logging.Logger:
     )
     file_handler.setFormatter(file_formatter)
     
-    # Console handler - less verbose, only INFO and above
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter(
-        '[%(levelname)s] %(message)s'
-    )
-    console_handler.setFormatter(console_formatter)
-    
-    # Add handlers to logger
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+
+    if sys.stderr is not None:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter('[%(levelname)s] %(message)s')
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
     
     return logger
 

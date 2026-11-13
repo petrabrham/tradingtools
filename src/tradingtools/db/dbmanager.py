@@ -5,15 +5,15 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 import pandas as pd
-from config.cnb_rate import cnb_rate
+from tradingtools.config.cnb_rate import cnb_rate
 import logging
-from config.logger_config import setup_logger
-from db.repositories.securities import SecuritiesRepository
-from db.repositories.interests import InterestsRepository, InterestType
-from db.repositories.dividends import DividendsRepository
-from db.repositories.trades import TradesRepository, TradeType
-from db.repositories.pairings import PairingsRepository
-from db.decorators import requires_connection, requires_repo
+from tradingtools.config.logger_config import setup_logger
+from tradingtools.db.repositories.securities import SecuritiesRepository
+from tradingtools.db.repositories.interests import InterestsRepository, InterestType
+from tradingtools.db.repositories.dividends import DividendsRepository
+from tradingtools.db.repositories.trades import TradesRepository, TradeType
+from tradingtools.db.repositories.pairings import PairingsRepository
+from tradingtools.db.decorators import requires_connection, requires_repo
 
 
 

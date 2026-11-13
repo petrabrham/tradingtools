@@ -180,7 +180,7 @@ class DividendsView(BaseView):
         Fetch dividends data and update the view with hierarchical structure.
         
         Tax Calculation Methods:
-        - JSON mode (default): Uses withholding tax rates from config/withholding_tax_rates.json
+        - JSON mode (default): Uses rates from the user's TradingTools config directory
           Calculates gross and tax from the precise net amount using formulas:
           gross = net / (1 - rate)
           tax = net * rate / (1 - rate)

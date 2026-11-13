@@ -2,9 +2,9 @@
 Utility module for loading withholding tax rates from JSON configuration.
 """
 import json
-import os
-from typing import Dict, Optional
-from datetime import datetime
+from typing import Optional
+
+from tradingtools.paths import get_config_dir
 
 
 class TaxRatesLoader:
@@ -17,9 +17,7 @@ class TaxRatesLoader:
             config_path: Path to the JSON config file. If None, uses default location.
         """
         if config_path is None:
-            # Default to config/withholding_tax_rates.json relative to this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(current_dir, 'withholding_tax_rates.json')
+            config_path = str(get_config_dir() / 'withholding_tax_rates.json')
         
         self.config_path = config_path
         self.rates_by_country = {}

@@ -8,7 +8,7 @@ from tkinter import ttk, messagebox
 import tkinter as tk
 from datetime import datetime
 from .base_view import BaseView
-from db.repositories.interests import InterestType
+from tradingtools.db.repositories.interests import InterestType
 
 
 class InterestsView(BaseView):

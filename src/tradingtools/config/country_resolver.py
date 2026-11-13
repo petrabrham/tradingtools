@@ -3,8 +3,9 @@ Utility module for resolving country of origin for securities.
 Handles manual overrides and fallback to ISIN-based detection.
 """
 import json
-import os
 from typing import Optional, Tuple
+
+from tradingtools.paths import get_config_dir
 
 
 class CountryResolver:
@@ -17,9 +18,7 @@ class CountryResolver:
             overrides_path: Path to the JSON overrides file. If None, uses default location.
         """
         if overrides_path is None:
-            # Default to config/country_overrides.json relative to this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            overrides_path = os.path.join(current_dir, 'country_overrides.json')
+            overrides_path = str(get_config_dir() / 'country_overrides.json')
         
         self.overrides_path = overrides_path
         self.overrides = {}

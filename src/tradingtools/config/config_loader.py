@@ -5,9 +5,9 @@ Provides centralized access to application configuration from config.json.
 """
 
 import json
-import os
 from typing import Optional, Dict, Any
-from pathlib import Path
+
+from tradingtools.paths import get_config_dir
 
 
 class ConfigLoader:
@@ -27,9 +27,7 @@ class ConfigLoader:
     
     def _load_config(self):
         """Load configuration from config.json file."""
-        # Get the directory where this file is located
-        config_dir = Path(__file__).parent
-        config_path = config_dir / 'config.json'
+        config_path = get_config_dir() / 'config.json'
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:

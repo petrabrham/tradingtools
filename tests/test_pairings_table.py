@@ -3,15 +3,11 @@ Test script for Pairings Repository - Phase 1, Step 1
 Tests the creation of the pairings table and basic operations.
 """
 
-import sys
 import os
 import sqlite3
 from datetime import datetime
 
-# Add parent directory to path to import modules
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from db.dbmanager import DatabaseManager
+from tradingtools.db.dbmanager import DatabaseManager
 
 def test_pairings_table_creation():
     """Test creating the pairings table."""

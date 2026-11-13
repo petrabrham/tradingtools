@@ -45,7 +45,10 @@ For example, with US dividends (15% withholding):
 
 ## Tax Rates Configuration
 
-Tax rates are stored in `config/withholding_tax_rates.json`:
+Tracked default tax rates are stored in
+`src/tradingtools/resources/defaults/withholding_tax_rates.json`. At runtime,
+the application reads the per-user copy from
+`%APPDATA%\TradingTools\config\withholding_tax_rates.json`:
 
 - 36+ countries with ISO 3166-1 alpha-2 codes
 - Rates based on Czech DTT agreements
@@ -54,7 +57,7 @@ Tax rates are stored in `config/withholding_tax_rates.json`:
 
 ### Adding/Updating Rates
 
-Edit `config/withholding_tax_rates.json`:
+Edit `%APPDATA%\TradingTools\config\withholding_tax_rates.json`:
 
 ```json
 {

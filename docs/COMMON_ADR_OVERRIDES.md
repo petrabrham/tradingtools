@@ -4,7 +4,10 @@ This is a reference list of common ADRs (American Depositary Receipts) that need
 
 ## How to Add These
 
-Copy the entries you need to `config/country_overrides.json` under the "overrides" section.
+Copy the entries you need to
+`%APPDATA%\TradingTools\config\country_overrides.json` under the "overrides"
+section. The tracked baseline is
+`src/tradingtools/resources/defaults/country_overrides.json`.
 
 ## Chinese Companies (ADRs)
 
@@ -177,7 +180,7 @@ Most European companies listed in the US keep their home country ISIN, but some 
 To add multiple overrides quickly:
 
 ```python
-from config.country_resolver import CountryResolver
+from tradingtools.config.country_resolver import CountryResolver
 
 resolver = CountryResolver()
 

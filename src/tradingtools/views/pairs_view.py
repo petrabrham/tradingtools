@@ -9,9 +9,9 @@ import tkinter as tk
 from datetime import datetime
 from typing import Optional, Dict, List
 from .base_view import BaseView
-from db.repositories.pairings import PairingsRepository, QUANTITY_EPSILON
-from db.repositories.trades import TradesRepository, TradeType
-from config.logger_config import get_logger
+from tradingtools.db.repositories.pairings import PairingsRepository, QUANTITY_EPSILON
+from tradingtools.db.repositories.trades import TradesRepository, TradeType
+from tradingtools.config.logger_config import get_logger
 
 
 class PairsView(BaseView):

@@ -3,22 +3,21 @@ from tkinter import filedialog, messagebox
 from tkinter import ttk  # Required for Treeview and Notebook
 from tkcalendar import DateEntry
 import pandas as pd
-import sys
 import os
-from db.dbmanager import DatabaseManager
+from tradingtools.db.dbmanager import DatabaseManager
 from datetime import datetime, timedelta
-from db.repositories.interests import InterestType
-from config.tax_rates_loader import TaxRatesLoader
-from config.country_resolver import CountryResolver
-from views.trades_view import TradesView
-from views.interests_view import InterestsView
-from views.realized_income_view import RealizedIncomeView
-from views.dividends_view import DividendsView
-from views.pairs_view import PairsView
-from views.open_positions_view import OpenPositionsView
-from dialogs.exchange_rate_dialog import ExchangeRateDialog
-from dialogs.import_rates_dialog import ImportRatesDialog
-from ui import MenuManager, FilterManager, copy_treeview_to_clipboard
+from tradingtools.db.repositories.interests import InterestType
+from tradingtools.config.tax_rates_loader import TaxRatesLoader
+from tradingtools.config.country_resolver import CountryResolver
+from tradingtools.views.trades_view import TradesView
+from tradingtools.views.interests_view import InterestsView
+from tradingtools.views.realized_income_view import RealizedIncomeView
+from tradingtools.views.dividends_view import DividendsView
+from tradingtools.views.pairs_view import PairsView
+from tradingtools.views.open_positions_view import OpenPositionsView
+from tradingtools.dialogs.exchange_rate_dialog import ExchangeRateDialog
+from tradingtools.dialogs.import_rates_dialog import ImportRatesDialog
+from tradingtools.ui import MenuManager, FilterManager, copy_treeview_to_clipboard
 
 class TradingToolsApp:
 
@@ -617,6 +616,9 @@ class TradingToolsApp:
 ###########################################################
 # Application Entry Point
 ###########################################################
+def main() -> None:
+    TradingToolsApp().run()
+
+
 if __name__ == "__main__":
-    app = TradingToolsApp()
-    app.run()
+    main()
