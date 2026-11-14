@@ -64,6 +64,10 @@ class TestPairingsRepository(unittest.TestCase):
                 number_of_shares REAL NOT NULL,
                 remaining_quantity REAL NOT NULL,
                 trade_type INTEGER NOT NULL,
+                total_czk REAL NOT NULL DEFAULT 0,
+                stamp_tax_czk REAL NOT NULL DEFAULT 0,
+                conversion_fee_czk REAL NOT NULL DEFAULT 0,
+                french_transaction_tax_czk REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY (isin_id) REFERENCES securities(id)
             )
         """)
@@ -79,7 +83,17 @@ class TestPairingsRepository(unittest.TestCase):
         self.conn.commit()
         return cur.lastrowid
         
-    def _create_test_trade(self, security_id, timestamp, price, quantity, trade_type=TradeType.BUY):
+    def _create_test_trade(
+        self,
+        security_id,
+        timestamp,
+        price,
+        quantity,
+        trade_type=TradeType.BUY,
+        stamp_tax_czk=0.0,
+        conversion_fee_czk=0.0,
+        french_transaction_tax_czk=0.0
+    ):
         """Helper to create a test trade.
         
         Note: For SELL trades, quantity should be passed as positive but will be stored as negative.
@@ -88,9 +102,13 @@ class TestPairingsRepository(unittest.TestCase):
         stored_quantity = -quantity if trade_type == TradeType.SELL else quantity
         
         cur = self.conn.execute(
-            "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, remaining_quantity, trade_type) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (security_id, timestamp, price, stored_quantity, stored_quantity, int(trade_type))  # remaining_quantity = quantity initially
+            "INSERT INTO trades (isin_id, timestamp, price_for_share, number_of_shares, remaining_quantity, "
+            "trade_type, total_czk, stamp_tax_czk, conversion_fee_czk, french_transaction_tax_czk) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                security_id, timestamp, price, stored_quantity, stored_quantity, int(trade_type),
+                abs(price * quantity), stamp_tax_czk, conversion_fee_czk, french_transaction_tax_czk
+            )
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1003,6 +1021,17 @@ class TestMethodCombinations(TestPairingsRepository):
         
         result = self.repo.is_timetest_applied(self.sale2_id)
         self.assertFalse(result, "All qualified means no fallback was needed")
+
+    def test_is_timetest_applied_uses_recorded_tto_flag(self):
+        self.repo.create_pairing(
+            self.sale2_id,
+            self.old_purchase1_id,
+            50.0,
+            'MaxProfit+TTO',
+            True
+        )
+
+        self.assertTrue(self.repo.is_timetest_applied(self.sale2_id))
         
     def test_is_timetest_applied_false_none_qualified(self):
         """Test TimeTest detection when no lots are time-qualified."""
@@ -1125,8 +1154,8 @@ class TestFIFOMethod(TestPairingsRepository):
     def test_fifo_insufficient_quantity(self):
         """Test FIFO when not enough shares available.
         
-        The new algorithm creates partial pairings with all available lots (150 shares),
-        then fails when trying to pair the remaining 50 shares.
+        The algorithm creates partial pairings with all available lots (150 shares)
+        and reports the incomplete sale as a successful partial result.
         """
         # Try to sell 200 shares but only 150 available
         sale_id = self._create_test_trade(
@@ -1135,12 +1164,14 @@ class TestFIFOMethod(TestPairingsRepository):
         
         result = self.repo.apply_fifo(sale_id)
         
-        self.assertFalse(result['success'])
+        self.assertTrue(result['success'])
+        self.assertFalse(result['complete'])
         # Should have paired all 3 available lots (150 shares total)
         self.assertEqual(result['pairings_created'], 3)
         self.assertEqual(result['total_quantity_paired'], 150.0)
-        self.assertIn('Insufficient quantity', result['error'])
-        self.assertIn('50.0', result['error'])  # Missing 50 shares
+        self.assertEqual(result['remaining_quantity'], 50.0)
+        self.assertIn('Insufficient quantity', result['message'])
+        self.assertIn('50.0', result['message'])
         
         # Verify partial pairings were created
         pairings = self.repo.get_pairings_for_sale(sale_id)
@@ -1376,6 +1407,155 @@ class TestRemainingQuantityTracking(TestPairingsRepository):
         self.assertEqual(self._get_remaining_quantity(self.purchase_id), 0.0)
         self.assertEqual(self._get_remaining_quantity(purchase2_id), 10.0)
         self.assertEqual(self._get_remaining_quantity(sale_big_id), 0.0)
+
+
+class TestPairingFilters(TestPairingsRepository):
+    """Test pairing filters and partial-result semantics."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo.create_table()
+        self.security_id = self._create_test_security()
+        self.old_purchase_id = self._create_test_trade(
+            self.security_id,
+            int(datetime(2019, 1, 15).timestamp()),
+            100.0,
+            40.0,
+            TradeType.BUY
+        )
+        self.recent_purchase_id = self._create_test_trade(
+            self.security_id,
+            int(datetime(2023, 6, 10).timestamp()),
+            200.0,
+            40.0,
+            TradeType.BUY
+        )
+        self.sale_id = self._create_test_trade(
+            self.security_id,
+            int(datetime(2024, 11, 15).timestamp()),
+            180.0,
+            70.0,
+            TradeType.SELL
+        )
+
+    def test_profit_only_skips_loss_lot_and_returns_partial_success(self):
+        result = self.repo.apply_fifo(self.sale_id, profit_only=True)
+
+        self.assertTrue(result['success'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['total_quantity_paired'], 40.0)
+        self.assertEqual(result['remaining_quantity'], 30.0)
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.old_purchase_id)
+        self.assertEqual(pairings[0]['method'], 'FIFO+PO')
+
+    def test_profit_only_compares_net_czk_after_transaction_costs(self):
+        security_id = self._create_test_security(
+            isin='US5949181045',
+            ticker='MSFT',
+            name='Microsoft'
+        )
+        sale_id = self._create_test_trade(
+            security_id,
+            int(datetime(2024, 11, 15).timestamp()),
+            120.0,
+            10.0,
+            TradeType.SELL,
+            stamp_tax_czk=50.0,
+            conversion_fee_czk=50.0
+        )
+        purchase_id = self._create_test_trade(
+            security_id,
+            int(datetime(2024, 6, 10).timestamp()),
+            100.0,
+            10.0,
+            TradeType.BUY,
+            conversion_fee_czk=250.0
+        )
+
+        result = self.repo.apply_fifo(sale_id, profit_only=True)
+
+        self.assertFalse(result['success'])
+        self.assertEqual(result['pairings_created'], 0)
+        self.assertEqual(self.repo.get_pairings_for_sale(sale_id), [])
+        self.assertEqual(self.repo.trades_repo.get_remaining_quantity(purchase_id), 10.0)
+
+    def test_profit_only_accepts_break_even_after_transaction_costs(self):
+        security_id = self._create_test_security(
+            isin='US02079K1079',
+            ticker='GOOGL',
+            name='Alphabet'
+        )
+        sale_id = self._create_test_trade(
+            security_id,
+            int(datetime(2024, 11, 15).timestamp()),
+            120.0,
+            10.0,
+            TradeType.SELL,
+            stamp_tax_czk=50.0,
+            conversion_fee_czk=50.0
+        )
+        self._create_test_trade(
+            security_id,
+            int(datetime(2024, 6, 10).timestamp()),
+            100.0,
+            10.0,
+            TradeType.BUY,
+            stamp_tax_czk=50.0,
+            conversion_fee_czk=50.0
+        )
+
+        result = self.repo.apply_fifo(sale_id, profit_only=True)
+
+        self.assertTrue(result['success'])
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['total_quantity_paired'], 10.0)
+        self.assertEqual(
+            self.repo.get_pairings_for_sale(sale_id)[0]['method'],
+            'FIFO+PO'
+        )
+
+    def test_time_test_only_is_passed_to_lifo_query_and_saved(self):
+        result = self.repo.apply_lifo(self.sale_id, time_test_only=True)
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['total_quantity_paired'], 40.0)
+        pairings = self.repo.get_pairings_for_sale(self.sale_id)
+        self.assertEqual(len(pairings), 1)
+        self.assertEqual(pairings[0]['purchase_trade_id'], self.old_purchase_id)
+        self.assertEqual(pairings[0]['method'], 'LIFO+TTO')
+        self.assertTrue(pairings[0]['time_test_qualified'])
+
+    def test_manual_pairing_applies_both_filters_and_records_flags(self):
+        result = self.repo.manual_pair(
+            self.sale_id,
+            self.old_purchase_id,
+            time_test_only=True,
+            profit_only=True
+        )
+
+        self.assertTrue(result['success'])
+        pairing = self.repo.get_pairings_for_sale(self.sale_id)[0]
+        self.assertEqual(pairing['method'], 'Manual+TTO+PO')
+
+    def test_manual_pairing_rejects_loss_with_profit_only(self):
+        losing_purchase_id = self._create_test_trade(
+            self.security_id,
+            int(datetime(2023, 6, 10).timestamp()),
+            200.0,
+            10.0,
+            TradeType.BUY
+        )
+        result = self.repo.create_manual_pairing(
+            self.sale_id,
+            losing_purchase_id,
+            10.0,
+            profit_only=True
+        )
+
+        self.assertFalse(result['success'])
+        self.assertIn('loss', result['error'])
 
 
 class TestLIFOMethod(TestPairingsRepository):

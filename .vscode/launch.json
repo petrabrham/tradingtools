@@ -3,9 +3,13 @@
     "configurations": [
         {
             "name": "Python: TradingTools",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/app.py",
+            "module": "tradingtools.app",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}\\src"
+            },
             "console": "integratedTerminal",
             "justMyCode": true
         }

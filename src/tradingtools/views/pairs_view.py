@@ -7,7 +7,7 @@ Allows users to view unpaired sales, available purchase lots, and create/manage 
 from tkinter import ttk, messagebox, simpledialog
 import tkinter as tk
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from .base_view import BaseView
 from tradingtools.db.repositories.pairings import PairingsRepository, QUANTITY_EPSILON
 from tradingtools.db.repositories.trades import TradesRepository, TradeType
@@ -38,6 +38,7 @@ class PairsView(BaseView):
         self.lots_tree = None
         self.pairings_tree = None
         self.timetest_var = None
+        self.profit_only_var = None
         
         # State
         self.current_sale_id = None
@@ -248,7 +249,7 @@ class PairsView(BaseView):
         sales_frame = ttk.LabelFrame(action_container, text="Sales Action", padding=10)
         sales_frame.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         
-        # Row 0: Method selection and TimeTest checkbox
+        # Row 0: Method selection and pairing filters
         ttk.Label(sales_frame, text="Method:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
         self.method_var = tk.StringVar(value="FIFO")
         method_combo = ttk.Combobox(sales_frame, textvariable=self.method_var, 
@@ -260,6 +261,13 @@ class PairsView(BaseView):
         timetest_check = ttk.Checkbutton(sales_frame, text="Time Test Only (3+ years)", 
                                          variable=self.timetest_var)
         timetest_check.grid(row=0, column=2, padx=5, pady=2, sticky="w")
+        self.profit_only_var = tk.BooleanVar(value=False)
+        profit_only_check = ttk.Checkbutton(
+            sales_frame,
+            text="Profit Only",
+            variable=self.profit_only_var
+        )
+        profit_only_check.grid(row=0, column=3, padx=5, pady=2, sticky="w")
         
         # Row 1: Buttons
         pair_selected_btn = ttk.Button(sales_frame, text="Pair Selected Sale", 
@@ -268,7 +276,7 @@ class PairsView(BaseView):
         
         pair_all_btn = ttk.Button(sales_frame, text="Pair All Sales", 
                                   command=self._apply_method_to_interval)
-        pair_all_btn.grid(row=1, column=2, padx=5, pady=2, sticky="ew")
+        pair_all_btn.grid(row=1, column=2, columnspan=2, padx=5, pady=2, sticky="ew")
         
         # MIDDLE: Pair Action
         pair_frame = ttk.LabelFrame(action_container, text="Pair Action", padding=10)
@@ -776,6 +784,13 @@ class PairsView(BaseView):
             return
         
         method = self.method_var.get()
+        time_test_only, profit_only = self._get_pairing_filter_flags()
+        active_filters = [
+            label for enabled, label in (
+                (time_test_only, "TTO"),
+                (profit_only, "PO")
+            ) if enabled
+        ]
         
         # Get sale IDs in order (as they appear in the tree, which is already sorted oldest first)
         sale_ids = [int(item) for item in selection]
@@ -783,7 +798,9 @@ class PairsView(BaseView):
         # Confirm if multiple sales are selected
         if len(sale_ids) > 1:
             if not messagebox.askyesno("Confirm", 
-                                       f"Apply {method} method to {len(sale_ids)} selected sales?\n"
+                                       f"Apply {method} method"
+                                       f"{' with ' + ', '.join(active_filters) if active_filters else ''}"
+                                       f" to {len(sale_ids)} selected sales?\n"
                                        f"Sales will be processed in order from oldest to newest."):
                 return
         
@@ -797,30 +814,41 @@ class PairsView(BaseView):
             self.pairings_repo.trades_repo.conn = self.db.conn
         
         success_count = 0
+        partial_count = 0
         error_count = 0
         total_pairings = 0
         total_quantity = 0.0
+        single_result: Optional[Dict] = None
         
         try:
             for sale_id in sale_ids:
                 try:
                     # Apply method based on selection
                     if method == "FIFO":
-                        result = self.pairings_repo.apply_fifo(sale_id)
+                        result = self.pairings_repo.apply_fifo(sale_id, time_test_only, profit_only)
                     elif method == "LIFO":
-                        result = self.pairings_repo.apply_lifo(sale_id)
+                        result = self.pairings_repo.apply_lifo(sale_id, time_test_only, profit_only)
                     elif method == "MaxLose":
-                        result = self.pairings_repo.apply_max_lose(sale_id)
+                        result = self.pairings_repo.apply_max_lose(sale_id, time_test_only, profit_only)
                     elif method == "MaxProfit":
-                        result = self.pairings_repo.apply_max_profit(sale_id)
+                        result = self.pairings_repo.apply_max_profit(sale_id, time_test_only, profit_only)
                     else:
                         messagebox.showerror("Error", f"Unknown method: {method}")
                         return
+                    single_result = result
                     
                     if result['success']:
                         success_count += 1
                         total_pairings += result['pairings_created']
                         total_quantity += result['total_quantity_paired']
+                        if not result.get('complete', True):
+                            partial_count += 1
+                            self.logger.info(
+                                f"{method} partially paired sale {sale_id}: "
+                                f"{result['total_quantity_paired']} shares paired, "
+                                f"{result['remaining_quantity']} shares remain. "
+                                f"{result.get('message') or ''}"
+                            )
                         self.logger.info(f"Applied {method} to sale {sale_id}: "
                                        f"{result['pairings_created']} pairings, "
                                        f"{result['total_quantity_paired']} shares")
@@ -836,10 +864,23 @@ class PairsView(BaseView):
             if len(sale_ids) == 1:
                 # Single sale - show detailed result
                 if success_count == 0:
-                    messagebox.showerror("Error", f"Failed to apply {method} method")
+                    message = (
+                        single_result.get('error')
+                        if single_result is not None
+                        else None
+                    ) or f"Failed to apply {method} method"
+                    messagebox.showerror("Error", message)
+                elif single_result is not None and single_result.get('complete') is False:
+                    messagebox.showinfo(
+                        "Partial Pairing",
+                        f"Paired {single_result['total_quantity_paired']:.9f} shares; "
+                        f"{single_result['remaining_quantity']:.9f} shares remain unpaired.\n"
+                        f"{single_result.get('message') or ''}"
+                    )
             else:
                 # Multiple sales - show summary
-                self.logger.info(f"Batch pairing complete: {success_count} success, {error_count} errors, "
+                self.logger.info(f"Batch pairing complete: {success_count} success "
+                               f"({partial_count} partial), {error_count} errors, "
                                f"{total_pairings} total pairings, {total_quantity:.9f} total quantity")
              
             self.refresh_view()
@@ -855,9 +896,18 @@ class PairsView(BaseView):
     def _apply_method_to_interval(self) -> None:
         """Apply the selected method to all unpaired sales in the interval."""
         method = self.method_var.get()
+        time_test_only, profit_only = self._get_pairing_filter_flags()
+        active_filters = [
+            label for enabled, label in (
+                (time_test_only, "TTO"),
+                (profit_only, "PO")
+            ) if enabled
+        ]
         
         if not messagebox.askyesno("Confirm", 
-                                   f"Apply {method} method to all unpaired sales in the interval?\n"
+                                   f"Apply {method} method"
+                                   f"{' with ' + ', '.join(active_filters) if active_filters else ''}"
+                                   f" to all unpaired sales in the interval?\n"
                                    f"This cannot be easily undone."):
             return
         
@@ -868,21 +918,26 @@ class PairsView(BaseView):
             unpaired_sales = [s for s in sales_data if s['status'] in ["Unpaired", "Partially Paired"]]
             
             success_count = 0
+            partial_count = 0
             error_count = 0
             
             for sale in unpaired_sales:
                 try:
                     if method == "FIFO":
-                        result = self.pairings_repo.apply_fifo(sale['id'])
+                        result = self.pairings_repo.apply_fifo(sale['id'], time_test_only, profit_only)
                     elif method == "LIFO":
-                        result = self.pairings_repo.apply_lifo(sale['id'])
+                        result = self.pairings_repo.apply_lifo(sale['id'], time_test_only, profit_only)
                     elif method == "MaxLose":
-                        result = self.pairings_repo.apply_max_lose(sale['id'])
+                        result = self.pairings_repo.apply_max_lose(sale['id'], time_test_only, profit_only)
                     elif method == "MaxProfit":
-                        result = self.pairings_repo.apply_max_profit(sale['id'])
+                        result = self.pairings_repo.apply_max_profit(sale['id'], time_test_only, profit_only)
+                    else:
+                        raise ValueError(f"Unknown method: {method}")
                     
                     if result['success']:
                         success_count += 1
+                        if not result.get('complete', True):
+                            partial_count += 1
                     else:
                         error_count += 1
                         self.logger.warning(f"Failed to pair sale {sale['id']}: {result['error']}")
@@ -891,15 +946,24 @@ class PairsView(BaseView):
                     error_count += 1
                     self.logger.error(f"Error pairing sale {sale['id']}: {e}", exc_info=True)
             
-            self.logger.info(f"Batch pairing complete: {success_count} success, {error_count} errors")
+            self.logger.info(
+                f"Batch pairing complete: {success_count} success "
+                f"({partial_count} partial), {error_count} errors"
+            )
             messagebox.showinfo("Batch Pairing Complete", 
-                               f"Successfully paired: {success_count}\n"
+                               f"Successfully processed: {success_count}\n"
+                               f"Partially paired: {partial_count}\n"
                                f"Errors: {error_count}")
             self.refresh_view()
         
         except Exception as e:
             self.logger.error(f"Error in batch pairing: {e}", exc_info=True)
             messagebox.showerror("Error", f"Batch pairing failed: {e}")
+
+    def _get_pairing_filter_flags(self) -> Tuple[bool, bool]:
+        if self.timetest_var is None or self.profit_only_var is None:
+            raise RuntimeError("Pairing filter controls are not initialized")
+        return self.timetest_var.get(), self.profit_only_var.get()
     
     def _unpair_selected(self) -> None:
         """Delete the currently selected pairing(s)."""
@@ -1289,10 +1353,13 @@ class PairsView(BaseView):
         
         try:
             # Create manual pairing
+            time_test_only, profit_only = self._get_pairing_filter_flags()
             result = self.pairings_repo.create_manual_pairing(
                 sale_trade_id=self.current_sale_id,
                 purchase_trade_id=lot_id,
-                quantity=quantity
+                quantity=quantity,
+                time_test_only=time_test_only,
+                profit_only=profit_only
             )
             
             if result.get('success'):

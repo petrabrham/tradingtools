@@ -8,6 +8,8 @@ from tradingtools.config.config_loader import get_time_test_holding_period_years
 # Maximum acceptable quantity error for floating-point comparisons
 # Quantities below this threshold are considered zero
 QUANTITY_EPSILON = 1e-10
+PAIRING_METHODS = ('FIFO', 'LIFO', 'MaxLose', 'MaxProfit', 'Manual')
+PAIRING_FLAGS = ('TTO', 'PO')
 
 
 class PairingsRepository(BaseRepository):
@@ -83,7 +85,15 @@ class PairingsRepository(BaseRepository):
         """
         if quantity <= QUANTITY_EPSILON:
             raise ValueError("Quantity must be positive")
-        if method not in ('FIFO', 'LIFO', 'MaxLose', 'MaxProfit', 'Manual'):
+        method_parts = method.split('+')
+        base_method = method_parts[0]
+        flags = method_parts[1:]
+        if (
+            base_method not in PAIRING_METHODS
+            or any(flag not in PAIRING_FLAGS for flag in flags)
+            or len(flags) != len(set(flags))
+            or flags != [flag for flag in PAIRING_FLAGS if flag in flags]
+        ):
             raise ValueError(f"Invalid method: {method}")
         
         sql = (
@@ -117,6 +127,74 @@ class PairingsRepository(BaseRepository):
         self.logger.info(f"Created pairing: sale_id={sale_trade_id}, purchase_id={purchase_trade_id}, "
                         f"quantity={quantity}, method={method}, time_test={time_test_qualified}")
         return cur.lastrowid
+
+    @staticmethod
+    def _format_method(method: str, time_test_only: bool, profit_only: bool) -> str:
+        flags = []
+        if time_test_only:
+            flags.append('TTO')
+        if profit_only:
+            flags.append('PO')
+        return '+'.join([method] + flags)
+
+    @staticmethod
+    def _net_unit_amount(
+        total_czk: float,
+        number_of_shares: float,
+        stamp_tax_czk: float,
+        conversion_fee_czk: float,
+        french_transaction_tax_czk: float,
+        is_purchase: bool
+    ) -> Optional[float]:
+        shares = abs(number_of_shares)
+        if shares <= QUANTITY_EPSILON:
+            return None
+
+        costs = (
+            abs(stamp_tax_czk)
+            + abs(conversion_fee_czk)
+            + abs(french_transaction_tax_czk)
+        )
+        total = abs(total_czk) + costs if is_purchase else abs(total_czk) - costs
+        return total / shares
+
+    def _is_profit_only_pair(self, purchase: Dict, sale: Dict) -> bool:
+        purchase_cost = self._net_unit_amount(
+            purchase['total_czk'],
+            purchase['number_of_shares'],
+            purchase['stamp_tax_czk'],
+            purchase['conversion_fee_czk'],
+            purchase['french_transaction_tax_czk'],
+            is_purchase=True
+        )
+        sale_proceeds = self._net_unit_amount(
+            sale['total_czk'],
+            sale['number_of_shares'],
+            sale['stamp_tax_czk'],
+            sale['conversion_fee_czk'],
+            sale['french_transaction_tax_czk'],
+            is_purchase=False
+        )
+        return (
+            purchase_cost is not None
+            and sale_proceeds is not None
+            and purchase_cost <= sale_proceeds
+        )
+
+    def _get_trade_pairing_data(self, trade_id: int) -> Optional[Dict]:
+        sql = """
+            SELECT id, timestamp, isin_id, trade_type, number_of_shares,
+                   remaining_quantity, total_czk, stamp_tax_czk,
+                   conversion_fee_czk, french_transaction_tax_czk
+            FROM trades
+            WHERE id = ?
+        """
+        cur = self.execute(sql, (trade_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        columns = [description[0] for description in cur.description]
+        return dict(zip(columns, row))
 
     def get_pairings_for_sale(self, sale_trade_id: int) -> List[Dict]:
         """Get all pairings for a specific sale transaction.
@@ -454,8 +532,8 @@ class PairingsRepository(BaseRepository):
     def is_timetest_applied(self, sale_trade_id: int) -> bool:
         """Check if TimeTest filter was applied to a sale.
         
-        Returns True if the sale has both time-qualified and non-qualified pairings,
-        indicating a TimeTest filter with fallback was used.
+        Returns True if a pairing records the TTO flag or if legacy pairings
+        indicate a time-test filter with fallback.
         
         Args:
             sale_trade_id: ID of the sale transaction
@@ -465,6 +543,7 @@ class PairingsRepository(BaseRepository):
         """
         sql = """
             SELECT 
+                SUM(CASE WHEN instr('+' || method || '+', '+TTO+') > 0 THEN 1 ELSE 0 END) as tto_count,
                 SUM(CASE WHEN time_test_qualified = 1 THEN 1 ELSE 0 END) as qualified_count,
                 SUM(CASE WHEN time_test_qualified = 0 THEN 1 ELSE 0 END) as non_qualified_count
             FROM pairings
@@ -476,9 +555,11 @@ class PairingsRepository(BaseRepository):
         if not row:
             return False
         
-        qualified_count, non_qualified_count = row
+        tto_count, qualified_count, non_qualified_count = row
         
         # Handle None values (when no pairings exist)
+        if tto_count is not None and tto_count > 0:
+            return True
         if qualified_count is None or non_qualified_count is None:
             return False
         
@@ -652,7 +733,15 @@ class PairingsRepository(BaseRepository):
         
         return True, ""
 
-    def _get_next_available_lot(self, security_id: int, sale_timestamp: int, order_by: str, time_test_only: bool = False) -> Optional[Dict]:
+    def _get_next_available_lot(
+        self,
+        security_id: int,
+        sale_timestamp: int,
+        order_by: str,
+        time_test_only: bool = False,
+        profit_only: bool = False,
+        max_cost_per_share: Optional[float] = None
+    ) -> Optional[Dict]:
         """Get the next available purchase lot based on method criteria.
         
         Args:
@@ -660,6 +749,8 @@ class PairingsRepository(BaseRepository):
             sale_timestamp: Timestamp of the sale
             order_by: SQL ORDER BY clause (e.g., 't.timestamp ASC', 't.price_for_share DESC')
             time_test_only: If True, only return lots that meet 3-year time test
+            profit_only: If True, only return lots whose net unit cost is within sale proceeds
+            max_cost_per_share: Net sale proceeds per share, in CZK
             
         Returns:
             Dictionary with lot info or None if no lots available
@@ -688,6 +779,7 @@ class PairingsRepository(BaseRepository):
             AND t.timestamp < ?
             AND t.remaining_quantity > {QUANTITY_EPSILON}
             {'AND t.timestamp < ?' if time_test_only else ''}
+            {'AND (ABS(t.total_czk) + ABS(t.stamp_tax_czk) + ABS(t.conversion_fee_czk) + ABS(t.french_transaction_tax_czk)) / NULLIF(ABS(t.number_of_shares), 0) <= ?' if profit_only else ''}
             ORDER BY {order_by}
             LIMIT 1
         """
@@ -695,6 +787,8 @@ class PairingsRepository(BaseRepository):
         params = (security_id, TradeType.BUY, sale_timestamp)
         if time_test_only:
             params = params + (time_test_threshold,)
+        if profit_only:
+            params = params + (max_cost_per_share,)
         
         cur = self.execute(sql, params)
         row = cur.fetchone()
@@ -717,31 +811,42 @@ class PairingsRepository(BaseRepository):
             'time_test_qualified': time_qualified
         }
 
-    def _apply_pairing_method(self, sale_trade_id: int, method: str, order_by: str, time_test_only: bool = False) -> Dict:
+    def _apply_pairing_method(
+        self,
+        sale_trade_id: int,
+        method: str,
+        order_by: str,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Apply a pairing method using the common algorithm.
         
         This is the core pairing algorithm used by all methods (FIFO, LIFO, MaxLose, MaxProfit).
-        The only difference between methods is the ORDER BY clause and optional time test filter.
+        The lot order and optional eligibility filters are applied by the database query.
         
         Algorithm:
         0) Get sale_trade.remaining_quantity
         1) Search for next BUY trade using method-specific query
         2) quantity_pairing = min(sale_trade.remaining_quantity, buy_trade.remaining_quantity)
         3) Create pairing (automatically updates remaining_quantity for both trades)
-        4) Repeat until sale_trade.remaining_quantity <= QUANTITY_EPSILON
+        4) Repeat until fully paired or no eligible lot remains
         
         Args:
             sale_trade_id: ID of the sale trade to pair
             method: Pairing method name ('FIFO', 'LIFO', 'MaxLose', 'MaxProfit')
             order_by: SQL ORDER BY clause for lot selection
             time_test_only: If True, only use lots that meet 3-year time test
+            profit_only: If True, only use lots that do not realize a loss
             
         Returns:
-            Dictionary with pairing results
+            Dictionary with pairing results; an incomplete pairing is successful
+            when at least one pairing was created.
         """
         # Get sale transaction details
         sale_sql = """
-            SELECT t.id, t.isin_id, t.number_of_shares, t.timestamp, t.trade_type, ABS(t.remaining_quantity)
+            SELECT t.id, t.isin_id, t.number_of_shares, t.timestamp, t.trade_type,
+                   ABS(t.remaining_quantity), t.total_czk, t.stamp_tax_czk,
+                   t.conversion_fee_czk, t.french_transaction_tax_czk
             FROM trades t
             WHERE t.id = ?
         """
@@ -751,7 +856,11 @@ class PairingsRepository(BaseRepository):
         if not sale:
             raise ValueError(f"Sale trade {sale_trade_id} not found")
         
-        sale_id, security_id, sale_qty, sale_timestamp, trade_type, remaining_to_pair = sale
+        (
+            _, security_id, sale_qty, sale_timestamp, trade_type,
+            remaining_to_pair, sale_total_czk, sale_stamp_tax_czk,
+            sale_conversion_fee_czk, sale_french_tax_czk
+        ) = sale
         
         if trade_type != TradeType.SELL:
             raise ValueError(f"Trade {sale_trade_id} is not a SELL transaction")
@@ -763,31 +872,61 @@ class PairingsRepository(BaseRepository):
                 'success': True,
                 'pairings_created': 0,
                 'total_quantity_paired': 0.0,
+                'remaining_quantity': 0.0,
+                'complete': True,
+                'message': None,
                 'error': f"Sale {sale_trade_id} is already fully paired"
             }
         
         # Apply pairing algorithm: loop until sale is fully paired
         pairings_created = 0
         total_paired = 0.0
+        method_label = self._format_method(method, time_test_only, profit_only)
+        max_cost_per_share = None
+        if profit_only:
+            max_cost_per_share = self._net_unit_amount(
+                sale_total_czk,
+                sale_qty,
+                sale_stamp_tax_czk,
+                sale_conversion_fee_czk,
+                sale_french_tax_czk,
+                is_purchase=False
+            )
         
         while remaining_to_pair > QUANTITY_EPSILON:
             # Step 1: Get next available lot based on method
-            lot = self._get_next_available_lot(security_id, sale_timestamp, order_by, time_test_only)
+            lot = self._get_next_available_lot(
+                security_id,
+                sale_timestamp,
+                order_by,
+                time_test_only,
+                profit_only,
+                max_cost_per_share
+            )
             
             if not lot:
                 # No more lots available
-                if pairings_created == 0:
+                if time_test_only or profit_only:
+                    error_msg = (
+                        f"No available purchase lots meet the selected filters "
+                        f"for security {security_id} before {sale_timestamp}"
+                    )
+                elif pairings_created == 0:
                     # No lots found at all
                     error_msg = f"No available purchase lots found for security {security_id} before {sale_timestamp}"
                 else:
                     # Some lots paired, but not enough
                     error_msg = f"Insufficient quantity: need {remaining_to_pair} more, but no lots available"
                 
+                is_partial_success = pairings_created > 0
                 return {
-                    'success': False,
+                    'success': is_partial_success,
                     'pairings_created': pairings_created,
                     'total_quantity_paired': total_paired,
-                    'error': error_msg
+                    'remaining_quantity': remaining_to_pair,
+                    'complete': False,
+                    'error': None if is_partial_success else error_msg,
+                    'message': error_msg
                 }
             
             # Step 2: Calculate quantity to pair from this lot
@@ -798,7 +937,7 @@ class PairingsRepository(BaseRepository):
                 sale_trade_id=sale_trade_id,
                 purchase_trade_id=lot['id'],
                 quantity=quantity_to_pair,
-                method=method,
+                method=method_label,
                 time_test_qualified=lot['time_test_qualified'],
                 holding_period_days=lot['holding_period_days']
             )
@@ -821,17 +960,25 @@ class PairingsRepository(BaseRepository):
                     'error': f"Failed to create pairing record"
                 }
         
-        self.logger.info(f"{method} method applied to sale {sale_trade_id}: "
+        self.logger.info(f"{method_label} method applied to sale {sale_trade_id}: "
                         f"{pairings_created} pairings created, {total_paired} shares paired")
         
         return {
             'success': True,
             'pairings_created': pairings_created,
             'total_quantity_paired': total_paired,
+            'remaining_quantity': 0.0,
+            'complete': True,
+            'message': None,
             'error': None
         }
 
-    def apply_fifo(self, sale_trade_id: int) -> Dict:
+    def apply_fifo(
+        self,
+        sale_trade_id: int,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Apply FIFO (First-In-First-Out) method to pair a sale with purchases.
         
         FIFO matches the oldest available purchase lots first. This is a common
@@ -856,9 +1003,16 @@ class PairingsRepository(BaseRepository):
         Raises:
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
-        return self._apply_pairing_method(sale_trade_id, 'FIFO', 't.timestamp ASC')
+        return self._apply_pairing_method(
+            sale_trade_id, 'FIFO', 't.timestamp ASC', time_test_only, profit_only
+        )
 
-    def apply_lifo(self, sale_trade_id: int) -> Dict:
+    def apply_lifo(
+        self,
+        sale_trade_id: int,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Apply LIFO (Last-In-First-Out) method to pair a sale with purchases.
         
         LIFO matches the newest available purchase lots first. This method
@@ -883,9 +1037,16 @@ class PairingsRepository(BaseRepository):
         Raises:
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
-        return self._apply_pairing_method(sale_trade_id, 'LIFO', 't.timestamp DESC')
+        return self._apply_pairing_method(
+            sale_trade_id, 'LIFO', 't.timestamp DESC', time_test_only, profit_only
+        )
 
-    def apply_max_lose(self, sale_trade_id: int) -> Dict:
+    def apply_max_lose(
+        self,
+        sale_trade_id: int,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Apply MaxLose method to pair a sale with purchases.
         
         MaxLose matches lots with the highest cost basis first, which minimizes
@@ -911,9 +1072,16 @@ class PairingsRepository(BaseRepository):
         Raises:
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
-        return self._apply_pairing_method(sale_trade_id, 'MaxLose', 't.price_for_share DESC')
+        return self._apply_pairing_method(
+            sale_trade_id, 'MaxLose', 't.price_for_share DESC', time_test_only, profit_only
+        )
 
-    def apply_max_profit(self, sale_trade_id: int) -> Dict:
+    def apply_max_profit(
+        self,
+        sale_trade_id: int,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Apply MaxProfit method to pair a sale with purchases.
         
         MaxProfit matches lots with the lowest cost basis first, which maximizes
@@ -939,9 +1107,17 @@ class PairingsRepository(BaseRepository):
         Raises:
             ValueError: If sale trade doesn't exist or isn't a SELL transaction
         """
-        return self._apply_pairing_method(sale_trade_id, 'MaxProfit', 't.price_for_share ASC')
+        return self._apply_pairing_method(
+            sale_trade_id, 'MaxProfit', 't.price_for_share ASC', time_test_only, profit_only
+        )
     
-    def manual_pair(self, sale_trade_id: int, purchase_trade_id: int) -> Dict:
+    def manual_pair(
+        self,
+        sale_trade_id: int,
+        purchase_trade_id: int,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Manually pair a specific sale with a specific purchase.
         
         Validates both trades and creates a pairing if valid. Returns detailed
@@ -950,6 +1126,8 @@ class PairingsRepository(BaseRepository):
         Args:
             sale_trade_id: ID of the sale trade
             purchase_trade_id: ID of the purchase trade
+            time_test_only: Reject the pairing unless the lot passes the time test
+            profit_only: Reject the pairing if its net result would be a loss
             
         Returns:
             Dictionary with pairing results:
@@ -963,8 +1141,8 @@ class PairingsRepository(BaseRepository):
         """
         try:
             # Fetch both trades
-            buy_trade = self.trades_repo.get_by_id(purchase_trade_id)
-            sell_trade = self.trades_repo.get_by_id(sale_trade_id)
+            buy_trade = self._get_trade_pairing_data(purchase_trade_id)
+            sell_trade = self._get_trade_pairing_data(sale_trade_id)
             
             if not buy_trade:
                 return {'success': False, 'error': f'Purchase trade {purchase_trade_id} not found'}
@@ -972,24 +1150,24 @@ class PairingsRepository(BaseRepository):
                 return {'success': False, 'error': f'Sale trade {sale_trade_id} not found'}
             
             # Validate trade types
-            if buy_trade[4] != TradeType.BUY:
+            if buy_trade['trade_type'] != TradeType.BUY:
                 return {'success': False, 'error': 'First trade must be a BUY'}
-            if sell_trade[4] != TradeType.SELL:
+            if sell_trade['trade_type'] != TradeType.SELL:
                 return {'success': False, 'error': 'Second trade must be a SELL'}
             
             # Validate same security
-            if buy_trade[2] != sell_trade[2]:
+            if buy_trade['isin_id'] != sell_trade['isin_id']:
                 return {'success': False, 'error': 'Trades must be for the same security'}
             
             # Validate chronological order
-            buy_timestamp = buy_trade[1]
-            sell_timestamp = sell_trade[1]
+            buy_timestamp = buy_trade['timestamp']
+            sell_timestamp = sell_trade['timestamp']
             if buy_timestamp >= sell_timestamp:
                 return {'success': False, 'error': 'BUY trade must be older than SELL trade'}
             
             # Check available quantities
-            buy_remaining = buy_trade[6]
-            sell_remaining = sell_trade[6]
+            buy_remaining = buy_trade['remaining_quantity']
+            sell_remaining = sell_trade['remaining_quantity']
             
             if buy_remaining <= 0:
                 return {'success': False, 'error': 'BUY trade is fully paired'}
@@ -1002,13 +1180,17 @@ class PairingsRepository(BaseRepository):
             # Calculate holding period
             holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
             time_test_qualified = self.check_time_test(buy_timestamp, sell_timestamp)
+            if time_test_only and not time_test_qualified:
+                return {'success': False, 'error': 'Purchase lot does not meet Time Test Only'}
+            if profit_only and not self._is_profit_only_pair(buy_trade, sell_trade):
+                return {'success': False, 'error': 'Pairing would realize a loss'}
             
             # Create the pairing
             self.create_pairing(
                 sale_trade_id=sale_trade_id,
                 purchase_trade_id=purchase_trade_id,
                 quantity=pair_quantity,
-                method='Manual',
+                method=self._format_method('Manual', time_test_only, profit_only),
                 time_test_qualified=time_test_qualified,
                 holding_period_days=holding_period_days,
                 notes=None
@@ -1029,10 +1211,14 @@ class PairingsRepository(BaseRepository):
             self.logger.exception("Error in manual_pair")
             return {'success': False, 'error': str(e)}
 
-    def create_manual_pairing(self, 
-                             sale_trade_id: int, 
-                             purchase_trade_id: int,
-                             quantity: float) -> Dict:
+    def create_manual_pairing(
+        self,
+        sale_trade_id: int,
+        purchase_trade_id: int,
+        quantity: float,
+        time_test_only: bool = False,
+        profit_only: bool = False
+    ) -> Dict:
         """Create a manual pairing with a specific quantity.
         
         Similar to manual_pair but allows specifying the exact quantity to pair
@@ -1059,8 +1245,8 @@ class PairingsRepository(BaseRepository):
                 return {'success': False, 'error': 'Quantity must be positive'}
             
             # Fetch both trades
-            buy_trade = self.trades_repo.get_by_id(purchase_trade_id)
-            sell_trade = self.trades_repo.get_by_id(sale_trade_id)
+            buy_trade = self._get_trade_pairing_data(purchase_trade_id)
+            sell_trade = self._get_trade_pairing_data(sale_trade_id)
             
             if not buy_trade:
                 return {'success': False, 'error': f'Purchase trade {purchase_trade_id} not found'}
@@ -1068,24 +1254,24 @@ class PairingsRepository(BaseRepository):
                 return {'success': False, 'error': f'Sale trade {sale_trade_id} not found'}
             
             # Validate trade types
-            if buy_trade[4] != TradeType.BUY:
+            if buy_trade['trade_type'] != TradeType.BUY:
                 return {'success': False, 'error': 'Purchase must be a BUY trade'}
-            if sell_trade[4] != TradeType.SELL:
+            if sell_trade['trade_type'] != TradeType.SELL:
                 return {'success': False, 'error': 'Sale must be a SELL trade'}
             
             # Validate same security
-            if buy_trade[2] != sell_trade[2]:
+            if buy_trade['isin_id'] != sell_trade['isin_id']:
                 return {'success': False, 'error': 'Trades must be for the same security'}
             
             # Validate chronological order
-            buy_timestamp = buy_trade[1]
-            sell_timestamp = sell_trade[1]
+            buy_timestamp = buy_trade['timestamp']
+            sell_timestamp = sell_trade['timestamp']
             if buy_timestamp >= sell_timestamp:
                 return {'success': False, 'error': 'Purchase must be older than sale'}
             
             # Check available quantities
-            buy_remaining = buy_trade[6]
-            sell_remaining = sell_trade[6]
+            buy_remaining = buy_trade['remaining_quantity']
+            sell_remaining = sell_trade['remaining_quantity']
             
             if buy_remaining <= QUANTITY_EPSILON:
                 return {'success': False, 'error': 'Purchase lot is fully paired'}
@@ -1101,13 +1287,17 @@ class PairingsRepository(BaseRepository):
             # Calculate holding period
             holding_period_days = (sell_timestamp - buy_timestamp) // (24 * 3600)
             time_test_qualified = self.check_time_test(buy_timestamp, sell_timestamp)
+            if time_test_only and not time_test_qualified:
+                return {'success': False, 'error': 'Purchase lot does not meet Time Test Only'}
+            if profit_only and not self._is_profit_only_pair(buy_trade, sell_trade):
+                return {'success': False, 'error': 'Pairing would realize a loss'}
             
             # Create the pairing
             self.create_pairing(
                 sale_trade_id=sale_trade_id,
                 purchase_trade_id=purchase_trade_id,
                 quantity=quantity,
-                method='Manual',
+                method=self._format_method('Manual', time_test_only, profit_only),
                 time_test_qualified=time_test_qualified,
                 holding_period_days=holding_period_days,
                 notes=None

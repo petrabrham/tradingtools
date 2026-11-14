@@ -8,5 +8,6 @@
   "terminal.integrated.defaultProfile.windows": "PowerShell (Bypass)",
   "chat.tools.terminal.autoApprove": {
     "Get-Headers": true
-  }
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:system"
 }

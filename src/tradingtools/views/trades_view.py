@@ -61,6 +61,8 @@ class TradesView(BaseView):
         tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', selectmode='extended')
         tree.grid(row=0, column=0, sticky='nsew')
         self.tree = tree
+        self.timetest_var = tk.BooleanVar(master=tree, value=False)
+        self.profit_only_var = tk.BooleanVar(master=tree, value=False)
 
         # Tree column for expand/collapse icons
         tree.heading("#0", text="")
@@ -221,6 +223,15 @@ class TradesView(BaseView):
         """Show context menu on right-click."""
         # Create context menu
         menu = tk.Menu(self.tree, tearoff=0)
+        menu.add_checkbutton(
+            label="Time Test Only (TTO)",
+            variable=self.timetest_var
+        )
+        menu.add_checkbutton(
+            label="Profit Only (PO)",
+            variable=self.profit_only_var
+        )
+        menu.add_separator()
         
         # Check if pairing is possible with current selection
         can_pair, _ = self._validate_pairing_selection()
@@ -339,7 +350,12 @@ class TradesView(BaseView):
         sell_remaining = float(self.tree.item(sell_iid, 'values')[7])
         
         # Call manual_pair from repository
-        result = self.db.pairings_repo.manual_pair(sell_id, buy_id)
+        result = self.db.pairings_repo.manual_pair(
+            sell_id,
+            buy_id,
+            time_test_only=self.timetest_var.get(),
+            profit_only=self.profit_only_var.get()
+        )
         
         if not result['success']:
             messagebox.showerror("Pairing Failed", result['error'])
