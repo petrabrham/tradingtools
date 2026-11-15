@@ -16,6 +16,11 @@ The **Open Positions** tab shows positions aggregated by security as of the sele
 - **MaxProfit**: pairs lots with the lowest stored unit price first.
 - **Manual**: pairs a selected purchase with a sale, subject to availability and security/date validation.
 
+Successful manual pairing does not show a confirmation dialog. It preserves
+the selected sales and their position in the table, updates the affected sale's
+remaining quantity and status in place, and reloads available purchases and
+pairings. Validation warnings and errors are still displayed.
+
 The **Time Test Only (TTO)** and **Profit Only (PO)** checkboxes can be combined with any automatic method and also apply to manual pairings. TTO restricts eligible purchases to those meeting the configured time test. PO skips a pairing if the purchase's net cost per share exceeds the sale's net proceeds per share. For purchases, net cost is `(abs(total_czk) + transaction costs) / abs(quantity)`; for sales, net proceeds are `(abs(total_czk) - transaction costs) / abs(quantity)`. Transaction costs include stamp tax, conversion fee, and French transaction tax, matching the realized-income calculation.
 
 Automatic pairing may leave a sale partially or fully unpaired when eligible purchase quantity is insufficient. A partial result is reported as successful and the remaining quantity stays unpaired. Batch pairing operates on unpaired and partially paired sales in the selected interval.

@@ -7,7 +7,7 @@ Allows users to view unpaired sales, available purchase lots, and create/manage 
 from tkinter import ttk, messagebox, simpledialog
 import tkinter as tk
 from datetime import datetime
-from typing import Optional, Dict, List, Tuple
+from typing import Callable, Optional, Dict, List, Tuple
 from .base_view import BaseView
 from tradingtools.db.repositories.pairings import PairingsRepository, QUANTITY_EPSILON
 from tradingtools.db.repositories.trades import TradesRepository, TradeType
@@ -46,7 +46,7 @@ class PairsView(BaseView):
         self.current_end_timestamp = None
         
         # Callback for when pairings change
-        self.on_pairings_changed = None
+        self.on_pairings_changed: Optional[Callable[[], None]] = None
     
     def create_view(self, parent_frame: ttk.Frame) -> None:
         """
@@ -427,13 +427,7 @@ class PairsView(BaseView):
             remaining_qty = abs(row[5])
             total_qty = abs(row[4])
             
-            # Determine status
-            if remaining_qty < QUANTITY_EPSILON:
-                status = "Fully Paired"
-            elif remaining_qty >= total_qty - QUANTITY_EPSILON:
-                status = "Unpaired"
-            else:
-                status = "Partially Paired"
+            status = self._get_sale_pairing_status(remaining_qty, total_qty)
             
             result.append({
                 'id': sale_id,
@@ -448,6 +442,14 @@ class PairsView(BaseView):
             })
         
         return result
+
+    @staticmethod
+    def _get_sale_pairing_status(remaining_qty: float, total_qty: float) -> str:
+        if remaining_qty < QUANTITY_EPSILON:
+            return "Fully Paired"
+        if remaining_qty >= total_qty - QUANTITY_EPSILON:
+            return "Unpaired"
+        return "Partially Paired"
     
     def _insert_sale_row(self, sale: Dict) -> None:
         """Insert a sale row into the sales tree."""
@@ -1337,10 +1339,9 @@ class PairsView(BaseView):
             minvalue=QUANTITY_EPSILON,
             maxvalue=max_pair_qty + QUANTITY_EPSILON
         )
-        self.logger.info(f"Manual pairing quantity from dialog: {quantity:.9f} ({purchase_available_qty:.9f} / {sale_remaining_qty:.9f}) ")
-
         if quantity is None:  # User cancelled
             return
+        self.logger.info(f"Manual pairing quantity from dialog: {quantity:.9f} ({purchase_available_qty:.9f} / {sale_remaining_qty:.9f}) ")
         
         # Update repository connections if needed
         if not self.pairings_repo.conn:
@@ -1364,8 +1365,15 @@ class PairsView(BaseView):
             
             if result.get('success'):
                 self.logger.info(f"Manual pairing created: sale {self.current_sale_id} with purchase {lot_id}, qty {quantity}")
-                messagebox.showinfo("Success", f"Successfully paired {quantity:.9f} shares.")
-                self.refresh_view()
+                remaining_qty = abs(self.trades_repo.get_remaining_quantity(self.current_sale_id))
+                status = self._get_sale_pairing_status(remaining_qty, abs(float(sale_values[3])))
+                tag = "paired" if status == "Fully Paired" else "unpaired" if status == "Unpaired" else ""
+                self.sales_tree.set(sale_item, "Remaining", f"{remaining_qty:.9f}")
+                self.sales_tree.set(sale_item, "Status", status)
+                self.sales_tree.item(sale_item, tags=(tag,))
+                self._load_available_lots(self.current_sale_id)
+                self._load_current_pairings(self.current_start_timestamp, self.current_end_timestamp)
+                self._select_pairings_for_sale(self.current_sale_id)
                 
                 # Notify callback that pairings changed
                 if self.on_pairings_changed:
