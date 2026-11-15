@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from tradingtools.db.repositories.interests import InterestType
 from tradingtools.config.tax_rates_loader import TaxRatesLoader
 from tradingtools.config.country_resolver import CountryResolver
+from tradingtools.config.config_loader import get_config
 from tradingtools.views.trades_view import TradesView
 from tradingtools.views.interests_view import InterestsView
 from tradingtools.views.realized_income_view import RealizedIncomeView
@@ -88,6 +89,8 @@ class TradingToolsApp:
         self.update_title()
         self.filter_manager.update_filters()
         self.update_views()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_exit)
+        self.restore_last_database()
 
     ###########################################################
     # Title
@@ -185,20 +188,38 @@ class TradingToolsApp:
             filetypes=[("SQLite Database", "*.db"), ("All files", "*.*")]
         )
         if file_path:
-            try:
-                # Delegate to DatabaseManager (which loads exchange rate mode)
-                self.db.open_database(file_path)
-                self.update_title()
-                self.menu_manager.update_states(self.db)
-                self.filter_manager.update_year_list()
-                self.filter_manager.init_date_filters_from_db()
-                self.filter_manager.update_filters()
-                self.update_views()
-                
-                # Update UI to reflect loaded mode
-                self.menu_manager.update_exchange_rate_display(self.db)
-            except Exception as e:
-                messagebox.showerror("Error", f"Error opening database: {str(e)}")
+            self._connect_database(file_path)
+
+    def _connect_database(self, file_path: str) -> None:
+        """Connect a selected or restored database and refresh the UI."""
+        try:
+            self.db.open_database(file_path)
+            self.update_title()
+            self.menu_manager.update_states(self.db)
+            self.filter_manager.update_year_list()
+            self.filter_manager.init_date_filters_from_db()
+            self.filter_manager.update_filters()
+            self.update_views()
+            self.menu_manager.update_exchange_rate_display(self.db)
+        except Exception as e:
+            self.db.close()
+            self.update_title()
+            self.menu_manager.update_states(self.db)
+            self.db.logger.exception("Error opening database")
+            messagebox.showerror("Error", f"Error opening database: {str(e)}")
+
+    def restore_last_database(self) -> None:
+        """Reconnect the last session's database only if its file still exists."""
+        try:
+            file_path = get_config().get_last_database_path()
+            if file_path:
+                if os.path.isfile(file_path):
+                    self._connect_database(file_path)
+                else:
+                    self.db.logger.info("Last database file no longer exists: %s", file_path)
+        except (OSError, ValueError) as e:
+            self.db.logger.exception("Error restoring last database configuration")
+            messagebox.showerror("Error", f"Error restoring last database: {str(e)}")
 
     def release_database(self):
         """Release the current database"""
@@ -610,6 +631,18 @@ class TradingToolsApp:
     ###########################################################
     # Main Loop
     ###########################################################
+    def on_exit(self) -> None:
+        """Save the session database path before closing the connection."""
+        try:
+            database_path = self.db.current_db_path if self.db.conn else None
+            get_config().save_last_database_path(database_path)
+            self.db.close()
+        except Exception as e:
+            self.db.logger.exception("Error saving application session")
+            messagebox.showerror("Error", f"Error closing application: {str(e)}")
+            return
+        self.root.destroy()
+
     def run(self):
         self.root.mainloop()
 

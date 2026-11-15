@@ -5,6 +5,9 @@ Provides centralized access to application configuration from config.json.
 """
 
 import json
+import os
+import tempfile
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from tradingtools.paths import get_config_dir
@@ -62,6 +65,39 @@ class ConfigLoader:
         """Reload configuration from file."""
         self._config = None
         self._load_config()
+
+    def get_last_database_path(self) -> str:
+        """Return the database open at the last normal application exit."""
+        value = self.get('last_database_path', default='')
+        if not isinstance(value, str):
+            raise ValueError("Configuration value 'last_database_path' must be a string.")
+        return value
+
+    def save_last_database_path(self, database_path: Optional[str]) -> None:
+        """Persist the session path without overwriting other user settings."""
+        config_path = get_config_dir() / 'config.json'
+        with config_path.open(encoding='utf-8') as file:
+            config = json.load(file)
+        if not isinstance(config, dict):
+            raise ValueError("Application configuration must be a JSON object.")
+
+        config['last_database_path'] = (
+            str(Path(database_path).resolve()) if database_path else ''
+        )
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', dir=config_path.parent,
+                prefix='config-', suffix='.tmp', delete=False,
+            ) as file:
+                temporary_path = Path(file.name)
+                json.dump(config, file, indent=2, ensure_ascii=False)
+                file.write('\n')
+            os.replace(temporary_path, config_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+        self._config = config
     
     # Convenience methods for common configuration values
     

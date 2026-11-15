@@ -36,7 +36,7 @@ class MenuManager:
         self.file_menu.add_command(label="Import CSV", command=self.app.open_csv_file, state='disabled')
         self.file_menu.add_command(label="Import Annual Exchange Rates...", command=self.app.import_annual_rates, state='disabled')
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Exit", command=self.root.quit)
+        self.file_menu.add_command(label="Exit", command=self.app.on_exit)
         self.menubar.add_cascade(label="File", menu=self.file_menu)
         
         # Options menu

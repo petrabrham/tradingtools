@@ -61,6 +61,53 @@ class TestApplicationPaths(unittest.TestCase):
                     ("CN", "override"),
                 )
 
+    def test_session_path_is_absolute_and_preserves_user_changes(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            with (
+                patch.dict(os.environ, {"APPDATA": appdata}),
+                patch.object(ConfigLoader, "_instance", None),
+                patch.object(ConfigLoader, "_config", None),
+            ):
+                config_path = get_config_dir() / "config.json"
+                config_path.write_text('{"custom": 1}', encoding="utf-8")
+                loader = ConfigLoader()
+                self.assertEqual(loader.get_last_database_path(), "")
+                config_path.write_text('{"custom": 2}', encoding="utf-8")
+
+                loader.save_last_database_path("example.db")
+                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["custom"], 2)
+                self.assertEqual(
+                    saved["last_database_path"], str(Path("example.db").resolve())
+                )
+                loader.reload()
+                self.assertEqual(
+                    loader.get_last_database_path(), saved["last_database_path"]
+                )
+
+                loader.save_last_database_path(None)
+                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved, {"custom": 2, "last_database_path": ""})
+
+    def test_session_write_failure_preserves_config_and_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            with (
+                patch.dict(os.environ, {"APPDATA": appdata}),
+                patch.object(ConfigLoader, "_instance", None),
+                patch.object(ConfigLoader, "_config", None),
+            ):
+                loader = ConfigLoader()
+                config_path = get_config_dir() / "config.json"
+                original = config_path.read_bytes()
+                with patch(
+                    "tradingtools.config.config_loader.os.replace",
+                    side_effect=PermissionError("Config is read-only"),
+                ):
+                    with self.assertRaises(PermissionError):
+                        loader.save_last_database_path("example.db")
+                self.assertEqual(config_path.read_bytes(), original)
+                self.assertEqual(list(config_path.parent.glob("config-*.tmp")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

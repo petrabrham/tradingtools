@@ -1,0 +1,161 @@
+import os
+import sqlite3
+import tempfile
+import unittest
+from contextlib import ExitStack
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from tradingtools.app import TradingToolsApp
+from tradingtools.config.config_loader import ConfigLoader
+from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.ui.menu_manager import MenuManager
+
+
+class TestApplicationSession(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        appdata = self.stack.enter_context(tempfile.TemporaryDirectory())
+        self.stack.enter_context(patch.dict(os.environ, {"APPDATA": appdata}))
+        self.stack.enter_context(patch.object(ConfigLoader, "_instance", None))
+        self.stack.enter_context(patch.object(ConfigLoader, "_config", None))
+        self.config = ConfigLoader()
+        self.stack.enter_context(
+            patch("tradingtools.app.get_config", return_value=self.config)
+        )
+        self.showerror = self.stack.enter_context(
+            patch("tradingtools.app.messagebox.showerror")
+        )
+        self.stack.enter_context(
+            patch("tradingtools.db.dbmanager.setup_logger", return_value=Mock())
+        )
+        self.app = TradingToolsApp.__new__(TradingToolsApp)
+        self.db = Mock(conn=None, current_db_path=None)
+        self.root = Mock()
+        self.menu_manager = Mock()
+        self.filter_manager = Mock()
+        self.update_title = Mock()
+        self.update_views = Mock()
+        self.app.db = self.db
+        self.app.root = self.root
+        self.app.menu_manager = self.menu_manager
+        self.app.filter_manager = self.filter_manager
+        self.app.update_title = self.update_title
+        self.app.update_views = self.update_views
+        self.app.use_json_tax_rates = Mock()
+        self.directory = Path(appdata)
+
+    def test_exit_and_startup_reconnect_real_database_and_restore_rate_mode(self):
+        path = self.directory / "session.db"
+        self.app.db = DatabaseManager()
+        self.addCleanup(self.app.db.close)
+        self.app.db.use_annual_rates = True
+        self.app.db.create_database(str(path))
+        self.app.on_exit()
+        self.assertIsNone(self.app.db.conn)
+        self.root.destroy.assert_called_once_with()
+
+        self.config.reload()
+        self.app.db.use_annual_rates = False
+        self.app.restore_last_database()
+        self.assertEqual(self.app.db.current_db_path, str(path.resolve()))
+        self.assertIsNotNone(self.app.db.conn)
+        self.assertTrue(self.app.db.use_annual_rates)
+        self.update_title.assert_called_once_with()
+        self.menu_manager.update_states.assert_called_once_with(self.app.db)
+        self.filter_manager.update_year_list.assert_called_once_with()
+        self.filter_manager.init_date_filters_from_db.assert_called_once_with()
+        self.filter_manager.update_filters.assert_called_once_with()
+        self.update_views.assert_called_once_with()
+        self.menu_manager.update_exchange_rate_display.assert_called_once_with(
+            self.app.db
+        )
+        self.showerror.assert_not_called()
+
+    def test_exit_without_connection_clears_previous_path(self):
+        self.config.save_last_database_path(str(self.directory / "previous.db"))
+        self.app.on_exit()
+        self.config.reload()
+        self.assertEqual(self.config.get_last_database_path(), "")
+        self.db.close.assert_called_once_with()
+        self.root.destroy.assert_called_once_with()
+
+    def test_startup_skips_empty_missing_or_directory_paths(self):
+        for path in (None, str(self.directory / "missing.db"), str(self.directory)):
+            with self.subTest(path=path):
+                self.config.save_last_database_path(path)
+                self.app.restore_last_database()
+                self.db.open_database.assert_not_called()
+                self.showerror.assert_not_called()
+        self.assertFalse((self.directory / "missing.db").exists())
+
+    def test_failed_restore_closes_partial_connection_and_reports_error(self):
+        path = self.directory / "invalid.db"
+        path.touch()
+        self.config.save_last_database_path(str(path))
+        self.db.open_database.side_effect = sqlite3.DatabaseError("Invalid database")
+        self.app.restore_last_database()
+        self.db.close.assert_called_once_with()
+        self.showerror.assert_called_once()
+        self.db.logger.exception.assert_called_once()
+
+    def test_invalid_saved_path_is_reported(self):
+        self.config._config = {"last_database_path": ["invalid"]}
+        self.app.restore_last_database()
+        self.showerror.assert_called_once()
+        self.db.open_database.assert_not_called()
+
+    def test_failed_save_keeps_window_and_connection_open_and_reports_error(self):
+        with patch.object(
+            self.config, "save_last_database_path",
+            side_effect=PermissionError("Config is read-only"),
+        ):
+            self.app.on_exit()
+        self.db.close.assert_not_called()
+        self.root.destroy.assert_not_called()
+        self.showerror.assert_called_once()
+
+    def test_manual_connect_uses_same_connection_flow(self):
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="manual.db"),
+            patch.object(self.app, "_connect_database") as connect,
+        ):
+            self.app.open_database()
+        connect.assert_called_once_with("manual.db")
+
+    def test_startup_restores_after_widgets_and_registers_window_close(self):
+        with ExitStack() as stack:
+            root = Mock()
+            for name in (
+                "DatabaseManager", "TaxRatesLoader", "CountryResolver", "MenuManager",
+                "FilterManager", "TradesView", "InterestsView", "RealizedIncomeView",
+                "DividendsView", "PairsView", "OpenPositionsView",
+                "tk.StringVar", "tk.BooleanVar",
+            ):
+                stack.enter_context(patch("tradingtools.app." + name))
+            stack.enter_context(patch("tradingtools.app.tk.Tk", return_value=root))
+            stack.enter_context(patch.object(TradingToolsApp, "update_views"))
+            stack.enter_context(patch.object(TradingToolsApp, "update_title"))
+            events = []
+            stack.enter_context(patch.object(
+                TradingToolsApp, "create_widgets",
+                side_effect=lambda: events.append("widgets"),
+            ))
+            stack.enter_context(patch.object(
+                TradingToolsApp, "restore_last_database",
+                side_effect=lambda: events.append("restore"),
+            ))
+            app = TradingToolsApp()
+            self.assertEqual(events, ["widgets", "restore"])
+            root.protocol.assert_called_once_with("WM_DELETE_WINDOW", app.on_exit)
+
+    def test_exit_menu_uses_session_shutdown_handler(self):
+        menu = Mock()
+        with patch("tradingtools.ui.menu_manager.tk.Menu", return_value=menu):
+            MenuManager(self.app.root, self.app).create_menu()
+        menu.add_command.assert_any_call(label="Exit", command=self.app.on_exit)
+
+
+if __name__ == "__main__":
+    unittest.main()

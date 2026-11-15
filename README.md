@@ -18,6 +18,14 @@ The application copies its tracked default JSON configuration to
 under `%APPDATA%\TradingTools`; databases remain wherever the user creates or
 opens them.
 
+On normal exit (File > Exit or closing the window), the application saves the
+absolute path of the connected database in `last_database_path` in
+`%APPDATA%\TradingTools\config\config.json`. If no database is connected, the
+value is an empty string. On startup, an existing saved database is connected
+automatically, with the same filters and views as File > Connect Database.
+Missing files are skipped without creating a new database. Existing user
+configurations need no migration; the new setting is added on exit.
+
 ## Run tests
 
 ```powershell

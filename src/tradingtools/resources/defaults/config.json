@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "TradingTools application configuration",
+  "last_database_path": "",
   "metadata": {
     "last_updated": "2026-01-03",
     "version": "1.0"
