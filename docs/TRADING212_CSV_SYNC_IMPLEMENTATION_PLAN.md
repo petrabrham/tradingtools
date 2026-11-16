@@ -1,7 +1,7 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapa 1 dokončena, etapa 2 čeká na potvrzení.
+Stav: etapová implementace; etapy 1–2 dokončeny, etapa 3 čeká na potvrzení.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -360,7 +360,7 @@ Není potřeba znovu začínat reálným API exportem.
 
 #### Etapa 1 — třída a Windows Credential Manager
 
-**Stav:** dokončeno 2026-11-16; další etapa nebyla zahájena.
+**Stav:** dokončeno 2026-11-16.
 **Předpoklad:** schválení etapy splněno.
 
 - Vytvořit `Trading212API` v `src/tradingtools/trading212_api.py`.
@@ -402,7 +402,8 @@ python -m unittest discover -s tests -p "test_trading212_api.py" -v
 
 #### Etapa 2 — vytvoření a stažení jednoho CSV reportu
 
-**Stav:** čeká. **Předpoklad:** etapa 1.
+**Stav:** dokončeno 2026-11-16; další etapa nebyla zahájena.
+**Předpoklad:** etapa 1 splněna.
 
 - Doplnit povolený POST pro report, GET seznamu reportů a jejich stavy.
 - Zavést rate limits, timeouty, konečné retry, pokračování známého
@@ -416,6 +417,47 @@ neplatný CSV a nebezpečné přesměrování. Žádná obchodní API operace.
 
 **Hranice etapy:** jeden zadaný interval, bez plánování více roků,
 ročního archivu, GUI a importu do DB.
+
+**Výsledek:**
+
+- Doplněny metody `request_csv_report`, `list_csv_reports`,
+  `wait_for_csv_report` a `download_csv_report` do jediné
+  [třídy Trading212API](../src/tradingtools/trading212_api.py).
+- Interval vyžaduje timezone-aware datumy; report zahrnuje všechny čtyři
+  kategorie. Před exportem a při obnovení čekání se ověřuje identita účtu.
+- Sdílený transport uvnitř instance povoluje pouze GET přehledu účtu,
+  GET seznamu exportů a POST pro vytvoření CSV. Respektuje dokumentované
+  intervaly 5/60/30 sekund a serverové hlavičky.
+- Čekání, retry a download mají společný limit jednotlivé operace,
+  výchozí 600 sekund, a podporují zrušení přes `threading.Event`.
+- Po ztracené odpovědi, timeoutu nebo serverové chybě POST se hledá
+  jedinečný nový report se shodným intervalem/obsahem, oproti seznamu
+  před požadavkem. Nejednoznačný výsledek je explicitní chyba; stejná
+  instance při opakování pouze kontroluje reporty, neposílá další POST.
+  Bezpečně odmítnutý `429` má nejvýše tři pokusy.
+- Známé `reportId` lze předat další operaci čekání/downloadu.
+  Stav nejistého vytvoření je zatím pouze v paměti instance;
+  perzistentní evidence a restart patří do etapy 3.
+- Download povoluje HTTPS pod doménami `trading212.com`/`amazonaws.com`,
+  kontroluje i přesměrování a nikdy jim nepředává API Authorization.
+  Limit je 100 MiB; délka, CSV struktura a časy řádků se validují před
+  zveřejněním souboru. Originální bytes se nepřepisují.
+- Používá se unikátní dočasný soubor ve stejné složce a Windows rename
+  bez přepsání existujícího cíle. Po chybě/zrušení se dočasný soubor uklidí.
+  Chyba zápisu na disk se nevydává za opakovatelnou síťovou chybu.
+- [Offline testy](../tests/test_trading212_api.py): 29 testů prošlo,
+  včetně všech 8 testů etapy 1, bounded retry, obnovy po ztraceném POST,
+  terminálních stavů, časového limitu, zrušení, redirectů, prázdného CSV,
+  přesné velikostní hranice, deadline mezi příchozími bloky, neúplné
+  JSON odpovědi a zachování existujících souborů.
+- Pylance nehlásí typové chyby. Skutečný klíč, uživatelský Credential
+  Manager ani reálné API nebyly při ověřování etapy 2 použity.
+
+Použitý cílený příkaz:
+
+```powershell
+python -m unittest discover -s tests -p "test_trading212_api.py" -v
+```
 
 #### Etapa 3 — roční archiv a plánování exportů
 
