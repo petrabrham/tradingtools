@@ -1,7 +1,7 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapy 1–3 dokončeny, etapa 4 čeká na potvrzení.
+Stav: etapová implementace; etapy 1–4 dokončeny, etapa 5 čeká na potvrzení.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -529,7 +529,7 @@ Pokračování etapou 4 vyžaduje další výslovný pokyn.
 
 #### Etapa 4 — spolehlivý výsledek existujícího CSV importu
 
-**Stav:** čeká. **Předpoklad:** dostupná ověřená CSV struktura z etapy 0.
+**Stav:** dokončena. **Předpoklad:** dostupná ověřená CSV struktura z etapy 0.
 Na etapách 1–3 technicky nezávisí; pořadí lze změnit pouze po dohodě.
 
 - Opravit přímo související předávání výsledků zápisů a počítání
@@ -545,6 +545,60 @@ Existující finanční souhrny se nezmění.
 
 **Hranice etapy:** bez API logiky v `DatabaseManager`, bez plošné
 migrace starých časů a bez nové GUI synchronizace.
+
+**Rozhraní etapy 4:**
+
+- `import_dataframe(df, cancel_event=None)` zůstává synchronním vstupem.
+  Vrací `ImportResult`: původní `records`, `columns`, `read`, `added`
+  a navíc `processed`, `status`, `duplicates`, `failed`, `errors`,
+  `unknown_actions`, `skipped_actions`. `records` je velikost vstupu,
+  `processed` skutečně zpracované řádky; ani jedna položka neznamená
+  počet vložených záznamů.
+- `status` je `complete`, `partial` nebo `cancelled`. Záměrně vynechané
+  vklady/výběry a skutečné duplicity samy neznamenají neúplný import.
+  Chyby řádků a nepodporované akce ano. Chyby obsahují pořadí datového
+  řádku od 1, akci a zprávu; pořadí není pandas index ani fyzické číslo
+  řádku CSV s hlavičkou či víceřádkovým textem.
+- `import_dataframe_batches(df, batch_size=100, cancel_event=None)`
+  vydává nezávislé kumulativní výsledky po dávkách (`running`) a jeden
+  konečný výsledek. Dávky jsou úseky provádění, nikoli nová hromadná
+  transakce. Dosavadní commity po řádcích zůstávají; zrušení je kontrolováno
+  před každým řádkem. Probíhající řádek/načítání kurzu nejprve doběhne.
+  Volat na vlákně vlastnícím SQLite connection; GUI plánování přijde později.
+- Prázdné volitelné daně/poplatky zůstávají nulové. Chybějící povinné
+  hodnoty, neplatná/nekonečná čísla a chybějící měny nenulových částek
+  už nejsou nahrazovány úspěšně vypadajícími výchozími hodnotami.
+- Repositories ignorují pouze své konkrétní unikátní identity.
+  Jiná integritní chyba není duplicita. Trade insert vrací nové row ID
+  nebo nulu; úrok a dividenda počet vložených řádků. `insert_dividend`
+  výsledek nově předává volajícímu. Po chybě SQL se necommitnuté změny
+  vrátí zpět před pokračováním na další řádek.
+- Současný ruční CSV dialog je přímo závislý volající: ukazuje skutečné
+  počty, duplicity, nepodporované akce a první chyby; částečný import
+  hlásí jako varování, ne úspěch. Fatální chyba nespadne do následného
+  dialogu Success. Nové menu Trading212 ani tlačítko Cancel zatím nevzniká.
+
+**Ověřeno:** 132 cílených offline testů importu, ručního dialogu, načítání
+obchodů a párovacího repository. Nové syntetické případy ověřují skutečné
+počty při prvním a opakovaném importu, zachování znamének a částek
+nákupů/prodejů/úroků/dividend, chybějící kurz a pokračování po chybě,
+SQL rollback, neplatná čísla a strukturu, volitelné prázdné poplatky,
+legacy/UTC timestampy, neznámou akci a zrušení mezi dávkami i během dávky.
+Testy ručního dialogu potvrzují varování při neúplném importu, úspěšný
+duplicitní import a absenci následného Success po fatální chybě.
+
+Cílený příkaz pro nové importní testy:
+
+```powershell
+python -m unittest discover -s tests -p "test_csv_import.py" -v
+```
+
+Pylance ověřil kompatibilitu všech 17 volání `import_dataframe`.
+Změněný import a nové testy nepřidávají typové ani syntaktické chyby.
+Existující nesouvisející diagnostiky v `DatabaseManager` a aplikaci
+nebyly plošně opravovány. Nebyly použity osobní transakce ani živé API.
+API/archivní třída, databázové schéma a dividendová identita se nemění.
+Pokračování etapou 5 vyžaduje další výslovný pokyn.
 
 #### Etapa 5 — dividendová identita a staré časové údaje
 

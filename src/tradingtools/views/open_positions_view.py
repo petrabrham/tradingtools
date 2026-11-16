@@ -126,9 +126,8 @@ class OpenPositionsView(BaseView):
             return
 
         try:
-            # Update repository connection if needed
-            if not self.trades_repo.conn:
-                self.trades_repo.conn = self.db.conn
+            if self.trades_repo.conn is not self.db.conn:
+                self.trades_repo = TradesRepository(self.db.conn)
             
             # Get open positions from database using aggregation
             # Only pass end_timestamp since we want all purchases from beginning up to this date

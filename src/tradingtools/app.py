@@ -133,21 +133,39 @@ class TradingToolsApp:
                 meta = self.db.import_dataframe(df)
                 self.filter_manager.update_year_list()
             except Exception as e:
+                self.db.logger.exception("CSV import failed")
                 messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")
+                self.update_views()
+                return
 
             self.update_views()
 
             message = (
-                f"Records imported: {meta['records']}\n"
+                f"Records processed: {meta['processed']} / {meta['records']}\n"
                 f"Read / Added counts:\n"
                 f"  Buy:         {meta['read']['buy']} / {meta['added'].get('buy', 0)}\n"
                 f"  Sell:        {meta['read']['sell']} / {meta['added'].get('sell', 0)}\n"
                 f"  Interest:    {meta['read']['interest']} / {meta['added']['interest']}\n"
                 f"  Dividend:    {meta['read']['dividend']} / {meta['added'].get('dividend', 0)}\n"
                 f"  Other:       {meta['read']['insignificant']} / -\n"
-                f"  Unknown:     {meta['read']['unknown']} / -"
+                f"  Unknown:     {meta['read']['unknown']} / -\n"
+                f"Duplicates: {sum(meta['duplicates'].values())}\n"
+                f"Failed: {len(meta['errors'])}"
             )
-            messagebox.showinfo("Success", message)
+            if meta["unknown_actions"]:
+                message += "\nUnsupported actions:\n" + "\n".join(
+                    f"  {action}: {count}" for action, count in meta["unknown_actions"].items()
+                )
+            if meta["errors"]:
+                message += "\nFirst errors:\n" + "\n".join(
+                    f"  Row {issue['row']} ({issue['action']}): {issue['message']}"
+                    for issue in meta["errors"][:5]
+                )
+                message += "\nSee the log for all errors."
+            if meta["status"] == "complete":
+                messagebox.showinfo("Success", message)
+            else:
+                messagebox.showwarning("Import incomplete", message)
 
 
     def create_database(self):

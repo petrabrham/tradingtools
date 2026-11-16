@@ -2,8 +2,12 @@ import sqlite3
 import os
 
 import time
+import math
+from numbers import Real
+from copy import deepcopy
 from datetime import datetime
-from typing import Optional, Tuple, Dict, List
+from threading import Event
+from typing import Optional, Tuple, Dict, List, Iterator, Literal, TypedDict
 import pandas as pd
 from tradingtools.config.cnb_rate import cnb_rate
 import logging
@@ -15,6 +19,25 @@ from tradingtools.db.repositories.trades import TradesRepository, TradeType
 from tradingtools.db.repositories.pairings import PairingsRepository
 from tradingtools.db.decorators import requires_connection, requires_repo
 
+
+class ImportIssue(TypedDict):
+    row: int
+    action: str
+    message: str
+
+
+class ImportResult(TypedDict):
+    records: int
+    columns: List[str]
+    processed: int
+    status: Literal["running", "complete", "partial", "cancelled"]
+    read: Dict[str, int]
+    added: Dict[str, int]
+    duplicates: Dict[str, int]
+    failed: Dict[str, int]
+    errors: List[ImportIssue]
+    unknown_actions: Dict[str, int]
+    skipped_actions: Dict[str, int]
 
 
 
@@ -292,324 +315,177 @@ class DatabaseManager:
     ###########################################################################
     ## Importing DataFrames and managing tables
     ###########################################################################
-    def import_dataframe(self, df: pd.DataFrame) -> Dict[str, object]:
-        """Import a pandas DataFrame into the open DB as table_name.
+    def import_dataframe(
+        self, df: pd.DataFrame, *, cancel_event: Event | None = None,
+    ) -> ImportResult:
+        """Import all rows and return the final cumulative result."""
+        for result in self.import_dataframe_batches(df, cancel_event=cancel_event):
+            if result["status"] != "running":
+                return result
+        raise RuntimeError("CSV import did not produce a final result")
 
-        Returns metadata dict: { 'table': str, 'records': int, 'columns': List[str] }
-        """
+    def import_dataframe_batches(
+        self, df: pd.DataFrame, *, batch_size: int = 100,
+        cancel_event: Event | None = None,
+    ) -> Iterator[ImportResult]:
+        """Yield cumulative snapshots between execution batches; rows commit separately."""
         if not self.conn:
             self.logger.error("Attempted to import DataFrame without database connection")
             raise RuntimeError("No open database to import into")
-            
-        self.logger.info(f"Starting import of DataFrame with {len(df)} rows")
+        if type(batch_size) is not int or batch_size <= 0:
+            self.logger.error("Invalid CSV import batch size")
+            raise ValueError("CSV import batch size must be a positive integer")
+        if (
+            not df.columns.is_unique or "Action" not in df.columns
+            or not ("Time" in df.columns or "Time (UTC)" in df.columns)
+        ):
+            self.logger.error("CSV import requires unique columns, Action and Time or Time (UTC)")
+            raise ValueError("CSV import requires unique columns, Action and Time or Time (UTC)")
 
-        # Counters for read rows from CSV
-        read_buy = 0
-        read_sell = 0
-        read_interest = 0
-        read_dividend = 0
-        read_insignificant = 0
-        read_unknown = 0
-
-        # Counters for successfully added records
-        added_buy = 0
-        added_sell = 0
-        added_interest = 0
-        added_dividend = 0
-
-        for index, row in df.iterrows():
-            # Safe access to columns whether row is Series or dict-like
-            action = row.get('Action') if hasattr(row, 'get') else row['Action']
-            time_str = None
-            if hasattr(row, 'get'):
-                # Broker exports use either legacy "Time" or newer "Time (UTC)".
-                time_str = row.get('Time') or row.get('Time (UTC)')
-            else:
-                time_str = row['Time'] if 'Time' in row else row['Time (UTC)']
-
-            # Try to convert time string to timestamp for logging
-            ts = None
-            if time_str:
-                try:
-                    ts = DatabaseManager.timestr_to_timestamp(time_str)
-                except ValueError:
-                    ts = None
-
-            # Process row based on action type
-            if action in ("Market buy", "Limit buy", "Stock split open"):
-                read_buy += 1
-                
-                # Parse using the exact CSV column names provided
-                try:
-                    isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
-                    ticker = row.get('Ticker') if hasattr(row, 'get') else row['Ticker']
-                    name = row.get('Name') if hasattr(row, 'get') else row['Name']
-                    id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
-                    number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
-                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    total = -total
-                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
-                    stamp_tax = -stamp_tax
-                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
-                    conversion_fee = -conversion_fee
-                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
-                    french_transaction_tax = -french_transaction_tax
-
-                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
-
-                    # Require ISIN and id_string at minimum for trades
-                    if not isin or not id_string:
-                        self.logger.warning(f"Row {index}: missing ISIN or ID for trade, skipping")
-                    else:
-                        try:
-                            rowid = self.insert_trade(
-                                timestamp=ts,
-                                isin=isin,
-                                ticker=ticker,
-                                name=name,
-                                id_string=id_string,
-                                trade_type=TradeType.BUY,
-                                number_of_shares=number_of_shares,
-                                price_for_share=price_for_share,
-                                currency_of_price=currency_of_price,
-                                total=total,
-                                currency_of_total=currency_of_total,
-                                stamp_tax=stamp_tax,
-                                currency_of_stamp_tax=currency_of_stamp_tax,
-                                conversion_fee=conversion_fee,
-                                currency_of_conversion_fee=currency_of_conversion_fee,
-                                french_transaction_tax=french_transaction_tax,
-                                currency_of_french_transaction_tax=currency_of_french_transaction_tax
-                            )
-                            if rowid:
-                                added_buy += 1
-                        except Exception as e:
-                            self.logger.exception(f"Failed to insert buy trade for row {index}: {e}")
-                except Exception as e:
-                    self.logger.exception(f"Error parsing buy row {index}: {e}")
-
-            elif action in ("Market sell", "Limit sell", "Stock split close"):
-                read_sell += 1
-
-                # Parse using the exact CSV column names for sells (same as buys)
-                try:
-                    isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
-                    ticker = row.get('Ticker') if hasattr(row, 'get') else row['Ticker']
-                    name = row.get('Name') if hasattr(row, 'get') else row['Name']
-                    id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
-                    number_of_shares = -1 * float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
-                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    stamp_tax, currency_of_stamp_tax = DatabaseManager.safe_csv_read(row, 'Stamp duty reserve tax', 'Currency (Stamp duty reserve tax)')
-                    stamp_tax = -stamp_tax
-                    conversion_fee, currency_of_conversion_fee = DatabaseManager.safe_csv_read(row, 'Currency conversion fee', 'Currency (Currency conversion fee)')
-                    conversion_fee = -conversion_fee
-                    french_transaction_tax, currency_of_french_transaction_tax = DatabaseManager.safe_csv_read(row, 'French transaction tax', 'Currency (French transaction tax)')
-                    french_transaction_tax = -french_transaction_tax
-
-                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {price_for_share} {currency_of_price})")
-
-                    if not isin or not id_string:
-                        self.logger.warning(f"Row {index}: missing ISIN or ID for trade, skipping")
-                    else:
-                        try:
-                            rowid = self.insert_trade(
-                                timestamp=ts,
-                                isin=isin,
-                                ticker=ticker,
-                                name=name,
-                                id_string=id_string,
-                                trade_type=TradeType.SELL,
-                                number_of_shares=number_of_shares,
-                                price_for_share=price_for_share,
-                                currency_of_price=currency_of_price,
-                                total=total,
-                                currency_of_total=currency_of_total,
-                                stamp_tax=stamp_tax,
-                                currency_of_stamp_tax=currency_of_stamp_tax,
-                                conversion_fee=conversion_fee,
-                                currency_of_conversion_fee=currency_of_conversion_fee,
-                                french_transaction_tax=french_transaction_tax,
-                                currency_of_french_transaction_tax=currency_of_french_transaction_tax
-                            )
-                            if rowid:
-                                added_sell += 1
-                        except Exception as e:
-                            self.logger.exception(f"Failed to insert sell trade for row {index}: {e}")
-                except Exception as e:
-                    self.logger.exception(f"Error parsing sell row {index}: {e}")
-
-            elif action in ("Interest on cash", "Lending interest"):
-                read_interest += 1
-
-                # Parse using the exact CSV column names
-                try:
-                    note = row.get('Notes') if hasattr(row, 'get') else row['Notes']    
-                    id_string = row.get('ID') if hasattr(row, 'get') else row['ID']
-                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    
-                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({total} {currency_of_total})")
-
-                    # Determine interest type
-                    if note in ("Interest on cash"):
-                        interest_type = InterestType.CASH_INTEREST
-                    elif note in ("Share lending interest"):
-                        interest_type = InterestType.LENDING_INTEREST
-                    else:
-                        interest_type = InterestType.UNKNOWN
-                    
-                    # Require ISIN and id_string at minimum for trades
-                    if not id_string:
-                        self.logger.warning(f"Row {index}: missing ID for interest, skipping")
-
-                    else:
-                        try:
-                            rowcount = self.insert_interest(
-                                timestamp = ts, 
-                                type_ = interest_type,
-                                id_string = id_string, 
-                                total = total,
-                                currency_of_total = currency_of_total
-                            )
-                            if rowcount:
-                                added_interest += 1
-                            else:
-                                # INSERT OR IGNORE may return 0 if duplicate; treat as not added
-                                pass
-                        except Exception as e:
-                            self.logger.exception(f"Failed to insert interest for row {index}: {e}")
-                except Exception as e:
-                    self.logger.exception(f"Error parsing interest row {index}: {e}")
-
-            elif action in ("Dividend (Dividend)", "Dividend (Dividend manufactured payment)"):
-                read_dividend += 1
-
-                # Attempt to extract common dividend fields from the row in a tolerant way
-                try:
-                    isin = row.get('ISIN') if hasattr(row, 'get') else row['ISIN']
-                    ticker = row.get('Ticker') if hasattr(row, 'get') else row['Ticker']
-                    name = row.get('Name') if hasattr(row, 'get') else row['Name']
-
-                    number_of_shares = float(row.get('No. of shares') if hasattr(row, 'get') else row['No. of shares'])
-                    price_for_share, currency_of_price = DatabaseManager.safe_csv_read(row, 'Price / share', 'Currency (Price / share)')
-                    total, currency_of_total = DatabaseManager.safe_csv_read(row, 'Total', 'Currency (Total)')
-                    withholding_tax = float(row.get('Withholding tax') if hasattr(row, 'get') else row['Withholding tax']) if (row.get('Withholding tax') if hasattr(row, 'get') else row['Withholding tax']) else 0.0
-                    currency_of_withholding_tax = row.get('Currency (Withholding tax)') if hasattr(row, 'get') else row['Currency (Withholding tax)']
-
-                    self.logger.info(f"Importing row {index}: {action} at {time_str} ({ticker} / {number_of_shares} / {total} {currency_of_total})")
-
-                    # Validate we have at least an ISIN and timestamp
-                    if not isin:
-                        self.logger.warning(f"Row {index}: missing ISIN, skipping dividend row")
-                    else:
-                        try:
-                            rowcount = self.insert_dividend(
-                                timestamp=ts,
-                                isin=isin,
-                                ticker=ticker,
-                                name=name,
-                                number_of_shares=number_of_shares,
-                                price_for_share=price_for_share,
-                                currency_of_price=currency_of_price,
-                                total=total,
-                                currency_of_total=currency_of_total,
-                                withholding_tax=withholding_tax,
-                                currency_of_withholding_tax=currency_of_withholding_tax
-                            )
-                            if rowcount:
-                                added_dividend += 1
-                            else:
-                                # INSERT OR IGNORE may return 0 if duplicate; treat as not added
-                                pass
-                        except Exception as e:
-                            self.logger.exception(f"Failed to insert dividend for row {index}: {e}")
-                except Exception as e:
-                    self.logger.exception(f"Error parsing dividend row {index}: {e}")
-            elif action in ("Deposit", "Currency conversion", "Card debit", "Withdrawal", "Result adjustment"):
-                read_insignificant += 1
-                self.logger.info(f"Row {index}: {action} (insignificant) at {time_str}, skipping")
-                # These are not stored in DB
-            else:
-                self.logger.warning(f"Row {index}: unknown action '{action}' at {time_str}, skipping")
-                read_unknown += 1
-
-        results = {
-            "records": int(len(df)),
-            "columns": list(df.columns),
-            "read": {
-                "buy": read_buy,
-                "sell": read_sell,
-                "interest": read_interest,
-                "dividend": read_dividend,
-                "insignificant": read_insignificant,
-                "unknown": read_unknown,
-            },
-            "added": {
-                "buy": added_buy,
-                "sell": added_sell,
-                "interest": added_interest,
-                "dividend": added_dividend,
-            },
+        categories = ("buy", "sell", "interest", "dividend")
+        result: ImportResult = {
+            "records": len(df), "columns": list(df.columns), "processed": 0, "status": "running",
+            "read": dict.fromkeys((*categories, "insignificant", "unknown"), 0),
+            "added": dict.fromkeys(categories, 0),
+            "duplicates": dict.fromkeys(categories, 0),
+            "failed": dict.fromkeys((*categories, "unknown"), 0),
+            "errors": [], "unknown_actions": {}, "skipped_actions": {},
         }
-        
+        self.logger.info("Starting import of DataFrame with %d rows", len(df))
+        for position, (_, row) in enumerate(df.iterrows(), start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                result["status"] = "cancelled"
+                break
+            action = ""
+            category = "unknown"
+            try:
+                action = self._csv_text(row, "Action", required=True)
+                category = self._csv_category(action)
+                result["read"][category] += 1
+                if category in ("unknown", "insignificant"):
+                    counts = result["unknown_actions"] if category == "unknown" else result["skipped_actions"]
+                    counts[action] = counts.get(action, 0) + 1
+                    if category == "unknown":
+                        self.logger.warning("Row %d: unsupported action '%s', skipping", position, action)
+                    else:
+                        self.logger.info("Row %d: %s (insignificant), skipping", position, action)
+                else:
+                    inserted = self._import_csv_row(row, category)
+                    counts = result["added"] if inserted else result["duplicates"]
+                    counts[category] += 1
+            except (ValueError, TypeError, sqlite3.Error, OSError) as error:
+                if isinstance(error, sqlite3.Error) and self.conn is not None:
+                    self.conn.rollback()
+                if not action:
+                    result["read"][category] += 1
+                result["failed"][category] += 1
+                result["errors"].append({"row": position, "action": action, "message": str(error)})
+                self.logger.error("Failed to import row %d (%s): %s", position, action, error)
+            result["processed"] += 1
+            if position % batch_size == 0 and position < len(df):
+                yield deepcopy(result)
+        if result["status"] != "cancelled":
+            result["status"] = "partial" if result["errors"] or result["unknown_actions"] else "complete"
         self.logger.info(
-            "Import complete: %d records processed (%d buys, %d sells, %d interests, %d dividends, %d other)",
-            len(df), read_buy, read_sell, read_interest, read_dividend, read_insignificant + read_unknown
+            "CSV import %s: %d/%d rows processed, %d added, %d duplicates, %d failed, %d unsupported",
+            result["status"], result["processed"], result["records"],
+            sum(result["added"].values()), sum(result["duplicates"].values()),
+            len(result["errors"]), result["read"]["unknown"],
         )
-        self.logger.info(
-            "Records added to DB: %d buys, %d sells, %d interests, %d dividends",
-            added_buy, added_sell, added_interest, added_dividend
+        yield deepcopy(result)
+
+    @staticmethod
+    def _csv_category(action: str) -> str:
+        if action in ("Market buy", "Limit buy", "Stock split open"):
+            return "buy"
+        if action in ("Market sell", "Limit sell", "Stock split close"):
+            return "sell"
+        if action in ("Interest on cash", "Lending interest"):
+            return "interest"
+        if action in ("Dividend (Dividend)", "Dividend (Dividend manufactured payment)"):
+            return "dividend"
+        if action in ("Deposit", "Currency conversion", "Card debit", "Withdrawal", "Result adjustment"):
+            return "insignificant"
+        return "unknown"
+
+    @staticmethod
+    def _csv_text(row: pd.Series, key: str, *, required: bool = False) -> str:
+        raw = row.get(key)
+        if raw is None or pd.isna(raw) or raw == "":
+            if required:
+                raise ValueError(f"Missing {key}")
+            return ""
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"Invalid {key}: expected non-empty text")
+        return raw
+
+    @staticmethod
+    def _csv_number(row: pd.Series, key: str, *, required: bool = False) -> float:
+        raw = row.get(key)
+        if raw is None or pd.isna(raw) or raw == "":
+            if required:
+                raise ValueError(f"Missing {key}")
+            return 0.0
+        if isinstance(raw, bool) or not isinstance(raw, (str, Real)):
+            raise ValueError(f"Invalid numeric {key}")
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid numeric {key}") from None
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite numeric {key}")
+        return value
+
+    def _import_csv_row(self, row: pd.Series, category: str) -> int:
+        time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
+        timestamp = self.timestr_to_timestamp(time_str)
+        total, currency_of_total = self.safe_csv_read(row, "Total", "Currency (Total)", required=True)
+        self.logger.info("Importing %s at %s", category, time_str)
+        if category == "interest":
+            note = self._csv_text(row, "Notes")
+            if note == "Interest on cash":
+                interest_type = InterestType.CASH_INTEREST
+            elif note == "Share lending interest":
+                interest_type = InterestType.LENDING_INTEREST
+            else:
+                interest_type = InterestType.UNKNOWN
+            return self.insert_interest(
+                timestamp, interest_type, self._csv_text(row, "ID", required=True),
+                total, currency_of_total,
+            )
+        isin = self._csv_text(row, "ISIN", required=True)
+        ticker = self._csv_text(row, "Ticker")
+        name = self._csv_text(row, "Name")
+        number_of_shares = self._csv_number(row, "No. of shares", required=True)
+        price, currency_of_price = self.safe_csv_read(
+            row, "Price / share", "Currency (Price / share)", required=True,
         )
-        
-        return results
+        if category == "dividend":
+            tax, tax_currency = self.safe_csv_read(row, "Withholding tax", "Currency (Withholding tax)")
+            return self.insert_dividend(
+                timestamp, isin, ticker, name, number_of_shares, price, currency_of_price,
+                total, currency_of_total, tax, tax_currency,
+            )
+        id_string = self._csv_text(row, "ID", required=True)
+        stamp_tax, stamp_currency = self.safe_csv_read(row, "Stamp duty reserve tax", "Currency (Stamp duty reserve tax)")
+        fee, fee_currency = self.safe_csv_read(row, "Currency conversion fee", "Currency (Currency conversion fee)")
+        french_tax, french_currency = self.safe_csv_read(row, "French transaction tax", "Currency (French transaction tax)")
+        return self.insert_trade(
+            timestamp, isin, ticker, name, id_string,
+            TradeType.BUY if category == "buy" else TradeType.SELL,
+            number_of_shares if category == "buy" else -number_of_shares,
+            price, currency_of_price, -total if category == "buy" else total, currency_of_total,
+            -stamp_tax, stamp_currency, -fee, fee_currency, -french_tax, french_currency,
+        )
     
     @staticmethod
-    def safe_csv_read(row: pd.Series, val_key: str, curr_key: str) -> Tuple[float, str]:
-        """
-        Safely reads a numeric value and its currency from a CSV row, providing 
-        defaults (0.0 and 'CZK') for missing or invalid data.
-        
-        This replaces the complex conditional expressions for optional fields like 
-        taxes and fees.
-
-        Args:
-            row: Pandas Series or dict-like object representing the CSV row.
-            val_key: The key for the numeric value (e.g., 'Stamp duty reserve tax').
-            curr_key: The key for the currency (e.g., 'Currency (Stamp duty reserve tax)').
-
-        Returns:
-            A tuple: (float value, str currency).
-        """
-        
-        # --- Helper for safe row retrieval ---
-        def _get_raw(key):
-            # Use .get() if available (works for Series and dicts)
-            if hasattr(row, 'get'):
-                return row.get(key)
-            # Fallback for direct access
-            return row[key]
-
-        # 1. Retrieve raw values
-        raw_val = _get_raw(val_key)
-        raw_curr = _get_raw(curr_key)
-
-        # 2. Sanitize value to float
-        # Check for pandas NaN (pd.isna) or Python falsy values (e.g., None, empty string '')
-        if pd.isna(raw_val) or not raw_val:
-            return 0.0, 'CZK'
-        else:
-            # Value is present and not NaN, attempt float conversion
-            try:
-                value_out = float(raw_val)
-            except (ValueError, TypeError):
-                # Fallback if the non-empty value can't be converted (e.g., junk string)
-                value_out = 0.0
-
-        # 3. Sanitize currency to string (defaults to 'CZK')
-        currency_out = str(raw_curr or 'CZK')
-
-        return value_out, currency_out    
+    def safe_csv_read(
+        row: pd.Series, val_key: str, curr_key: str, *, required: bool = False,
+    ) -> Tuple[float, str]:
+        """Read a finite amount; only absent optional amounts default to zero/CZK."""
+        value = DatabaseManager._csv_number(row, val_key, required=required)
+        currency = DatabaseManager._csv_text(row, curr_key, required=required or value != 0)
+        return value, currency or "CZK"
 
     ###########################################################################
     ## Securities
@@ -730,6 +606,8 @@ class DatabaseManager:
         
         dt = datetime.fromtimestamp(timestamp)
         total_czk = total * self.get_exchange_rate(currency_of_total, dt)
+        if self.interests_repo is None:
+            raise RuntimeError("Interest repository is unavailable")
         return self.interests_repo.insert(timestamp, type_, id_string, total_czk)
 
     @requires_connection
@@ -774,7 +652,7 @@ class DatabaseManager:
         currency_of_total: str,
         withholding_tax: float,
         currency_of_withholding_tax: str
-    ) -> None:
+    ) -> int:
         """Insert a single dividend record.
         
         Args:
@@ -789,7 +667,10 @@ class DatabaseManager:
             currency_of_total: Currency code for total
             withholding_tax: Withholding tax in original currency
             currency_of_withholding_tax: Currency code for withholding tax
-            
+
+        Returns:
+            Number of rows inserted (1 on success, 0 for the existing timestamp/ISIN).
+
         Raises:
             sqlite3.IntegrityError: If isin_id doesn't exist in securities table
             ValueError: If timestamp is negative or any numeric value is negative
@@ -807,7 +688,9 @@ class DatabaseManager:
         isin_id = self.get_or_create_securities_id(isin, ticker, name)
 
         # Insert via repository
-        self.dividends_repo.insert(
+        if self.dividends_repo is None:
+            raise RuntimeError("Dividend repository is unavailable")
+        return self.dividends_repo.insert(
             timestamp=timestamp,
             isin_id=isin_id,
             number_of_shares=number_of_shares,
@@ -858,15 +741,12 @@ class DatabaseManager:
     ) -> int:
         """Insert a single trade record (delegates to TradesRepository).
 
-        Returns the inserted trade row id.
+        Returns the inserted trade row ID, or zero for a duplicate broker ID.
         """
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
         if not id_string:
             raise ValueError("id_string must be provided and non-empty")
-
-        # Resolve isin_id from an ISIN string
-        isin_id = self.get_or_create_securities_id(isin, ticker, name)
 
         # calculate values to CZK
         dt = datetime.fromtimestamp(timestamp)
@@ -875,7 +755,11 @@ class DatabaseManager:
         conversion_fee_czk = conversion_fee * self.get_exchange_rate(currency_of_conversion_fee, dt)
         french_transaction_tax_czk = french_transaction_tax * self.get_exchange_rate(currency_of_french_transaction_tax, dt)
 
+        isin_id = self.get_or_create_securities_id(isin, ticker, name)
+
         # Delegate actual insert to repository which returns row id
+        if self.trades_repo is None:
+            raise RuntimeError("Trade repository is unavailable")
         return self.trades_repo.insert(
             timestamp=timestamp,
             isin_id=isin_id,

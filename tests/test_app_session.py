@@ -5,6 +5,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
+import pandas as pd
 
 from tradingtools.app import TradingToolsApp
 from tradingtools.config.config_loader import ConfigLoader
@@ -155,6 +156,67 @@ class TestApplicationSession(unittest.TestCase):
         with patch("tradingtools.ui.menu_manager.tk.Menu", return_value=menu):
             MenuManager(self.app.root, self.app).create_menu()
         menu.add_command.assert_any_call(label="Exit", command=self.app.on_exit)
+
+    def test_csv_read_failure_never_shows_success_or_uses_uninitialized_result(self):
+        self.db.conn = Mock()
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.pd.read_csv", side_effect=ValueError("Invalid CSV")),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+        ):
+            self.app.open_csv_file()
+        self.showerror.assert_called_once()
+        info.assert_not_called()
+        self.db.import_dataframe.assert_not_called()
+        self.update_views.assert_called_once()
+
+    def test_csv_partial_import_shows_issues_not_success(self):
+        self.db.conn = Mock()
+        self.db.import_dataframe.return_value = {
+            "records": 4, "processed": 4, "status": "partial",
+            "read": {"buy": 1, "sell": 0, "interest": 1, "dividend": 0, "insignificant": 1, "unknown": 1},
+            "added": {"buy": 0, "sell": 0, "interest": 1, "dividend": 0},
+            "duplicates": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
+            "errors": [{"row": 2, "action": "Market buy", "message": "Missing ID"}],
+            "unknown_actions": {"ADR Fee": 1},
+        }
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.pd.read_csv", return_value=pd.DataFrame()),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+            patch("tradingtools.app.messagebox.showwarning") as warning,
+        ):
+            self.app.open_csv_file()
+        info.assert_not_called()
+        self.showerror.assert_not_called()
+        title, message = warning.call_args.args
+        self.assertEqual(title, "Import incomplete")
+        self.assertIn("Failed: 1", message)
+        self.assertIn("ADR Fee: 1", message)
+        self.assertIn("Row 2 (Market buy): Missing ID", message)
+        self.filter_manager.update_year_list.assert_called_once()
+        self.update_views.assert_called_once()
+
+    def test_csv_duplicate_only_import_still_shows_success_with_zero_added(self):
+        self.db.conn = Mock()
+        self.db.import_dataframe.return_value = {
+            "records": 1, "processed": 1, "status": "complete",
+            "read": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0, "insignificant": 0, "unknown": 0},
+            "added": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
+            "duplicates": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0},
+            "errors": [], "unknown_actions": {},
+        }
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.pd.read_csv", return_value=pd.DataFrame()),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+            patch("tradingtools.app.messagebox.showwarning") as warning,
+        ):
+            self.app.open_csv_file()
+        warning.assert_not_called()
+        self.showerror.assert_not_called()
+        self.assertEqual(info.call_args.args[0], "Success")
+        self.assertIn("Duplicates: 1", info.call_args.args[1])
 
 
 if __name__ == "__main__":

@@ -50,16 +50,17 @@ class TradesRepository(BaseRepository):
                stamp_tax_czk: float = 0.0,
                conversion_fee_czk: float = 0.0,
                french_transaction_tax_czk: float = 0.0) -> int:
-        """Insert a single trade record and return the inserted row id."""
+        """Return the inserted row ID, or zero for a duplicate broker ID."""
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
         if not id_string:
             raise ValueError("id_string must be provided and non-empty")
 
         sql = (
-            "INSERT OR IGNORE INTO trades (timestamp, isin_id, id_string, trade_type, number_of_shares, "
+            "INSERT INTO trades (timestamp, isin_id, id_string, trade_type, number_of_shares, "
             "remaining_quantity, price_for_share, currency_of_price, total_czk, stamp_tax_czk, conversion_fee_czk, "
-            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            "french_transaction_tax_czk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id_string) DO NOTHING")
         cur = self.execute(sql, (
             timestamp, isin_id, id_string, int(trade_type), number_of_shares,
             number_of_shares,  # Initialize remaining_quantity to full amount
@@ -67,6 +68,10 @@ class TradesRepository(BaseRepository):
             conversion_fee_czk, french_transaction_tax_czk
         ))
         self.commit()
+        if cur.rowcount == 0:
+            return 0
+        if cur.lastrowid is None:
+            raise RuntimeError("Trade insert returned no row ID")
         return cur.lastrowid
 
     def update_remaining_quantity(self, trade_id: int, quantity_change: float) -> None:

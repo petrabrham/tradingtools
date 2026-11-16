@@ -122,6 +122,44 @@ a newer cutoff may then request an additional report. There is no automatic
 deletion of archive history. Annual CSVs do not back up manual trade pairings,
 settings, or exchange rates; retain ordinary database backups too.
 
+## CSV import results (stage 4)
+
+`DatabaseManager.import_dataframe(df, cancel_event=None)` returns the existing
+`records`, `columns`, `read`, and `added` fields plus:
+
+- `processed`: rows actually attempted, not the number inserted.
+- `status`: `complete`, `partial` (row errors or unsupported actions), or
+  `cancelled`. Duplicates and intentionally skipped cash-flow actions do not
+  make an otherwise complete import partial.
+- `duplicates` and `failed`: category counts, separate from successful inserts.
+- `errors`: every failed row's 1-based position in the DataFrame, action, and
+  error message. Row 1 is the first data record, not the CSV header; this is
+  independent of pandas index labels.
+- `unknown_actions` and `skipped_actions`: action names and counts.
+
+`import_dataframe_batches(df, batch_size=100, cancel_event=None)` yields
+independent cumulative snapshots with `status="running"` between batches and
+one final result. Batches limit execution between yields, not transaction size:
+the existing per-row commits remain. Cancellation is checked before every row;
+an active row or exchange-rate lookup finishes first. Previously committed
+rows remain available, and the full CSV can be retried with existing deduplication.
+Iterate on the thread owning the SQLite connection. GUI scheduling and an
+interactive Cancel button are not added in stage 4.
+
+Missing mandatory values, invalid/non-finite amounts, missing currencies for
+nonzero amounts, and write/rate errors are reported instead of silently replaced
+with defaults. Absent optional fees and withholding tax still mean zero.
+Only the established unique identity conflicts are skipped as duplicates;
+other SQLite constraints produce explicit errors. A failed SQL transaction
+is rolled back before processing subsequent rows.
+
+The existing manual CSV dialog now reports duplicates, failed rows, and
+unsupported actions and warns on partial imports instead of showing Success.
+Trade signs, currency conversions, action mappings, and the legacy timestamp
+parser are preserved. Dividend deduplication still uses timestamp/ISIN, not
+broker ID; historical timestamp reconciliation remains stage 5. No automatic
+Trading 212 database import or new API menu is connected yet.
+
 ## Run tests
 
 ```powershell

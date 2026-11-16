@@ -50,6 +50,9 @@ class DividendsRepository(BaseRepository):
             gross_czk: Gross amount in CZK (before tax)
             net_czk: Net amount in CZK (after tax)
             withholding_tax_czk: Withholding tax amount in CZK
+
+        Returns:
+            Number of rows inserted (1 on success, 0 for the existing timestamp/ISIN).
             
         Raises:
             sqlite3.IntegrityError: If isin_id doesn't exist in securities table
@@ -61,10 +64,10 @@ class DividendsRepository(BaseRepository):
             raise ValueError("Numeric dividend values must be non-negative")
 
         sql = (
-            "INSERT OR IGNORE INTO dividends ("
+            "INSERT INTO dividends ("
             "timestamp, isin_id, number_of_shares, price_for_share, "
             "currency_of_price, gross_czk, net_czk, withholding_tax_czk"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(timestamp, isin_id) DO NOTHING"
         )
         
         cur = self.execute(sql, (
@@ -72,7 +75,7 @@ class DividendsRepository(BaseRepository):
             currency_of_price, gross_czk, net_czk, withholding_tax_czk
         ))
         self.commit()
-        return cur.lastrowid
+        return cur.rowcount
         
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         """Get dividends within the given timestamp range.
