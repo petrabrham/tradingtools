@@ -202,6 +202,31 @@ identical rows in one CSV (including a mix with and without IDs) are conflicts;
 a singleton repeated in separate files is treated as a duplicate. See
 [CSV import notes](docs/CSV_IMPORT_NOTES.md) for source matching details.
 
+## Standalone fees
+
+Schema **2** also includes `fees`; this extends the same backed-up **1 -> 2**
+migration, not a separate schema version. Migration creates an empty fee table:
+previously ignored fees must be supplied by importing their CSV again.
+
+Only `ADR Fee` is currently mapped to this table. It stores the timestamp, type
+(`FeeType.ADR`), optional instrument, signed original amount/currency, and signed
+CZK equivalent. `Total` and `Currency (Total)` are mandatory; `Total (Account CCY)`
+is not assumed to be CZK or used as a fallback. The selected daily/annual
+conversion mode applies. Negative charges and positive amounts retain their signs.
+Shares, price and broker ID are optional; available share/price detail is retained
+in the source identity.
+
+The `fee` category is included in import read/added/duplicate/failed counts and
+the existing import-result message. CSV identity checks also apply to fees,
+including optional-ID adoption, content/local-edit conflicts, anonymous ambiguity,
+and explicit naive/UTC reconciliation. Fee/security/source writes are atomic.
+The reconciliation helper only links existing records: for previously ignored
+fees it reports that normal CSV import is required, rather than fabricating history.
+
+These are standalone records only. Trade fees are not copied into this table.
+`Dividend adjustment` remains unsupported. Fees are **not included in financial
+or tax summaries**, and there is no new fee view or menu.
+
 ## Run tests
 
 ```powershell

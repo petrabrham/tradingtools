@@ -174,12 +174,12 @@ class TestApplicationSession(unittest.TestCase):
         self.db.conn = Mock()
         self.db.current_db_path = "synthetic.db"
         self.db.import_dataframe.return_value = {
-            "records": 4, "processed": 4, "status": "partial",
-            "read": {"buy": 1, "sell": 0, "interest": 1, "dividend": 0, "insignificant": 1, "unknown": 1},
-            "added": {"buy": 0, "sell": 0, "interest": 1, "dividend": 0},
+            "records": 5, "processed": 5, "status": "partial",
+            "read": {"buy": 1, "sell": 0, "interest": 1, "dividend": 0, "fee": 1, "insignificant": 1, "unknown": 1},
+            "added": {"buy": 0, "sell": 0, "interest": 1, "dividend": 0, "fee": 1},
             "duplicates": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
             "errors": [{"row": 2, "action": "Market buy", "message": "Missing ID"}],
-            "unknown_actions": {"ADR Fee": 1},
+            "unknown_actions": {"Dividend adjustment": 1},
         }
         with (
             patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
@@ -193,7 +193,8 @@ class TestApplicationSession(unittest.TestCase):
         title, message = warning.call_args.args
         self.assertEqual(title, "Import incomplete")
         self.assertIn("Failed: 1", message)
-        self.assertIn("ADR Fee: 1", message)
+        self.assertIn("Dividend adjustment: 1", message)
+        self.assertIn("Fee:         1 / 1", message)
         self.assertIn("Row 2 (Market buy): Missing ID", message)
         self.filter_manager.update_year_list.assert_called_once()
         self.update_views.assert_called_once()

@@ -48,12 +48,13 @@ class TestCSVImport(unittest.TestCase):
             self.row("Interest on cash"),
             self.row("Lending interest", Notes="Share lending interest"),
             self.row("Dividend (Dividend)"),
+            self.row("ADR Fee", Total=-3),
         ]
         df = pd.DataFrame(rows)
         first = self.db.import_dataframe(df)
-        self.assertEqual(first["added"], {"buy": 1, "sell": 1, "interest": 2, "dividend": 1})
+        self.assertEqual(first["added"], {"buy": 1, "sell": 1, "interest": 2, "dividend": 1, "fee": 1})
         second = self.db.import_dataframe(df)
-        self.assertEqual(second["added"], {"buy": 0, "sell": 0, "interest": 0, "dividend": 0})
+        self.assertEqual(second["added"], {"buy": 0, "sell": 0, "interest": 0, "dividend": 0, "fee": 0})
         self.assertEqual(second["duplicates"], first["added"])
         trades = self.conn.execute(
             "SELECT number_of_shares,total_czk,stamp_tax_czk,conversion_fee_czk,"
@@ -64,6 +65,8 @@ class TestCSVImport(unittest.TestCase):
             "SELECT gross_czk,net_czk,withholding_tax_czk FROM dividends"
         ).fetchone(), (22, 20, 2))
         self.assertEqual(self.count("interests"), 2)
+        self.assertEqual(self.count("fees"), 1)
+        self.assertEqual(self.conn.execute("SELECT amount,total_czk FROM fees").fetchone(), (-3, -6))
 
     def test_errors_and_unknown_actions_are_not_success_or_duplicates(self):
         df = pd.DataFrame([

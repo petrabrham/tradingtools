@@ -5,9 +5,9 @@
 - Import supports both time column variants:
   - `Time`
   - `Time (UTC)`
-- The `Total (Account CCY)` column is currently ignored on import.
-  - In current samples, it appears with `ADR Fee` entries.
-  - This is intentional for now and does not block import.
+- `ADR Fee` uses `Total` and `Currency (Total)` as its original amount/currency.
+  `Total (Account CCY)` is not used as a fallback: its currency must not be
+  inferred to be CZK. Missing required amount/currency is an explicit row error.
 
 ## Ignored transaction actions
 
@@ -22,14 +22,38 @@ Current "insignificant" actions:
 
 Any other unsupported action is treated as unknown, logged, and skipped.
 
-Example actions seen in 2026 export that are currently skipped as unknown:
-- `ADR Fee`
+Example action seen in 2026 export that is currently skipped as unknown:
 - `Dividend adjustment`
 
 ## Notes
 
 - This behavior is currently expected and intentional.
-- If needed later, `ADR Fee` can be mapped to a dedicated stored type or a fee table.
+- Other standalone fee types require an explicit mapping before they can be imported.
+
+## Standalone ADR fees
+
+- Schema 2 includes `fees` with type `FeeType.ADR`, timestamp, nullable instrument,
+  signed original amount/currency and signed `total_czk`. It is created both for
+  new databases and within the existing backed-up 1 -> 2 migration. No schema 3
+  or automatic copying from trade-fee fields is introduced.
+- Only `ADR Fee` is recognized as a standalone fee. Its exported sign is preserved
+  and the selected daily/annual conversion method supplies its CZK value.
+  A missing instrument, broker ID, share count or price is allowed.
+- Optional share/price detail is part of the canonical source when available;
+  broker-computed account totals are not identity or conversion inputs.
+- Fee rows use shared source identities and immutable snapshots, not a unique
+  timestamp/instrument constraint. Different IDs may identify separate events.
+  Same-ID changes, local edits, ambiguous no-ID matches and indistinguishable
+  groups containing missing IDs are conflicts, not silently discarded fees.
+  An anonymous singleton repeated in separate files is treated as a duplicate.
+- Category `fee` appears in read/added/duplicate/failed counts and the existing
+  import-result message. A fee, its new security and its source commit together.
+- Historical ignored rows are not recovered by schema migration. Reimport the
+  CSV to add them. Source reconciliation can link already stored fee rows with
+  confirmed timezones, but reports a conflict instructing normal import when no
+  historical fee record exists.
+- No new GUI view/menu or financial/tax aggregation is provided. Fees on trades
+  remain only on trades, and `Dividend adjustment` is not treated as a fee.
 
 ## Identity and historical time reconciliation (schema 2)
 

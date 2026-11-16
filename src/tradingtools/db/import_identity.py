@@ -11,7 +11,7 @@ class ImportConflict(ValueError):
 
 
 class ImportIdentity:
-    TABLES = {"buy": "trades", "sell": "trades", "interest": "interests", "dividend": "dividends"}
+    TABLES = {"buy": "trades", "sell": "trades", "interest": "interests", "dividend": "dividends", "fee": "fees"}
     SCHEMA = (
         "CREATE TABLE IF NOT EXISTS csv_identities ("
         "category TEXT NOT NULL, record_id INTEGER NOT NULL, broker_id TEXT, "
@@ -102,7 +102,7 @@ class ImportIdentity:
                     (broker_id, category, record[0]),
                 )
             return record[0]
-        if category != "dividend":
+        if category not in ("dividend", "fee"):
             # Trades keep buy/sell in separate counters, but broker IDs span both.
             if category in ("buy", "sell"):
                 opposite = "sell" if category == "buy" else "buy"
@@ -113,26 +113,26 @@ class ImportIdentity:
                     raise ImportConflict("A broker trade ID changed its action")
             return None
 
-        # Never infer the original timezone of an old dividend from a nearby timestamp.
+        # A nearby timestamp is only an ambiguity guard, never a timezone correction.
         source_time = str(source["time"])
         if source_time.startswith("naive:"):
             center = int(datetime.fromisoformat(source_time[6:]).timestamp())
         else:
             center = int(datetime.fromisoformat(source_time).timestamp())
         nearby = self.conn.execute(
-            "SELECT d.id,i.broker_id,i.source,i.stored FROM dividends d "
-            "JOIN securities s ON s.id=d.isin_id "
-            "LEFT JOIN csv_identities i ON i.category='dividend' AND i.record_id=d.id "
-            "WHERE s.isin=? AND d.timestamp BETWEEN ? AND ?",
-            (source["ISIN"], center - 26 * 3600, center + 26 * 3600),
+            f"SELECT d.id,i.broker_id,i.source,i.stored FROM {self.TABLES[category]} d "
+            "LEFT JOIN securities s ON s.id=d.isin_id "
+            "LEFT JOIN csv_identities i ON i.category=? AND i.record_id=d.id "
+            "WHERE s.isin IS ? AND d.timestamp BETWEEN ? AND ?",
+            (category, source["ISIN"], center - 26 * 3600, center + 26 * 3600),
         ).fetchall()
         for record in nearby:
             if record[2] is None:
-                raise ImportConflict("Legacy dividend requires reconciliation with its original CSV")
+                raise ImportConflict(f"Legacy {category} requires reconciliation with its original CSV")
             previous = json.loads(record[2])
             if str(previous["time"]).startswith("naive:") != source_time.startswith("naive:"):
-                raise ImportConflict("Legacy dividend timezone requires explicit source CSV reconciliation")
+                raise ImportConflict(f"Legacy {category} timezone requires explicit source CSV reconciliation")
             if previous["time"] == source["time"] and previous["Action"] == source["Action"]:
                 if broker_id is None or record[1] is None:
-                    raise ImportConflict("Different dividend content without distinct broker IDs is ambiguous")
+                    raise ImportConflict(f"Different {category} content without distinct broker IDs is ambiguous")
         return None

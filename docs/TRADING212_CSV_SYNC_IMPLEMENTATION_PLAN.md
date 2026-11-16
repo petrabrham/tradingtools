@@ -660,6 +660,31 @@ spouštění API synchronizace z GUI.
   Pylance: nové moduly bez chyb, změněné podpisy kompatibilní s volajícími;
   existující nesouvisející diagnostiky DB manageru nejsou součástí opravy.
 
+#### Doplnění etapy 5 — samostatné ADR poplatky
+
+Na výslovný pokyn uživatele rozšířeno stejné **schéma 2** a migrace **1 → 2**:
+žádná databáze verze 2 dosud neexistuje, proto není zaváděna verze 3.
+
+- Nová tabulka `fees` a `FeesRepository` uchovávají ADR typ, čas, volitelný
+  instrument, původní částku/měnu a přepočet do CZK. `Total` a
+  `Currency (Total)` jsou povinné; znaménko zůstává zachováno. Použije se
+  vybraný denní/roční kurz, nikoli odhad měny `Total (Account CCY)`.
+- Import `ADR Fee` nevyžaduje broker ID, cenu ani počet kusů. Sdílí zdrojové
+  identity, explicitní konflikty, ochranu lokálních změn, řízené časové
+  reconciliation a atomický zápis poplatku/instrumentu/zdroje.
+- Chybějící historické poplatky se doplní běžným opakovaným importem CSV;
+  migrace je nevymýšlí a reconciliation bez existujícího záznamu vrací
+  výslovný konflikt s pokynem k importu. Nerozlišitelné anonymní skupiny se
+  neslučují; singleton opakovaný v různých souborech je duplicita.
+- `fee` má vlastní importní počty a řádek ve stávajícím výsledku importu.
+  Žádné nové GUI, finanční/daňové souhrny ani přenos existujících poplatků
+  z obchodů. `Dividend adjustment` nadále není poplatek ani podporovaný import.
+- Vytvoření `fees` je součástí transakce před zápisem verze 2; chyba vrací
+  zpět i dividendovou migraci. Zachována záloha, historická ID, hodnoty a párování.
+- Cílené ověření rozšířeno na **166 offline testů**, včetně poplatků,
+  deduplikace/konfliktů, kurzů, zrušení/opakování, časových pásem a rollbacku.
+  Pracovní databáze ani reálné Trading212 API nebyly použity.
+
 #### Etapa 6 — propojení s GUI a kompletní synchronizační průběh
 
 **Stav:** čeká. **Předpoklady:** etapy 1–5.

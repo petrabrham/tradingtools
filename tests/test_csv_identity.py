@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ import pandas as pd
 from tradingtools.db.dbmanager import DatabaseManager
 from tradingtools.db.import_identity import ImportIdentity
 from tradingtools.db.repositories.dividends import DividendsRepository
+from tradingtools.db.repositories.fees import FeesRepository
 
 
 class TestCSVIdentity(unittest.TestCase):
@@ -72,6 +74,7 @@ class TestCSVIdentity(unittest.TestCase):
 
     def downgrade(self):
         self.conn.execute("DROP TABLE csv_identities")
+        self.conn.execute("DROP TABLE fees")
         old_sql = DividendsRepository.TABLE_SQL.replace(
             "FOREIGN KEY", "UNIQUE(timestamp,isin_id), FOREIGN KEY",
         )
@@ -107,6 +110,7 @@ class TestCSVIdentity(unittest.TestCase):
             legacy.close()
         self.db.open_database(str(self.path))
         self.assertEqual(self.db.get_db_version(), 2)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM fees").fetchone()[0], 0)
         for table, rows in before.items():
             self.assertEqual(self.conn.execute(f"SELECT * FROM {table}").fetchall(), rows)
         backups = list(self.directory.glob("*.bak"))
@@ -188,7 +192,7 @@ class TestCSVIdentity(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 2)
 
     def test_same_id_changed_financial_content_is_conflict_for_all_categories(self):
-        for action in ("Market buy", "Market sell", "Interest on cash", "Dividend (Dividend)"):
+        for action in ("Market buy", "Market sell", "Interest on cash", "Dividend (Dividend)", "ADR Fee"):
             with self.subTest(action=action):
                 row = self.utc(self.row(action, ID=action))
                 self.assertEqual(sum(self.import_rows([row])["added"].values()), 1)
@@ -355,6 +359,145 @@ class TestCSVIdentity(unittest.TestCase):
         self.assertEqual(result["duplicates"]["dividend"], 1)
         self.assertEqual(self.conn.execute("SELECT broker_id FROM csv_identities").fetchone()[0], "newly-provided")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 1)
+
+    @staticmethod
+    def fee_row(**values):
+        return {
+            "Action": "ADR Fee", "Time (UTC)": "2024-06-01 12:00:00+00:00",
+            "ISIN": "US0000000001", "Total": -2, "Currency (Total)": "USD",
+            "Total (Account CCY)": -999, **values,
+        }
+
+    def test_fee_migration_failure_rolls_back_dividend_and_identity_changes(self):
+        self.seed_legacy(self.row())
+        self.downgrade()
+        with (
+            patch.object(FeesRepository, "TABLE_SQL", "INVALID SQL"),
+            self.assertLogs(self.logger, level="ERROR"), self.assertRaises(sqlite3.Error),
+        ):
+            self.db.open_database(str(self.path))
+        original = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(original.execute("SELECT MAX(version) FROM versions").fetchone()[0], 1)
+            self.assertEqual(original.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 1)
+            self.assertIn("UNIQUE", original.execute(
+                "SELECT sql FROM sqlite_master WHERE name='dividends'"
+            ).fetchone()[0])
+            self.assertFalse(original.execute(
+                "SELECT name FROM sqlite_master WHERE name IN ('fees','csv_identities')"
+            ).fetchall())
+        finally:
+            original.close()
+        self.assertEqual(len(list(self.directory.glob("*.bak"))), 1)
+
+    def test_fee_import_keeps_original_signed_amount_and_uses_selected_conversion(self):
+        row = self.fee_row()
+        result = self.import_rows([row])
+        self.assertEqual(result["added"]["fee"], 1)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(self.conn.execute(
+            "SELECT amount,currency,total_czk FROM fees"
+        ).fetchone(), (-2, "USD", -4))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0)
+        self.assertEqual(self.import_rows([row])["duplicates"]["fee"], 1)
+        self.db.use_annual_rates = True
+        self.db.create_annual_rates_table()
+        self.db.insert_annual_rate(2024, "USD", 1, 25)
+        with patch.object(self.db, "get_exchange_rate", wraps=DatabaseManager.get_exchange_rate.__get__(self.db)):
+            refund = self.import_rows([self.fee_row(ID="refund", Total=3, **{"Time (UTC)": "2024-06-02 12:00:00+00:00"})])
+        self.assertEqual(refund["added"]["fee"], 1)
+        self.assertEqual(self.conn.execute("SELECT amount,total_czk FROM fees ORDER BY id DESC").fetchone(), (3, 75))
+
+    def test_fee_instrument_is_optional_but_amount_currency_cannot_be_guessed(self):
+        row = self.fee_row(ISIN=None)
+        self.assertEqual(self.import_rows([row])["added"]["fee"], 1)
+        self.assertIsNone(self.conn.execute("SELECT isin_id FROM fees").fetchone()[0])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM securities").fetchone()[0], 0)
+        for changes in ({"Total": None}, {"Currency (Total)": ""}, {"Total": float("inf")}):
+            with self.subTest(changes=changes), self.assertLogs(self.logger, level="ERROR"):
+                result = self.import_rows([{**row, **changes}])
+            self.assertEqual(result["failed"]["fee"], 1)
+            self.assertEqual(result["status"], "partial")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM fees").fetchone()[0], 1)
+
+    def test_fee_identified_events_remain_distinct_and_anonymous_match_cannot_choose(self):
+        row = self.fee_row()
+        rows = [{**row, "ID": "one"}, {**row, "ID": "two"}]
+        self.assertEqual(self.import_rows(rows)["added"]["fee"], 2)
+        self.assertEqual(self.import_rows(rows)["duplicates"]["fee"], 2)
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([row])
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM fees").fetchone()[0], 2)
+
+    def test_fee_anonymous_and_mixed_indistinguishable_input_is_not_collapsed(self):
+        row = self.fee_row()
+        for rows in ([row, row], [row, {**row, "ID": "one"}]):
+            with self.subTest(rows=len(rows)), self.assertLogs(self.logger, level="ERROR"):
+                result = self.import_rows(rows)
+            self.assertEqual(len(result["conflicts"]), 2)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM fees").fetchone()[0], 0)
+
+    def test_fee_id_adoption_and_local_edit_protection(self):
+        row = self.fee_row()
+        self.import_rows([row])
+        self.assertEqual(self.import_rows([{**row, "ID": "fee-one"}])["duplicates"]["fee"], 1)
+        self.conn.execute("UPDATE fees SET amount=-99")
+        self.conn.commit()
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([{**row, "ID": "fee-one"}])
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(self.conn.execute("SELECT amount FROM fees").fetchone()[0], -99)
+
+    def test_fee_source_failure_rolls_back_fee_and_new_security(self):
+        with (
+            patch.object(ImportIdentity, "remember", side_effect=sqlite3.OperationalError("disk error")),
+            self.assertLogs(self.logger, level="ERROR"),
+        ):
+            result = self.import_rows([self.fee_row()])
+        self.assertEqual(result["failed"]["fee"], 1)
+        for table in ("fees", "securities", "csv_identities"):
+            self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+
+    def test_fee_cancellation_and_retry_keep_committed_rows_and_counts(self):
+        rows = [self.fee_row(**{"Time (UTC)": f"2024-06-01 {hour}:00:00+00:00"}) for hour in (12, 13, 14)]
+        cancel = Event()
+        batches = self.db.import_dataframe_batches(pd.DataFrame(rows), batch_size=1, cancel_event=cancel)
+        self.assertEqual(next(batches)["added"]["fee"], 1)
+        cancel.set()
+        self.assertEqual(list(batches)[-1]["status"], "cancelled")
+        retried = self.import_rows(rows)
+        self.assertEqual(retried["added"]["fee"], 2)
+        self.assertEqual(retried["duplicates"]["fee"], 1)
+
+    def test_fee_timezone_reconciliation_preserves_rows_and_recognizes_both_formats(self):
+        old = {key: value for key, value in self.fee_row(ISIN=None).items() if key != "Time (UTC)"}
+        old["Time"] = "2024-06-01 12:00:00"
+        timestamp = int(datetime.fromisoformat(old["Time"]).replace(tzinfo=ZoneInfo("Europe/Prague")).timestamp())
+        with patch.object(DatabaseManager, "timestr_to_timestamp", return_value=timestamp):
+            self.import_rows([old])
+        before = self.conn.execute("SELECT * FROM fees").fetchall()
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(old)])
+        self.assertEqual(len(result["conflicts"]), 1)
+        linked = self.db.reconcile_legacy_dataframe(
+            pd.DataFrame([old]), source_timezone="UTC", imported_timezone="Europe/Prague",
+        )
+        self.assertEqual(linked["linked"], 1)
+        for row in (old, self.utc(old)):
+            self.assertEqual(self.import_rows([row])["duplicates"]["fee"], 1)
+        self.assertEqual(self.conn.execute("SELECT * FROM fees").fetchall(), before)
+
+    def test_previously_ignored_fee_requires_import_not_fabricated_reconciliation(self):
+        row = self.fee_row()
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.db.reconcile_legacy_dataframe(
+                pd.DataFrame([row]), source_timezone="UTC", imported_timezone="Europe/Prague",
+            )
+        self.assertEqual(result["linked"], 0)
+        self.assertIn("import its original CSV normally", result["conflicts"][0]["message"])
+        self.assertEqual(self.import_rows([row])["added"]["fee"], 1)
 
 
 if __name__ == "__main__":

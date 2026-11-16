@@ -145,6 +145,7 @@ class TradingToolsApp:
                 f"  Sell:        {meta['read']['sell']} / {meta['added'].get('sell', 0)}\n"
                 f"  Interest:    {meta['read']['interest']} / {meta['added']['interest']}\n"
                 f"  Dividend:    {meta['read']['dividend']} / {meta['added'].get('dividend', 0)}\n"
+                f"  Fee:         {meta['read'].get('fee', 0)} / {meta['added'].get('fee', 0)}\n"
                 f"  Other:       {meta['read']['insignificant']} / -\n"
                 f"  Unknown:     {meta['read']['unknown']} / -\n"
                 f"Duplicates: {sum(meta['duplicates'].values())}\n"
