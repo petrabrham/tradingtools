@@ -148,7 +148,8 @@ class TradingToolsApp:
                 f"  Other:       {meta['read']['insignificant']} / -\n"
                 f"  Unknown:     {meta['read']['unknown']} / -\n"
                 f"Duplicates: {sum(meta['duplicates'].values())}\n"
-                f"Failed: {len(meta['errors'])}"
+                f"Failed: {len(meta['errors'])}\n"
+                f"Conflicts: {len(meta.get('conflicts', []))}"
             )
             if meta["unknown_actions"]:
                 message += "\nUnsupported actions:\n" + "\n".join(

@@ -233,7 +233,7 @@ class TestCSVImport(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT timestamp FROM trades").fetchone()[0],
                          self.db.timestr_to_timestamp("2024-06-01 12:00:00+00:00"))
 
-    def test_annual_mode_and_existing_dividend_identity_remain_unchanged(self):
+    def test_annual_mode_and_distinct_dividend_actions(self):
         with patch.object(self.db, "get_exchange_rate", wraps=DatabaseManager.get_exchange_rate.__get__(self.db)):
             self.db.use_annual_rates = True
             self.db.create_annual_rates_table()
@@ -244,8 +244,8 @@ class TestCSVImport(unittest.TestCase):
                 self.row("Dividend (Dividend manufactured payment)", ID="other-dividend"),
             ])
             result = self.db.import_dataframe(df)
-        self.assertEqual(result["added"]["dividend"], 1)
-        self.assertEqual(result["duplicates"]["dividend"], 1)
+        self.assertEqual(result["added"]["dividend"], 2)
+        self.assertEqual(result["duplicates"]["dividend"], 0)
         self.assertEqual(self.conn.execute(
             "SELECT gross_czk,net_czk,withholding_tax_czk FROM dividends"
         ).fetchone(), (250, 250, 0))

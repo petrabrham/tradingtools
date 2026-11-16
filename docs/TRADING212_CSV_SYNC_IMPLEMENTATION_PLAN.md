@@ -1,7 +1,7 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapy 1–4 dokončeny, etapa 5 čeká na potvrzení.
+Stav: etapová implementace; etapy 1–5 dokončeny, etapa 6 čeká na pokyn.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -610,8 +610,9 @@ nezapojuje Trading212 menu ani neposouvá dividendovou migraci etapy 5.
 
 #### Etapa 5 — dividendová identita a staré časové údaje
 
-**Stav:** čeká. **Předpoklad:** etapa 4 a odsouhlasení konkrétního
-postupu migrace/reconciliation před změnou historických dat.
+**Stav:** dokončena. Uživatel odsouhlasil „konzervativní migraci a explicitní
+konflikty“. Implementace ověřena na syntetických databázích; pracovní databáze
+nebyla migrována ani nebylo voláno reálné Trading212 API.
 
 - Ověřit a doplnit stabilní identitu dividend z CSV, pokud ji export
   poskytuje; odlišit legitimní výplaty stejného času a instrumentu.
@@ -628,6 +629,36 @@ shoda. Žádné nové duplicity ani ztráta historických dat/párování.
 
 **Hranice etapy:** bezpečnost lokálních importů; stále bez automatického
 spouštění API synchronizace z GUI.
+
+**Výsledek implementace:**
+
+- Schéma 2 ukládá zdrojovou identitu a snapshot lokální transakce. Broker ID
+  se využije, pokud existuje; jeho dostupnost sama nedokazuje stabilitu
+  napříč exporty. Dividendy s rozdílnými ID mohou sdílet čas a instrument.
+- Otevření schématu 1 automaticky vytvoří vedle DB zálohu
+  `<filename>.pre-v2-<random>.bak`, pak provede transakční migraci. Zachová
+  původní hodnoty, ID, indexy, AUTOINCREMENT i párování. Chyba zálohy migraci
+  blokuje; SQL chyba vše vrátí zpět. Vlastní dividendové triggery vyžadují
+  ruční řešení. Záloha obsahuje citlivá data a musí být stejně chráněna jako DB.
+  Starší aplikace schéma 2 neotevře; pro návrat slouží původní záloha.
+- `reconcile_legacy_dataframe(df, source_timezone=..., imported_timezone=...)`
+  vyžaduje původní CSV a obě výslovně určená pásma. Prokazuje shodu včetně
+  původních přepočtů (`rel_tol=1e-12`, `abs_tol=1e-8`), jen doplní identitu
+  a zachová původní naivní zdroj jako alias. Neopravuje timestampy, částky,
+  zbývající množství ani párování. Nejednoznačné/neexistující DST časy odmítá.
+- Změněný obsah pod stejným ID, lokální úpravy, chybějící historický důkaz
+  a nejednoznačné shody jsou explicitní konflikty. Opakované nerozlišitelné
+  dividendy s alespoň jedním chybějícím ID v témže CSV se neslučují. Bez ID
+  nelze prokázat rozdílnost dvou totožných singletonů z různých souborů;
+  takový opakovaný import je považován za duplicitu.
+- Transakce a její zdroj se zapisují atomicky po řádcích, včetně případně
+  nového instrumentu. Běžný CSV souhrn nyní uvádí počet konfliktů.
+  Reconciliation zatím nemá GUI; jeho zapojení patří do další etapy.
+- Ověření: **156 cílených offline testů** (identity, migrace/rollback/záloha,
+  zima/léto/DST, oba CSV formáty, ID i chybějící ID, původní kurzy, lokální
+  úpravy, zachování zamčeného párování, CSV progress a přepnutí DB).
+  Pylance: nové moduly bez chyb, změněné podpisy kompatibilní s volajícími;
+  existující nesouvisející diagnostiky DB manageru nejsou součástí opravy.
 
 #### Etapa 6 — propojení s GUI a kompletní synchronizační průběh
 

@@ -135,6 +135,7 @@ settings, or exchange rates; retain ordinary database backups too.
 - `errors`: every failed row's 1-based position in the DataFrame, action, and
   error message. Row 1 is the first data record, not the CSV header; this is
   independent of pandas index labels.
+- `conflicts`: the subset of errors requiring source/identity reconciliation.
 - `unknown_actions` and `skipped_actions`: action names and counts.
 
 `import_dataframe_batches(df, batch_size=100, cancel_event=None)` yields
@@ -164,9 +165,42 @@ is rolled back before processing subsequent rows.
 The existing manual CSV dialog now reports duplicates, failed rows, and
 unsupported actions and warns on partial imports instead of showing Success.
 Trade signs, currency conversions, action mappings, and the legacy timestamp
-parser are preserved. Dividend deduplication still uses timestamp/ISIN, not
-broker ID; historical timestamp reconciliation remains stage 5. No automatic
-Trading 212 database import or new API menu is connected yet.
+parser are preserved. Dividend identity and historical timestamp reconciliation
+are described below. No automatic Trading 212 database import or new API menu
+is connected yet.
+
+## CSV identities and legacy databases (stage 5)
+
+Opening a schema-1 database first saves a SQLite backup beside it as
+`<filename>.pre-v2-<random>.bak`, then transactionally upgrades to schema 2.
+Failure blocks migration; the backup is retained if SQL migration fails.
+Existing local IDs, timestamps, monetary values and pairings are preserved.
+Older application versions cannot open schema 2; retain the backup for rollback.
+Backups contain the same sensitive data as the database and need equal protection.
+Custom dividend triggers require manual migration instead of being discarded.
+
+Imports retain normalized source fields, broker IDs when available, and a
+snapshot of stored values. Distinct identified dividends may share a timestamp
+and ISIN. Repeated unchanged rows are duplicates; changed same-ID content, local
+edits, and ambiguous identity matches are conflicts, never silent overwrites.
+ID availability alone does not establish stability across broker exports.
+
+Previously imported records without source evidence require their original CSV
+before accepting overlapping new exports. The headless method
+`reconcile_legacy_dataframe(df, source_timezone="UTC", imported_timezone="Europe/Prague")`
+links proven identities without changing transactions. These example zones must
+be confirmed for the actual source and historical import; neither is guessed.
+It returns `linked`, `conflicts` and `status` (`complete` or `partial`).
+Both the original naive CSV and the equivalent UTC CSV then remain recognizable.
+Reconciliation is not yet exposed in the GUI.
+
+Proof requires a unique historical record and reproducible original conversion
+rates; numeric comparison uses `rel_tol=1e-12`, `abs_tol=1e-8`. DST-ambiguous or
+nonexistent naive times are rejected. No blanket timezone correction is applied.
+Without broker IDs, indistinguishable events cannot always be resolved: repeated
+identical rows in one CSV (including a mix with and without IDs) are conflicts;
+a singleton repeated in separate files is treated as a duplicate. See
+[CSV import notes](docs/CSV_IMPORT_NOTES.md) for source matching details.
 
 ## Run tests
 

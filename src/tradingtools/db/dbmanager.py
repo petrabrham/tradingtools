@@ -3,11 +3,16 @@ import os
 
 import time
 import math
+import tempfile
+import json
+from pathlib import Path
+from contextlib import contextmanager
 from numbers import Real
 from copy import deepcopy
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from threading import Event
-from typing import Optional, Tuple, Dict, List, Iterator, Literal, TypedDict
+from typing import Optional, Tuple, Dict, List, Iterator, Generator, Literal, TypedDict
 import pandas as pd
 from tradingtools.config.cnb_rate import cnb_rate
 import logging
@@ -18,6 +23,7 @@ from tradingtools.db.repositories.dividends import DividendsRepository
 from tradingtools.db.repositories.trades import TradesRepository, TradeType
 from tradingtools.db.repositories.pairings import PairingsRepository
 from tradingtools.db.decorators import requires_connection, requires_repo
+from tradingtools.db.import_identity import ImportConflict, ImportIdentity
 
 
 class ImportIssue(TypedDict):
@@ -38,7 +44,13 @@ class ImportResult(TypedDict):
     errors: List[ImportIssue]
     unknown_actions: Dict[str, int]
     skipped_actions: Dict[str, int]
+    conflicts: List[ImportIssue]
 
+
+class ReconciliationResult(TypedDict):
+    linked: int
+    conflicts: List[ImportIssue]
+    status: Literal["complete", "partial"]
 
 
 class DatabaseManager:
@@ -51,7 +63,7 @@ class DatabaseManager:
     """
 
     # Current schema version of the database
-    CURRENT_VERSION = 1
+    CURRENT_VERSION = 2
 
     def __init__(self) -> None:
         self.conn: Optional[sqlite3.Connection] = None
@@ -73,9 +85,9 @@ class DatabaseManager:
         
         try:
             cur = self.conn.cursor()
-            cur.execute("SELECT version FROM versions ORDER BY timestamp DESC LIMIT 1")
+            cur.execute("SELECT MAX(version) FROM versions")
             row = cur.fetchone()
-            return row[0] if row else 0
+            return row[0] if row and row[0] is not None else 0
         except sqlite3.OperationalError:
             # versions table doesn't exist yet
             return 0
@@ -163,7 +175,12 @@ class DatabaseManager:
         self.conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
         self.current_db_path = file_path
         self.logger.debug("Enabled foreign key constraints")
-        
+
+        existing_version = self.get_db_version()
+        if existing_version:
+            self.open_database(file_path)
+            return
+
         # initialize database schema
         self.create_versions_table()
         self.create_settings_table()
@@ -188,6 +205,10 @@ class DatabaseManager:
         self.create_dividends_table()
         self.create_trades_table()
         self.create_pairings_table()
+        self.conn.execute(ImportIdentity.SCHEMA)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_csv_source ON csv_identities(category,source)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_csv_legacy_source ON csv_identities(category,legacy_source)")
+        self.conn.commit()
         
         # Create annual rates table if using annual exchange rates
         if self.use_annual_rates:
@@ -197,7 +218,7 @@ class DatabaseManager:
         if self.get_db_version() == 0:
             self.update_db_version(
                 self.CURRENT_VERSION,
-                "Initial schema: versions, settings, securities, and interests tables"
+                "Initial schema including CSV source identities"
             )
 
     def open_database(self, file_path: str) -> None:
@@ -224,12 +245,111 @@ class DatabaseManager:
         # Check version compatibility
         db_version = self.get_db_version()
         if db_version > self.CURRENT_VERSION:
+            self.close()
             raise RuntimeError(
                 f"Database version {db_version} is newer than supported version "
                 f"{self.CURRENT_VERSION}. Please update the application."
             )
-        # Future: elif db_version < self.CURRENT_VERSION:
-        #     self.migrate_database(from_version=db_version)
+        if db_version < self.CURRENT_VERSION:
+            try:
+                self._migrate_csv_identities(db_version)
+            except Exception:
+                self.logger.exception("Database identity migration failed")
+                self.close()
+                raise
+
+    def _backup_before_identity_migration(self) -> Path:
+        if self.conn is None or self.current_db_path is None:
+            raise RuntimeError("No database to back up")
+        if self.current_db_path == ":memory:":
+            raise RuntimeError("Persist the legacy database before identity migration")
+        path = Path(self.current_db_path)
+        descriptor, name = tempfile.mkstemp(
+            prefix=path.name + ".pre-v2-", suffix=".bak", dir=path.resolve().parent,
+        )
+        os.close(descriptor)
+        backup = Path(name)
+        target: sqlite3.Connection | None = None
+        try:
+            target = sqlite3.connect(backup)
+            with target:
+                self.conn.backup(target)
+        except Exception:
+            if target is not None:
+                target.close()
+                target = None
+            backup.unlink()
+            raise
+        finally:
+            if target is not None:
+                target.close()
+        self.logger.info("Saved pre-migration database backup: %s", backup)
+        return backup
+
+    def _migrate_csv_identities(self, version: int) -> None:
+        if self.conn is None:
+            raise RuntimeError("No database to migrate")
+        if version != 1:
+            raise RuntimeError(f"No supported identity migration from schema version {version}")
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='dividends'"
+        ).fetchone():
+            raise RuntimeError("Custom dividend triggers require manual migration")
+        backup = self._backup_before_identity_migration()
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            indexes = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='dividends' AND sql IS NOT NULL"
+            ).fetchall()
+            sequence = self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='dividends'"
+            ).fetchone()
+            self.conn.execute(DividendsRepository.TABLE_SQL.format(table="dividends_v2"))
+            self.conn.execute("INSERT INTO dividends_v2 SELECT * FROM dividends")
+            self.conn.execute("DROP TABLE dividends")
+            self.conn.execute("ALTER TABLE dividends_v2 RENAME TO dividends")
+            if sequence is not None:
+                self.conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='dividends'", sequence)
+            for (sql,) in indexes:
+                self.conn.execute(sql)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_dividends_timestamp ON dividends(timestamp)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_dividends_isin_id ON dividends(isin_id)")
+            self.conn.execute(ImportIdentity.SCHEMA)
+            self.conn.execute("CREATE INDEX idx_csv_source ON csv_identities(category,source)")
+            self.conn.execute("CREATE INDEX idx_csv_legacy_source ON csv_identities(category,legacy_source)")
+            if self.conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise RuntimeError("Foreign-key validation failed during identity migration")
+            self.conn.execute(
+                "INSERT INTO versions(version,description) VALUES(?,?)",
+                (2, "CSV source identities; distinct same-time dividends"),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self.logger.error("Migration rolled back; original backup retained at %s", backup)
+            raise
+
+    @contextmanager
+    def _csv_transaction(self) -> Generator[None, None, None]:
+        if self.conn is None:
+            raise RuntimeError("No open database for CSV transaction")
+        if self.conn.in_transaction:
+            raise RuntimeError("Finish the pending transaction before importing CSV")
+        repositories = [
+            repo for repo in (
+                self.securities_repo, self.trades_repo, self.interests_repo, self.dividends_repo,
+            ) if repo is not None
+        ]
+        previous = [repo.defer_commit for repo in repositories]
+        try:
+            for repo in repositories:
+                repo.defer_commit = True
+            with self.conn:
+                self.conn.execute("BEGIN IMMEDIATE")
+                yield
+        finally:
+            for repo, deferred in zip(repositories, previous):
+                repo.defer_commit = deferred
 
     def release_database(self) -> None:
         self.logger.info(f"Database release requested for {self.current_db_path}")
@@ -349,8 +469,9 @@ class DatabaseManager:
             "added": dict.fromkeys(categories, 0),
             "duplicates": dict.fromkeys(categories, 0),
             "failed": dict.fromkeys((*categories, "unknown"), 0),
-            "errors": [], "unknown_actions": {}, "skipped_actions": {},
+            "errors": [], "unknown_actions": {}, "skipped_actions": {}, "conflicts": [],
         }
+        ambiguous_sources = self._ambiguous_dividend_sources(df, cancel_event)
         self.logger.info("Starting import of DataFrame with %d rows", len(df))
         for position, (_, row) in enumerate(df.iterrows(), start=1):
             if cancel_event is not None and cancel_event.is_set():
@@ -370,6 +491,9 @@ class DatabaseManager:
                     else:
                         self.logger.info("Row %d: %s (insignificant), skipping", position, action)
                 else:
+                    if category == "dividend":
+                        if ImportIdentity.encode(self._csv_source(row, category)) in ambiguous_sources:
+                            raise ImportConflict("Indistinguishable no-ID dividends occur more than once in this CSV")
                     inserted = self._import_csv_row(row, category)
                     counts = result["added"] if inserted else result["duplicates"]
                     counts[category] += 1
@@ -379,7 +503,10 @@ class DatabaseManager:
                 if not action:
                     result["read"][category] += 1
                 result["failed"][category] += 1
-                result["errors"].append({"row": position, "action": action, "message": str(error)})
+                issue: ImportIssue = {"row": position, "action": action, "message": str(error)}
+                result["errors"].append(issue)
+                if isinstance(error, ImportConflict):
+                    result["conflicts"].append(issue)
                 self.logger.error("Failed to import row %d (%s): %s", position, action, error)
             result["processed"] += 1
             if position % batch_size == 0 and position < len(df):
@@ -436,7 +563,78 @@ class DatabaseManager:
             raise ValueError(f"Non-finite numeric {key}")
         return value
 
+    def _csv_source(
+        self, row: pd.Series, category: str, *, source_timezone: str | None = None,
+    ) -> dict[str, object]:
+        time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
+        total, currency = self.safe_csv_read(row, "Total", "Currency (Total)", required=True)
+        source: dict[str, object] = {
+            "Action": self._csv_text(row, "Action", required=True),
+            "time": ImportIdentity.source_time(time_str, source_timezone),
+            "Total": total, "Currency (Total)": currency,
+        }
+        if category == "interest":
+            note = self._csv_text(row, "Notes")
+            source["interest_type"] = (
+                1 if note == "Interest on cash" else 2 if note == "Share lending interest" else 0
+            )
+            return source
+
+        source["ISIN"] = self._csv_text(row, "ISIN", required=True)
+        source["No. of shares"] = self._csv_number(row, "No. of shares", required=True)
+        amount, currency = self.safe_csv_read(row, "Price / share", "Currency (Price / share)", required=True)
+        source["Price / share"], source["Currency (Price / share)"] = amount, currency
+        optional = (
+            ("Withholding tax",) if category == "dividend" else
+            ("Stamp duty reserve tax", "Currency conversion fee", "French transaction tax")
+        )
+        for field in optional:
+            amount, currency = self.safe_csv_read(row, field, f"Currency ({field})")
+            source[field] = amount
+            source[f"Currency ({field})"] = currency if amount else "CZK"
+        return source
+
+    def _ambiguous_dividend_sources(
+        self, df: pd.DataFrame, cancel_event: Event | None = None,
+    ) -> set[str]:
+        counts: Dict[str, int] = {}
+        anonymous: set[str] = set()
+        for _, row in df.iterrows():
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            try:
+                if self._csv_category(self._csv_text(row, "Action")) != "dividend":
+                    continue
+                key = ImportIdentity.encode(self._csv_source(row, "dividend"))
+                counts[key] = counts.get(key, 0) + 1
+                if not self._csv_text(row, "ID"):
+                    anonymous.add(key)
+            except (ValueError, TypeError):
+                # The normal row path reports invalid fields with their row position.
+                continue
+        return {key for key in anonymous if counts[key] > 1}
+
     def _import_csv_row(self, row: pd.Series, category: str) -> int:
+        if self.conn is None:
+            raise RuntimeError("No open database for CSV identity check")
+        source = self._csv_source(row, category)
+        broker_id = self._csv_text(row, "ID", required=category != "dividend") or None
+        identity = ImportIdentity(self.conn)
+        with self._csv_transaction():
+            if identity.match(category, broker_id, source) is not None:
+                return 0
+            if category != "dividend":
+                table = identity.TABLES[category]
+                if self.conn.execute(f"SELECT 1 FROM {table} WHERE id_string=?", (broker_id,)).fetchone():
+                    raise ImportConflict("Legacy transaction requires reconciliation with its original CSV")
+            inserted = self._insert_csv_row(row, category)
+            if not inserted:
+                raise ImportConflict("An existing transaction has no matching source identity")
+            record_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            identity.remember(category, record_id, broker_id, source)
+        return inserted
+
+    def _insert_csv_row(self, row: pd.Series, category: str) -> int:
         time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
         timestamp = self.timestr_to_timestamp(time_str)
         total, currency_of_total = self.safe_csv_read(row, "Total", "Currency (Total)", required=True)
@@ -464,7 +662,7 @@ class DatabaseManager:
             tax, tax_currency = self.safe_csv_read(row, "Withholding tax", "Currency (Withholding tax)")
             return self.insert_dividend(
                 timestamp, isin, ticker, name, number_of_shares, price, currency_of_price,
-                total, currency_of_total, tax, tax_currency,
+                total, currency_of_total, tax, tax_currency, distinct_event=True,
             )
         id_string = self._csv_text(row, "ID", required=True)
         stamp_tax, stamp_currency = self.safe_csv_read(row, "Stamp duty reserve tax", "Currency (Stamp duty reserve tax)")
@@ -477,6 +675,138 @@ class DatabaseManager:
             price, currency_of_price, -total if category == "buy" else total, currency_of_total,
             -stamp_tax, stamp_currency, -fee, fee_currency, -french_tax, french_currency,
         )
+
+    def reconcile_legacy_dataframe(
+        self, df: pd.DataFrame, *, source_timezone: str, imported_timezone: str,
+    ) -> ReconciliationResult:
+        """Attach proven original CSV sources; never change transaction values or times."""
+        if self.conn is None:
+            raise RuntimeError("No open database for source reconciliation")
+        ZoneInfo(source_timezone)
+        ZoneInfo(imported_timezone)
+        if not df.columns.is_unique or "Action" not in df or not ("Time" in df or "Time (UTC)" in df):
+            raise ValueError("Original CSV needs unique columns, Action and Time or Time (UTC)")
+        identity = ImportIdentity(self.conn)
+        linked = 0
+        conflicts: List[ImportIssue] = []
+        ambiguous_sources = self._ambiguous_dividend_sources(df)
+        for position, (_, row) in enumerate(df.iterrows(), start=1):
+            action = ""
+            try:
+                action = self._csv_text(row, "Action", required=True)
+                category = self._csv_category(action)
+                if category == "unknown":
+                    raise ImportConflict("Unsupported action in original CSV")
+                if category not in identity.TABLES:
+                    continue
+                original = self._csv_source(row, category)
+                broker_id = self._csv_text(row, "ID", required=category != "dividend") or None
+                if identity.encode(original) in ambiguous_sources:
+                    raise ImportConflict("Original CSV contains indistinguishable no-ID events")
+                source = self._csv_source(row, category, source_timezone=source_timezone)
+                text = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
+                date = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if date.utcoffset() is None:
+                    date = identity.localize(date, imported_timezone)
+                timestamp = int(date.timestamp())
+                with self._csv_transaction():
+                    if category == "dividend":
+                        candidates = self.conn.execute(
+                            "SELECT d.id FROM dividends d JOIN securities s ON s.id=d.isin_id "
+                            "WHERE d.timestamp=? AND s.isin=?",
+                            (timestamp, source["ISIN"]),
+                        ).fetchall()
+                    else:
+                        candidates = self.conn.execute(
+                            f"SELECT id FROM {identity.TABLES[category]} WHERE id_string=? AND timestamp=?",
+                            (broker_id, timestamp),
+                        ).fetchall()
+                    expected = self._legacy_csv_values(row, category, timestamp, imported_timezone)
+                    matching = []
+                    for (record_id,) in candidates:
+                        stored = json.loads(identity.snapshot(category, record_id))
+                        if all(
+                            math.isclose(stored[key], value, rel_tol=1e-12, abs_tol=1e-8)
+                            if isinstance(value, float) else stored[key] == value
+                            for key, value in expected.items()
+                        ):
+                            matching.append(record_id)
+                    if len(matching) != 1:
+                        raise ImportConflict("Original CSV does not uniquely match an unchanged local transaction")
+                    record_id = matching[0]
+                    previous = self.conn.execute(
+                        "SELECT record_id,broker_id,source,stored FROM csv_identities "
+                        "WHERE category=? AND record_id=?", (category, record_id),
+                    ).fetchone()
+                    if previous is not None:
+                        identity.check_stored(category, previous)
+                        if previous[2] not in (identity.encode(original), identity.encode(source)):
+                            raise ImportConflict("A different original source is already linked to this transaction")
+                        if broker_id is not None and previous[1] not in (None, broker_id):
+                            raise ImportConflict("Another broker ID is already linked to this transaction")
+                        self.conn.execute(
+                            "UPDATE csv_identities SET source=?,broker_id=COALESCE(broker_id,?),"
+                            "legacy_source=CASE WHEN ?<>? THEN ? ELSE legacy_source END "
+                            "WHERE category=? AND record_id=?",
+                            (identity.encode(source), broker_id, identity.encode(original),
+                             identity.encode(source), identity.encode(original), category, record_id),
+                        )
+                    else:
+                        identity.remember(category, record_id, broker_id, source)
+                        if original != source:
+                            self.conn.execute(
+                                "UPDATE csv_identities SET legacy_source=? WHERE category=? AND record_id=?",
+                                (identity.encode(original), category, record_id),
+                            )
+                linked += 1
+            except (ValueError, TypeError, sqlite3.Error, OSError) as error:
+                issue: ImportIssue = {"row": position, "action": action, "message": str(error)}
+                conflicts.append(issue)
+                self.logger.error("Source reconciliation conflict at row %d: %s", position, error)
+        return {"linked": linked, "conflicts": conflicts, "status": "partial" if conflicts else "complete"}
+
+    def _legacy_csv_values(
+        self, row: pd.Series, category: str, timestamp: int, imported_timezone: str,
+    ) -> dict[str, object]:
+        date = datetime.fromtimestamp(timestamp, ZoneInfo(imported_timezone)).replace(tzinfo=None)
+
+        def converted(field: str, *, required: bool = False) -> float:
+            amount, currency = self.safe_csv_read(row, field, f"Currency ({field})", required=required)
+            return amount * self.get_exchange_rate(currency, date)
+
+        values: dict[str, object] = {"timestamp": timestamp}
+        total = converted("Total", required=True)
+        if category == "interest":
+            note = self._csv_text(row, "Notes")
+            values.update(
+                type=1 if note == "Interest on cash" else 2 if note == "Share lending interest" else 0,
+                id_string=self._csv_text(row, "ID", required=True), total_czk=total,
+            )
+            return values
+        if self.conn is None:
+            raise RuntimeError("No open database for source reconciliation")
+        security = self.conn.execute(
+            "SELECT id FROM securities WHERE isin=?", (self._csv_text(row, "ISIN", required=True),),
+        ).fetchone()
+        if security is None:
+            raise ImportConflict("Original CSV security is not present in the database")
+        price, currency = self.safe_csv_read(row, "Price / share", "Currency (Price / share)", required=True)
+        shares = self._csv_number(row, "No. of shares", required=True)
+        values.update(isin_id=security[0], price_for_share=price, currency_of_price=currency)
+        if category == "dividend":
+            tax = converted("Withholding tax")
+            values.update(number_of_shares=shares, net_czk=total, gross_czk=total + tax, withholding_tax_czk=tax)
+        else:
+            values.update(
+                id_string=self._csv_text(row, "ID", required=True),
+                trade_type=int(TradeType.BUY if category == "buy" else TradeType.SELL),
+                number_of_shares=shares if category == "buy" else -shares,
+                total_czk=-total if category == "buy" else total,
+                stamp_tax_czk=-converted("Stamp duty reserve tax"),
+                conversion_fee_czk=-converted("Currency conversion fee"),
+                french_transaction_tax_czk=-converted("French transaction tax"),
+            )
+        return values
     
     @staticmethod
     def safe_csv_read(
@@ -651,7 +981,9 @@ class DatabaseManager:
         total: float,
         currency_of_total: str,
         withholding_tax: float,
-        currency_of_withholding_tax: str
+        currency_of_withholding_tax: str,
+        *,
+        distinct_event: bool = False,
     ) -> int:
         """Insert a single dividend record.
         
@@ -698,7 +1030,8 @@ class DatabaseManager:
             currency_of_price=currency_of_price,
             gross_czk=gross_czk,
             net_czk=net_czk,
-            withholding_tax_czk=withholding_tax_czk
+            withholding_tax_czk=withholding_tax_czk,
+            distinct_event=distinct_event,
         )
         
     ###########################################################################
