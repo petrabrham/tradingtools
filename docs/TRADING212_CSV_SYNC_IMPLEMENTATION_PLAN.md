@@ -685,6 +685,33 @@ Na výslovný pokyn uživatele rozšířeno stejné **schéma 2** a migrace **1 
   deduplikace/konfliktů, kurzů, zrušení/opakování, časových pásem a rollbacku.
   Pracovní databáze ani reálné Trading212 API nebyly použity.
 
+#### Oprava opakovaného importu původního CSV po migraci
+
+Uživatel při opětovném importu starého CSV narazil na konflikty všech obchodů
+a úroků bez zdrojových identit. Reprodukováno syntetickým testem: původní
+implementace odmítala i nezměněné řádky se stejnými broker ID.
+
+- Běžný import nyní u historických obchodů/úroků se stejným ID ověří přesný
+  uložený timestamp a všechny neměnné importované hodnoty včetně přepočtů a
+  poplatků. Použije stávající interpretaci času, nikoli odhad jiného pásma.
+- Při prokázané shodě pouze atomicky doplní zdrojovou identitu a započítá
+  duplicitu. Zachová původní hodnoty, ID, zbývající množství i zamčená párování.
+- Odlišné časy nebo finanční hodnoty zůstávají explicitní konflikty. Tato
+  výjimka neprovádí automatické časové posuny.
+- Ověření: **169 cílených offline testů**, včetně opakovaného původního importu,
+  zachování párování, odmítnutí změn a rollbacku při selhání zápisu identity.
+  Pracovní databáze uživatele ani API klíče nebyly otevřeny.
+
+**Doplnění pro dividendy:** předchozí oprava opomenula 32 dividend bez ID.
+V původním CSV 2024 ověřeno 333 řádků, z toho 32 dividend bez broker ID a
+hlavička `Time` (bez vypisování finančních údajů). Import nyní umí i u
+historické dividendy prokázat jedinou nezaznamenanou shodu přesného času,
+ISIN a všech neměnných hodnot. Doplní pouze identitu; dividendy nevkládá
+znovu ani nemění. Více shod, odlišné hodnoty či posunuté časy zůstávají
+konfliktem. Rozšířený regresní případ obsahuje 32 historických dividend
+ve společném importu s obchody a úroky; **171 cílených testů prošlo**,
+včetně ochrany proti nejednoznačnosti a rollbacku při selhání zápisu zdroje.
+
 #### Etapa 6 — propojení s GUI a kompletní synchronizační průběh
 
 **Stav:** čeká. **Předpoklady:** etapy 1–5.

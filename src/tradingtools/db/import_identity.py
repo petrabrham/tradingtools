@@ -1,6 +1,7 @@
 """Conservative identity checks for CSV imports, independent of broker transport."""
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -8,6 +9,10 @@ from zoneinfo import ZoneInfo
 
 class ImportConflict(ValueError):
     """A source row cannot safely be inserted or treated as a duplicate."""
+
+
+class LegacySourceRequired(ImportConflict):
+    """An untracked legacy record needs exact original-CSV proof."""
 
 
 class ImportIdentity:
@@ -70,6 +75,14 @@ class ImportIdentity:
         if self.snapshot(category, row[0]) != row[3]:
             raise ImportConflict("Local transaction changed since its source identity was recorded")
 
+    def matches_values(self, category: str, record_id: int, expected: dict[str, object]) -> bool:
+        stored = json.loads(self.snapshot(category, record_id))
+        return all(
+            math.isclose(stored[key], value, rel_tol=1e-12, abs_tol=1e-8)
+            if isinstance(value, float) else stored[key] == value
+            for key, value in expected.items()
+        )
+
     def match(self, category: str, broker_id: str | None, source: dict[str, object]) -> int | None:
         encoded = self.encode(source)
         if broker_id is not None:
@@ -126,9 +139,9 @@ class ImportIdentity:
             "WHERE s.isin IS ? AND d.timestamp BETWEEN ? AND ?",
             (category, source["ISIN"], center - 26 * 3600, center + 26 * 3600),
         ).fetchall()
+        if any(record[2] is None for record in nearby):
+            raise LegacySourceRequired(f"Legacy {category} requires reconciliation with its original CSV")
         for record in nearby:
-            if record[2] is None:
-                raise ImportConflict(f"Legacy {category} requires reconciliation with its original CSV")
             previous = json.loads(record[2])
             if str(previous["time"]).startswith("naive:") != source_time.startswith("naive:"):
                 raise ImportConflict(f"Legacy {category} timezone requires explicit source CSV reconciliation")

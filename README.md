@@ -186,7 +186,18 @@ edits, and ambiguous identity matches are conflicts, never silent overwrites.
 ID availability alone does not establish stability across broker exports.
 
 Previously imported records without source evidence require their original CSV
-before accepting overlapping new exports. The headless method
+before accepting overlapping new exports. Reimporting an unchanged original
+trade/interest CSV now automatically verifies the existing broker ID, exact
+stored timestamp, and all immutable imported values (including conversions and
+trade fees). A proven match adds only its source identity and counts as a
+duplicate; local transaction values, remaining quantities, and pairings stay
+unchanged. For legacy dividends (including those without broker IDs), the
+importer similarly requires exactly one untracked record with the same timestamp,
+ISIN and all immutable financial values. It attaches only source evidence and
+counts a duplicate. A timestamp/financial mismatch or multiple possible matches
+remains an explicit conflict; no timezone is inferred or corrected.
+
+For timezone reconciliation, the headless method
 `reconcile_legacy_dataframe(df, source_timezone="UTC", imported_timezone="Europe/Prague")`
 links proven identities without changing transactions. These example zones must
 be confirmed for the actual source and historical import; neither is guessed.

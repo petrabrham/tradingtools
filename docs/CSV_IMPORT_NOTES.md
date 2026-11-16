@@ -77,6 +77,18 @@ Example action seen in 2026 export that is currently skipped as unknown:
   `source_timezone` and `imported_timezone`. This currently has no GUI workflow.
   A successful reconciliation retains the original naive source as an accepted
   alias, so both old and UTC exports can be retried.
+- Reimporting an unchanged original trade/interest CSV does not require calling
+  that helper manually: the importer can attach source evidence when broker ID,
+  exact timestamp and all immutable values match the existing record. It uses
+  the ordinary import timestamp/rate-date interpretation, without trying other
+  timezones. The result is a duplicate, not a transaction rewrite. Different
+  timestamps, financial values or unreproducible rates remain errors/conflicts.
+- Legacy dividends without source identities, including those without broker
+  IDs, can also be proven during original-CSV reimport: exactly one untracked
+  record must match the ordinary import timestamp, ISIN, shares, price/currency,
+  tax and financial totals. Only source metadata is attached. Multiple matching
+  candidates or shifted times still require explicit reconciliation; nearby
+  timestamps alone are never accepted.
 - Reconciliation compares stored immutable values with the original import,
   requiring reproducible historical rates and unique candidates. Numeric proof
   allows only `rel_tol=1e-12`, `abs_tol=1e-8`; mismatches are conflicts.

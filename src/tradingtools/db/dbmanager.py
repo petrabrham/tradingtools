@@ -4,7 +4,6 @@ import os
 import time
 import math
 import tempfile
-import json
 from pathlib import Path
 from contextlib import contextmanager
 from numbers import Real
@@ -24,7 +23,7 @@ from tradingtools.db.repositories.fees import FeesRepository, FeeType
 from tradingtools.db.repositories.trades import TradesRepository, TradeType
 from tradingtools.db.repositories.pairings import PairingsRepository
 from tradingtools.db.decorators import requires_connection, requires_repo
-from tradingtools.db.import_identity import ImportConflict, ImportIdentity
+from tradingtools.db.import_identity import ImportConflict, ImportIdentity, LegacySourceRequired
 
 
 class ImportIssue(TypedDict):
@@ -644,13 +643,49 @@ class DatabaseManager:
         source = self._csv_source(row, category)
         broker_id = self._csv_text(row, "ID", required=category not in ("dividend", "fee")) or None
         identity = ImportIdentity(self.conn)
+
+        def link_legacy(candidates: list[int], timestamp: int) -> int:
+            if not candidates:
+                raise ImportConflict(
+                    f"Legacy {category} timestamp differs; explicit source timezone reconciliation is required"
+                )
+            expected = self._legacy_csv_values(row, category, timestamp, None)
+            matching = [
+                record_id for record_id in candidates if identity.matches_values(category, record_id, expected)
+            ]
+            if len(matching) != 1:
+                raise ImportConflict(
+                    f"Legacy {category} does not uniquely match CSV values; original rates and contents must be verified"
+                )
+            identity.remember(category, matching[0], broker_id, source)
+            self.logger.info("Verified original CSV for legacy %s record %d", category, matching[0])
+            return 0
+
         with self._csv_transaction():
-            if identity.match(category, broker_id, source) is not None:
-                return 0
+            time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
+            try:
+                if identity.match(category, broker_id, source) is not None:
+                    return 0
+            except LegacySourceRequired:
+                timestamp = self.timestr_to_timestamp(time_str)
+                legacy_rows = self.conn.execute(
+                    f"SELECT d.id FROM {identity.TABLES[category]} d "
+                    "LEFT JOIN securities s ON s.id=d.isin_id "
+                    "LEFT JOIN csv_identities i ON i.category=? AND i.record_id=d.id "
+                    "WHERE i.record_id IS NULL AND d.timestamp=? AND s.isin IS ?",
+                    (category, timestamp, source["ISIN"]),
+                ).fetchall()
+                return link_legacy([record_id for (record_id,) in legacy_rows], timestamp)
             if category in ("buy", "sell", "interest"):
                 table = identity.TABLES[category]
-                if self.conn.execute(f"SELECT 1 FROM {table} WHERE id_string=?", (broker_id,)).fetchone():
-                    raise ImportConflict("Legacy transaction requires reconciliation with its original CSV")
+                legacy = self.conn.execute(
+                    f"SELECT id,timestamp FROM {table} WHERE id_string=?", (broker_id,),
+                ).fetchone()
+                if legacy is not None:
+                    timestamp = self.timestr_to_timestamp(time_str)
+                    if legacy[1] != timestamp:
+                        raise ImportConflict("Legacy transaction timestamp differs; explicit source timezone reconciliation is required")
+                    return link_legacy([legacy[0]], timestamp)
             inserted = self._insert_csv_row(row, category)
             if not inserted:
                 raise ImportConflict("An existing transaction has no matching source identity")
@@ -767,15 +802,10 @@ class DatabaseManager:
                             (broker_id, timestamp),
                         ).fetchall()
                     expected = self._legacy_csv_values(row, category, timestamp, imported_timezone)
-                    matching = []
-                    for (record_id,) in candidates:
-                        stored = json.loads(identity.snapshot(category, record_id))
-                        if all(
-                            math.isclose(stored[key], value, rel_tol=1e-12, abs_tol=1e-8)
-                            if isinstance(value, float) else stored[key] == value
-                            for key, value in expected.items()
-                        ):
-                            matching.append(record_id)
+                    matching = [
+                        record_id for (record_id,) in candidates
+                        if identity.matches_values(category, record_id, expected)
+                    ]
                     if len(matching) != 1:
                         raise ImportConflict("Original CSV does not uniquely match an unchanged local transaction")
                     record_id = matching[0]
@@ -811,9 +841,12 @@ class DatabaseManager:
         return {"linked": linked, "conflicts": conflicts, "status": "partial" if conflicts else "complete"}
 
     def _legacy_csv_values(
-        self, row: pd.Series, category: str, timestamp: int, imported_timezone: str,
+        self, row: pd.Series, category: str, timestamp: int, imported_timezone: str | None,
     ) -> dict[str, object]:
-        date = datetime.fromtimestamp(timestamp, ZoneInfo(imported_timezone)).replace(tzinfo=None)
+        date = (
+            datetime.fromtimestamp(timestamp, ZoneInfo(imported_timezone)).replace(tzinfo=None)
+            if imported_timezone is not None else datetime.fromtimestamp(timestamp)
+        )
 
         def converted(field: str, *, required: bool = False) -> float:
             amount, currency = self.safe_csv_read(row, field, f"Currency ({field})", required=required)

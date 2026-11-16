@@ -499,6 +499,118 @@ class TestCSVIdentity(unittest.TestCase):
         self.assertIn("import its original CSV normally", result["conflicts"][0]["message"])
         self.assertEqual(self.import_rows([row])["added"]["fee"], 1)
 
+    def test_original_csv_reimport_proves_all_legacy_categories_without_changing_history(self):
+        rows = [self.row(action, ID=action) for action in
+                ("Market buy", "Market sell", "Interest on cash")] + [
+                    self.row(Time=f"2024-06-{1 + index // 24:02} {index % 24:02}:00:00")
+                    for index in range(32)
+                ]
+        buy, sell = [self.seed_legacy(row) for row in rows][:2]
+        self.conn.execute(
+            "INSERT INTO pairings(sale_trade_id,purchase_trade_id,quantity,method,locked,locked_reason) "
+            "VALUES(?,?,1,'Manual',1,'Keep historical pairing')", (sell, buy),
+        )
+        self.conn.execute("UPDATE trades SET remaining_quantity=0 WHERE id=?", (buy,))
+        self.conn.commit()
+        before = {table: self.conn.execute(f"SELECT * FROM {table}").fetchall()
+                  for table in ("trades", "interests", "dividends", "pairings")}
+        self.downgrade()
+        self.db.open_database(str(self.path))
+        def parse_original(text):
+            return int(datetime.fromisoformat(text).replace(tzinfo=ZoneInfo("Europe/Prague")).timestamp())
+
+        with patch.object(DatabaseManager, "timestr_to_timestamp", side_effect=parse_original):
+            result = self.import_rows(rows)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["duplicates"]["dividend"], 32)
+        self.assertEqual(sum(result["duplicates"].values()), len(rows))
+        self.assertEqual(sum(result["added"].values()), 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM csv_identities").fetchone()[0], len(rows))
+        self.rate.reset_mock()
+        self.assertEqual(sum(self.import_rows(rows)["duplicates"].values()), len(rows))
+        self.rate.assert_not_called()
+        for table, records in before.items():
+            self.assertEqual(self.conn.execute(f"SELECT * FROM {table}").fetchall(), records)
+
+    def test_legacy_id_reimport_still_rejects_timestamp_and_financial_mismatches(self):
+        row = self.row("Market buy", ID="old-buy")
+        self.seed_legacy(row)
+        before = self.conn.execute("SELECT * FROM trades").fetchall()
+        timestamp = before[0][1]
+        for changes, parsed_time in (
+            ({"Total": 99}, timestamp),
+            ({"No. of shares": 99}, timestamp),
+            ({"Stamp duty reserve tax": 1, "Currency (Stamp duty reserve tax)": "USD"}, timestamp),
+            ({}, timestamp + 3600),
+        ):
+            with (
+                self.subTest(changes=changes, timestamp=parsed_time),
+                patch.object(DatabaseManager, "timestr_to_timestamp", return_value=parsed_time),
+                self.assertLogs(self.logger, level="ERROR"),
+            ):
+                result = self.import_rows([{**row, **changes}])
+            self.assertEqual(len(result["conflicts"]), 1)
+            self.assertEqual(sum(result["duplicates"].values()), 0)
+        self.assertEqual(self.conn.execute("SELECT * FROM trades").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM csv_identities").fetchone()[0], 0)
+
+    def test_legacy_id_proof_source_failure_preserves_transaction(self):
+        row = self.row("Interest on cash", ID="old-interest")
+        self.seed_legacy(row)
+        before = self.conn.execute("SELECT * FROM interests").fetchall()
+        with (
+            patch.object(DatabaseManager, "timestr_to_timestamp", return_value=before[0][1]),
+            patch.object(ImportIdentity, "remember", side_effect=sqlite3.OperationalError("disk error")),
+            self.assertLogs(self.logger, level="ERROR"),
+        ):
+            result = self.import_rows([row])
+        self.assertEqual(result["failed"]["interest"], 1)
+        self.assertEqual(self.conn.execute("SELECT * FROM interests").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM csv_identities").fetchone()[0], 0)
+
+    def test_legacy_dividend_proof_rejects_changed_values_time_and_ambiguous_candidates(self):
+        row = self.row()
+        self.seed_legacy(row)
+        before = self.conn.execute("SELECT * FROM dividends").fetchall()
+        timestamp = before[0][1]
+        for changes, parsed_time in (
+            ({"Total": 99}, timestamp),
+            ({"Withholding tax": 99}, timestamp),
+            ({"No. of shares": 99}, timestamp),
+            ({}, timestamp + 3600),
+        ):
+            with (
+                self.subTest(changes=changes, timestamp=parsed_time),
+                patch.object(DatabaseManager, "timestr_to_timestamp", return_value=parsed_time),
+                self.assertLogs(self.logger, level="ERROR"),
+            ):
+                result = self.import_rows([{**row, **changes}])
+            self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(self.conn.execute("SELECT * FROM dividends").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM csv_identities").fetchone()[0], 0)
+        self.seed_legacy(row)
+        with (
+            patch.object(DatabaseManager, "timestr_to_timestamp", return_value=timestamp),
+            self.assertLogs(self.logger, level="ERROR"),
+        ):
+            result = self.import_rows([row])
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 2)
+
+    def test_legacy_dividend_source_failure_does_not_change_or_duplicate_dividend(self):
+        row = self.row()
+        self.seed_legacy(row)
+        before = self.conn.execute("SELECT * FROM dividends").fetchall()
+        with (
+            patch.object(DatabaseManager, "timestr_to_timestamp", return_value=before[0][1]),
+            patch.object(ImportIdentity, "remember", side_effect=sqlite3.OperationalError("disk error")),
+            self.assertLogs(self.logger, level="ERROR"),
+        ):
+            result = self.import_rows([row])
+        self.assertEqual(result["failed"]["dividend"], 1)
+        self.assertEqual(self.conn.execute("SELECT * FROM dividends").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM csv_identities").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
