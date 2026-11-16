@@ -145,6 +145,20 @@ class TestTrading212API(unittest.TestCase):
         self.api.delete_credentials()
         self.assertEqual(len(self.storage), 2)
 
+    def test_verify_entered_pair_does_not_store_and_cancelled_save_does_not_overwrite(self):
+        self.api.save_credentials(self.key, self.secret)
+        original = dict(self.storage)
+        self.write.reset_mock()
+        self.assertEqual(self.api.verify_credentials("replacement-key", "replacement-secret"), 123)
+        self.write.assert_not_called()
+        self.assertEqual(self.storage, original)
+        cancel = Event()
+        with patch.object(self.api, "verify_credentials", side_effect=lambda *a, **kw: (cancel.set() or 123)):
+            with self.assertRaises(InterruptedError):
+                self.api.save_credentials("replacement-key", "replacement-secret", cancel_event=cancel)
+        self.write.assert_not_called()
+        self.assertEqual(self.storage, original)
+
     def test_failed_verification_or_write_preserves_original_pair(self):
         self.api.save_credentials(self.key, self.secret)
         original = dict(self.storage)
@@ -780,6 +794,35 @@ class TestTrading212AnnualArchive(_CSVReportFixture):
         self.load.reset_mock()
         self.assertEqual(self.api.get_archived_csvs(self.directory), paths)
         self.load.assert_not_called()
+
+    def test_report_callback_runs_after_durable_publication_and_failure_never_reposts(self):
+        self.queue_year(2024, self.NOW, 77)
+        self.queue_year(2025, self.NOW, 78)
+        notifications = []
+
+        def imported(report):
+            notifications.append(report)
+            self.assertTrue(report.path.exists())
+            state = self.metadata()
+            self.assertIsNone(state["pending"])
+            self.assertEqual(state["recommended"][str(report.year)], report.report_id)
+            self.assertEqual(hashlib.sha256(report.path.read_bytes()).hexdigest(), report.sha256)
+            raise RuntimeError("Synthetic database failure")
+
+        with self.assertRaisesRegex(RuntimeError, "Synthetic database failure"):
+            self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW, on_report=imported)
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual([report.year for report in notifications], [2024])
+        self.assertIsNone(self.api._archive_state)
+        self.restart()
+        descriptors = []
+        self.api.get_archived_csvs(self.directory, on_report=descriptors.append)
+        self.assertEqual(descriptors, notifications)
+        self.load.assert_not_called()
+        self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW, on_report=descriptors.append)
+        self.assertEqual(len(self.posts()), 2)
+        self.assertEqual([report.year for report in descriptors], [2024, 2024, 2025])
+        self.assertFalse(self.responses)
 
     def test_missing_year_normal_refresh_identical_bytes_and_changed_old_revision(self):
         self.queue_year(2024, self.NOW, 77)

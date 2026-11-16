@@ -1,3 +1,4 @@
+import gc
 import tempfile
 import tkinter as tk
 import unittest
@@ -11,6 +12,7 @@ from tradingtools.dialogs.csv_import_dialog import CSVImportDialog
 
 class TestCSVImportDialog(unittest.TestCase):
     def setUp(self):
+        gc.collect()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name)
@@ -63,6 +65,23 @@ class TestCSVImportDialog(unittest.TestCase):
             dialog._import()
         self.assertIsNone(dialog.messages.get_nowait())
         read.assert_not_called()
+
+    def test_worker_returns_current_run_conflicts_without_overwriting_existing_amount(self):
+        with patch.object(DatabaseManager, "get_exchange_rate", return_value=1.0):
+            first = CSVImportDialog(Mock(), str(self.path / "test.db"), str(self.csv))
+            first._import()
+            self.csv.write_text(self.csv.read_text().replace("cash-1,2,", "cash-1,9,"), encoding="utf-8")
+            second = CSVImportDialog(Mock(), str(self.path / "test.db"), str(self.csv))
+            second._import()
+        messages = []
+        while not second.messages.empty():
+            messages.append(second.messages.get_nowait())
+        result = messages[-1]
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(len(result["comparisons"]), 1)
+        self.assertEqual(result["comparisons"][0].row, 1)
+        self.assertEqual(result["comparisons"][0].incoming["Total"], 9)
+        self.assertEqual(self.conn.execute("SELECT SUM(total_czk) FROM interests").fetchone()[0], 5)
 
     def test_real_modal_window_remains_responsive_and_cancels_worker(self):
         root = tk.Tk()

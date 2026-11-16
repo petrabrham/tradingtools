@@ -9,6 +9,7 @@ from tkinter import ttk
 import pandas as pd
 
 from tradingtools.db.dbmanager import DatabaseManager, ImportResult
+from tradingtools.import_diagnostics import build_comparisons
 
 
 class CSVImportDialog:
@@ -20,6 +21,7 @@ class CSVImportDialog:
         self.messages: Queue[ImportResult | Exception | None] = Queue()
         self.result: ImportResult | None = None
         self.error: Exception | None = None
+        self.exit_requested = False
 
     def _import(self) -> None:
         database: DatabaseManager | None = None
@@ -40,6 +42,8 @@ class CSVImportDialog:
                         elif time.monotonic() - last_update >= 0.1:
                             self.messages.put(progress)
                             last_update = time.monotonic()
+                    if outcome is not None:
+                        outcome["comparisons"] = build_comparisons(database, frame, outcome, self.csv_path)
         except Exception as error:
             outcome = error
         finally:
@@ -54,6 +58,10 @@ class CSVImportDialog:
         self.cancel_event.set()
         self.cancel_button.configure(state="disabled")
         self.label.configure(text="Cancelling... waiting for the current operation to finish.")
+
+    def _close_parent(self) -> None:
+        self.exit_requested = True
+        self._cancel()
 
     def _poll(self) -> None:
         try:
@@ -96,7 +104,8 @@ class CSVImportDialog:
         self.cancel_button.pack(pady=15)
         self.dialog.protocol("WM_DELETE_WINDOW", self._cancel)
         previous_close = self.parent.protocol("WM_DELETE_WINDOW")
-        self.parent.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
+        temporary_close = self.parent.protocol("WM_DELETE_WINDOW")
         try:
             self.dialog.wait_visibility()
             self.dialog.grab_set()
@@ -107,6 +116,7 @@ class CSVImportDialog:
             self.worker.join()
         finally:
             self.parent.protocol("WM_DELETE_WINDOW", previous_close)
+            self.parent.deletecommand(temporary_close)
             if self.dialog.winfo_exists():
                 self.dialog.destroy()
         if self.error is not None:

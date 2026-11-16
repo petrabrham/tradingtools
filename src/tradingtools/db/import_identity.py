@@ -10,6 +10,17 @@ from zoneinfo import ZoneInfo
 class ImportConflict(ValueError):
     """A source row cannot safely be inserted or treated as a duplicate."""
 
+    def __init__(
+        self, message: str, *, code: str = "identity",
+        candidate_ids: tuple[int, ...] = (), candidate_category: str | None = None,
+        expected: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.candidate_ids = candidate_ids
+        self.candidate_category = candidate_category
+        self.expected = expected
+
 
 class LegacySourceRequired(ImportConflict):
     """An untracked legacy record needs exact original-CSV proof."""
@@ -73,7 +84,8 @@ class ImportIdentity:
 
     def check_stored(self, category: str, row: tuple) -> None:
         if self.snapshot(category, row[0]) != row[3]:
-            raise ImportConflict("Local transaction changed since its source identity was recorded")
+            raise ImportConflict("Local transaction changed since its source identity was recorded",
+                                 code="local_edit", candidate_ids=(row[0],))
 
     def matches_values(self, category: str, record_id: int, expected: dict[str, object]) -> bool:
         stored = json.loads(self.snapshot(category, record_id))
@@ -97,7 +109,8 @@ class ImportIdentity:
                     (category, record[0], encoded),
                 ).fetchone()
                 if record[2] != encoded and legacy_match is None:
-                    raise ImportConflict("The same broker ID has different source content")
+                    raise ImportConflict("The same broker ID has different source content",
+                                         code="source_changed", candidate_ids=(record[0],))
                 return record[0]
         candidates = self.conn.execute(
             "SELECT record_id,broker_id,source,stored FROM csv_identities "
@@ -105,7 +118,8 @@ class ImportIdentity:
             (category, encoded, encoded, broker_id),
         ).fetchall()
         if len(candidates) > 1:
-            raise ImportConflict("Multiple transactions match a source row without a unique broker ID")
+            raise ImportConflict("Multiple transactions match a source row without a unique broker ID",
+                                 code="ambiguous", candidate_ids=tuple(row[0] for row in candidates))
         if candidates:
             record = candidates[0]
             self.check_stored(category, record)
@@ -119,11 +133,13 @@ class ImportIdentity:
             # Trades keep buy/sell in separate counters, but broker IDs span both.
             if category in ("buy", "sell"):
                 opposite = "sell" if category == "buy" else "buy"
-                if self.conn.execute(
-                    "SELECT 1 FROM csv_identities WHERE category=? AND broker_id=?",
+                other = self.conn.execute(
+                    "SELECT record_id FROM csv_identities WHERE category=? AND broker_id=?",
                     (opposite, broker_id),
-                ).fetchone():
-                    raise ImportConflict("A broker trade ID changed its action")
+                ).fetchone()
+                if other is not None:
+                    raise ImportConflict("A broker trade ID changed its action", code="action",
+                                         candidate_ids=(other[0],), candidate_category=opposite)
             return None
 
         # A nearby timestamp is only an ambiguity guard, never a timezone correction.
@@ -140,12 +156,24 @@ class ImportIdentity:
             (category, source["ISIN"], center - 26 * 3600, center + 26 * 3600),
         ).fetchall()
         if any(record[2] is None for record in nearby):
-            raise LegacySourceRequired(f"Legacy {category} requires reconciliation with its original CSV")
-        for record in nearby:
-            previous = json.loads(record[2])
+            raise LegacySourceRequired(
+                f"Legacy {category} requires reconciliation with its original CSV", code="legacy",
+                candidate_ids=tuple(row[0] for row in nearby if row[2] is None),
+            )
+        nearby_sources = [(record, json.loads(record[2])) for record in nearby]
+        for record, previous in nearby_sources:
             if str(previous["time"]).startswith("naive:") != source_time.startswith("naive:"):
-                raise ImportConflict(f"Legacy {category} timezone requires explicit source CSV reconciliation")
+                raise ImportConflict(f"Legacy {category} timezone requires explicit source CSV reconciliation",
+                                     code="timezone", candidate_ids=tuple(
+                                         item[0] for item, content in nearby_sources
+                                         if str(content["time"]).startswith("naive:") != source_time.startswith("naive:")
+                                     ))
             if previous["time"] == source["time"] and previous["Action"] == source["Action"]:
                 if broker_id is None or record[1] is None:
-                    raise ImportConflict(f"Different {category} content without distinct broker IDs is ambiguous")
+                    raise ImportConflict(f"Different {category} content without distinct broker IDs is ambiguous",
+                                         code="ambiguous", candidate_ids=tuple(
+                                             item[0] for item, content in nearby_sources
+                                             if content["time"] == source["time"] and content["Action"] == source["Action"]
+                                             and (broker_id is None or item[1] is None)
+                                         ))
         return None

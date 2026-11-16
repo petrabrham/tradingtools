@@ -14,11 +14,12 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from threading import Event
-from typing import Generator, Literal, NoReturn, TypedDict, TypeGuard
+from typing import Callable, Generator, Literal, NoReturn, TypedDict, TypeGuard
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -29,6 +30,22 @@ from keyring.errors import KeyringError
 if sys.platform == "win32":
     import msvcrt
     from win32ctypes.pywin32 import pywintypes, win32cred
+
+
+@dataclass(frozen=True)
+class APIProgress:
+    phase: str
+    year: int | None = None
+    wait_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class ArchivedCSV:
+    year: int
+    path: Path
+    sha256: str
+    report_id: int
+    complete: bool
 
 
 class _ArchiveReport(TypedDict):
@@ -85,6 +102,7 @@ class Trading212API:
         account_id: int | None = None,
         timeout: float = 30.0,
         logger: logging.Logger | None = None,
+        on_progress: Callable[[APIProgress], None] | None = None,
     ) -> None:
         if environment not in ("live", "demo"):
             raise ValueError("Trading212 environment must be 'live' or 'demo'.")
@@ -105,6 +123,7 @@ class Trading212API:
         self._account_id = account_id
         self._timeout = float(timeout)
         self._logger = logger or logging.getLogger("trading_tools.trading212")
+        self._on_progress = on_progress
         self._keyring: Windows.WinVaultKeyring | None = None
         self._next_request_at: dict[tuple[str, str], float] = {}
         self._pending_creation: tuple[dict[str, object], set[int]] | None = None
@@ -120,6 +139,25 @@ class Trading212API:
     @property
     def account_id(self) -> int | None:
         return self._account_id
+
+    @classmethod
+    def current_archive_year(cls) -> int:
+        return datetime.now(ZoneInfo(cls._ARCHIVE_TIMEZONE)).year
+
+    def _emit(self, phase: str, *, year: int | None = None, wait_seconds: float | None = None) -> None:
+        if self._on_progress is not None:
+            self._on_progress(APIProgress(phase, year, wait_seconds))
+
+    def _notify_archived(self, year: int, callback: Callable[[ArchivedCSV], None] | None) -> None:
+        if callback is None:
+            return
+        if self._archive_state is None or self._archive_root is None:
+            raise RuntimeError("No active archive for report notification.")
+        report = self._recommended_reports(self._archive_state)[year]
+        callback(ArchivedCSV(
+            year, self._archive_path(self._archive_root, report["file"], year),
+            report["sha256"], report["reportId"], report["complete"],
+        ))
 
     def _fail(self, message: str) -> NoReturn:
         self._logger.error(message)
@@ -213,6 +251,7 @@ class Trading212API:
         self._check_operation(cancel_event, deadline)
         duration = min(max(0.0, delay), max(0.0, deadline - time.monotonic()))
         if duration:
+            self._emit("Waiting for API rate limit / retry", wait_seconds=duration)
             if cancel_event is None:
                 time.sleep(duration)
             else:
@@ -396,11 +435,30 @@ class Trading212API:
                 self._raise_api_status(status, self._EXPORT_PATH)
         self._fail("Could not retrieve Trading212 CSV reports.")
 
-    def save_credentials(self, api_key: str, api_secret: str) -> int:
-        """Verify and store a key pair, returning the connected account ID."""
+    def verify_credentials(
+        self, api_key: str, api_secret: str, *,
+        cancel_event: Event | None = None, wait_timeout: float = 600.0,
+    ) -> int:
+        """Verify an entered pair without changing the saved credentials."""
         self._validate_credentials(api_key, api_secret)
         self._credential_backend()
-        account_id = self._verify_credentials(api_key, api_secret)
+        deadline = self._deadline(wait_timeout)
+        self._check_operation(cancel_event, deadline)
+        self._emit("Verifying account")
+        return self._verify_credentials(
+            api_key, api_secret, cancel_event=cancel_event, deadline=deadline,
+        )
+
+    def save_credentials(
+        self, api_key: str, api_secret: str, *,
+        cancel_event: Event | None = None, wait_timeout: float = 600.0,
+    ) -> int:
+        """Verify and store a key pair, returning the connected account ID."""
+        account_id = self.verify_credentials(
+            api_key, api_secret, cancel_event=cancel_event, wait_timeout=wait_timeout,
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Trading212 operation cancelled before saving credentials.")
         payload = json.dumps({"api_key": api_key, "api_secret": api_secret})
         try:
             # keyring.set_password retains an old-secret backup; overwrite one native record.
@@ -451,6 +509,7 @@ class Trading212API:
         """Verify that the stored credentials still match the connected account."""
         deadline = self._deadline(wait_timeout)
         self._check_operation(cancel_event, deadline)
+        self._emit("Verifying account")
         return self._verify_credentials(
             *self.load_credentials(), cancel_event=cancel_event, deadline=deadline,
         )
@@ -518,6 +577,7 @@ class Trading212API:
         cancel_event: Event | None = None, wait_timeout: float = 600.0,
     ) -> int:
         """Request all history categories; return an ID for waiting or resuming."""
+        self._emit("Requesting CSV report")
         payload: dict[str, object] = {
             "timeFrom": self._utc_time(time_from),
             "timeTo": self._utc_time(time_to),
@@ -595,6 +655,7 @@ class Trading212API:
         self, report_id: int, cancel_event: Event | None, deadline: float,
     ) -> str:
         while True:
+            self._emit("Waiting for CSV report")
             reports = self._list_reports(cancel_event, deadline)
             report = next((item for item in reports if item["reportId"] == report_id), None)
             if report is None:
@@ -789,6 +850,7 @@ class Trading212API:
             *self.load_credentials(), cancel_event=cancel_event, deadline=deadline,
         )
         url = self._wait_for_report(report_id, cancel_event, deadline)
+        self._emit("Downloading CSV report")
         temporary: Path | None = None
         try:
             descriptor, filename = tempfile.mkstemp(
@@ -1277,6 +1339,7 @@ class Trading212API:
     def get_archived_csvs(
         self, archive_directory: str | Path, *,
         cancel_event: Event | None = None, wait_timeout: float = 600.0,
+        on_report: Callable[[ArchivedCSV], None] | None = None,
     ) -> list[Path]:
         """Verify committed CSVs and recover validated local downloads, without API calls."""
         deadline = self._deadline(wait_timeout)
@@ -1296,6 +1359,8 @@ class Trading212API:
                         "Trading212 archive has an unfinished report; returning only committed CSVs."
                     )
                 recommended = self._recommended_reports(state)
+                for year in sorted(recommended):
+                    self._notify_archived(year, on_report)
                 return [
                     self._archive_path(root, recommended[year]["file"], year)
                     for year in sorted(recommended)
@@ -1307,6 +1372,7 @@ class Trading212API:
         self, archive_directory: str | Path, first_year: int, *,
         refresh_years: tuple[int, ...] = (), as_of: datetime | None = None,
         cancel_event: Event | None = None, wait_timeout: float = 600.0,
+        on_report: Callable[[ArchivedCSV], None] | None = None,
     ) -> list[Path]:
         """Archive Prague calendar years; never import into the analytical database."""
         now = datetime.now(timezone.utc) if as_of is None else as_of
@@ -1340,6 +1406,7 @@ class Trading212API:
                 self._resume_archive_report(cancel_event, self._deadline(wait_timeout))
                 recommended = self._recommended_reports(state)
                 for year in range(first_year, current_year + 1):
+                    self._emit("Preparing archive year", year=year)
                     deadline = self._deadline(wait_timeout)
                     self._check_operation(cancel_event, deadline)
                     start, end = self._year_bounds(year)
@@ -1347,12 +1414,14 @@ class Trading212API:
                     if resumed == (
                         year, self._utc_time(start), self._utc_time(time_to), year < current_year,
                     ):
+                        self._notify_archived(year, on_report)
                         continue
                     old = recommended.get(year)
                     if (
                         year != current_year and old is not None and old["complete"]
                         and year not in refresh_years and end < now - timedelta(days=7)
                     ):
+                        self._notify_archived(year, on_report)
                         continue
                     state["pending"] = {
                         "year": year, "timeFrom": self._utc_time(start),
@@ -1365,6 +1434,8 @@ class Trading212API:
                     }
                     self._save_archive()
                     self._resume_archive_report(cancel_event, deadline)
+                    self._emit("Archived CSV report", year=year)
+                    self._notify_archived(year, on_report)
                 recommended = self._recommended_reports(state)
                 return [
                     self._archive_path(root, recommended[year]["file"], year)

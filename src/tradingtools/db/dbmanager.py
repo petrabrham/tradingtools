@@ -11,7 +11,7 @@ from copy import deepcopy
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from threading import Event
-from typing import Optional, Tuple, Dict, List, Iterator, Generator, Literal, TypedDict
+from typing import Optional, Tuple, Dict, List, Iterator, Generator, Literal, TypedDict, TYPE_CHECKING
 import pandas as pd
 from tradingtools.config.cnb_rate import cnb_rate
 import logging
@@ -25,14 +25,28 @@ from tradingtools.db.repositories.pairings import PairingsRepository
 from tradingtools.db.decorators import requires_connection, requires_repo
 from tradingtools.db.import_identity import ImportConflict, ImportIdentity, LegacySourceRequired
 
+if TYPE_CHECKING:
+    from tradingtools.import_diagnostics import ImportComparison
 
-class ImportIssue(TypedDict):
+
+class _ImportIssueDetails(TypedDict, total=False):
+    code: str
+    candidate_ids: tuple[int, ...]
+    candidate_category: str
+    expected: dict[str, object]
+
+
+class ImportIssue(_ImportIssueDetails):
     row: int
     action: str
     message: str
 
 
-class ImportResult(TypedDict):
+class _ImportComparisons(TypedDict, total=False):
+    comparisons: list["ImportComparison"]
+
+
+class ImportResult(_ImportComparisons):
     records: int
     columns: List[str]
     processed: int
@@ -514,8 +528,23 @@ class DatabaseManager:
                 issue: ImportIssue = {"row": position, "action": action, "message": str(error)}
                 result["errors"].append(issue)
                 if isinstance(error, ImportConflict):
+                    issue["code"] = error.code
+                    issue["candidate_ids"] = error.candidate_ids
+                    issue["candidate_category"] = error.candidate_category or category
+                    if error.expected is not None:
+                        issue["expected"] = error.expected
                     result["conflicts"].append(issue)
                 self.logger.error("Failed to import row %d (%s): %s", position, action, error)
+                if isinstance(error, sqlite3.Error) and (
+                    (getattr(error, "sqlite_errorcode", 0) & 255) in {
+                        getattr(sqlite3, name, -1) for name in (
+                            "SQLITE_IOERR", "SQLITE_FULL", "SQLITE_CORRUPT", "SQLITE_NOTADB",
+                            "SQLITE_CANTOPEN", "SQLITE_READONLY", "SQLITE_BUSY", "SQLITE_LOCKED",
+                        )
+                    }
+                    or (isinstance(error, sqlite3.OperationalError) and not hasattr(sqlite3, "SQLITE_IOERR"))
+                ):
+                    raise
             result["processed"] += 1
             if position % batch_size == 0 and position < len(df):
                 yield deepcopy(result)
@@ -655,7 +684,8 @@ class DatabaseManager:
             ]
             if len(matching) != 1:
                 raise ImportConflict(
-                    f"Legacy {category} does not uniquely match CSV values; original rates and contents must be verified"
+                    f"Legacy {category} does not uniquely match CSV values; original rates and contents must be verified",
+                    code="legacy_values", candidate_ids=tuple(candidates), expected=expected,
                 )
             identity.remember(category, matching[0], broker_id, source)
             self.logger.info("Verified original CSV for legacy %s record %d", category, matching[0])
@@ -666,7 +696,7 @@ class DatabaseManager:
             try:
                 if identity.match(category, broker_id, source) is not None:
                     return 0
-            except LegacySourceRequired:
+            except LegacySourceRequired as error:
                 timestamp = self.timestr_to_timestamp(time_str)
                 legacy_rows = self.conn.execute(
                     f"SELECT d.id FROM {identity.TABLES[category]} d "
@@ -675,6 +705,11 @@ class DatabaseManager:
                     "WHERE i.record_id IS NULL AND d.timestamp=? AND s.isin IS ?",
                     (category, timestamp, source["ISIN"]),
                 ).fetchall()
+                if not legacy_rows:
+                    raise ImportConflict(
+                        f"Legacy {category} timestamp differs; explicit source timezone reconciliation is required",
+                        code="timezone", candidate_ids=error.candidate_ids,
+                    ) from error
                 return link_legacy([record_id for (record_id,) in legacy_rows], timestamp)
             if category in ("buy", "sell", "interest"):
                 table = identity.TABLES[category]
@@ -684,7 +719,8 @@ class DatabaseManager:
                 if legacy is not None:
                     timestamp = self.timestr_to_timestamp(time_str)
                     if legacy[1] != timestamp:
-                        raise ImportConflict("Legacy transaction timestamp differs; explicit source timezone reconciliation is required")
+                        raise ImportConflict("Legacy transaction timestamp differs; explicit source timezone reconciliation is required",
+                                             code="timezone", candidate_ids=(legacy[0],))
                     return link_legacy([legacy[0]], timestamp)
             inserted = self._insert_csv_row(row, category)
             if not inserted:

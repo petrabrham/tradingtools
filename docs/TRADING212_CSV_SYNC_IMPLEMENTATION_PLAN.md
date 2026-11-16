@@ -1,7 +1,7 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapy 1–5 dokončeny, etapa 6 čeká na pokyn.
+Stav: etapová implementace; etapy 1–6 dokončeny, etapa 7 čeká na pokyn.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -714,7 +714,7 @@ včetně ochrany proti nejednoznačnosti a rollbacku při selhání zápisu zdro
 
 #### Etapa 6 — propojení s GUI a kompletní synchronizační průběh
 
-**Stav:** čeká. **Předpoklady:** etapy 1–5.
+**Stav:** dokončeno. **Předpoklady:** etapy 1–5.
 
 - Přidat příkaz menu, první nastavení účtu/archivu/prvního roku
   a správu uloženého pověření.
@@ -732,6 +732,52 @@ okna během čekání. GUI zůstává ovladatelné a nevznikají duplicity.
 
 **Hranice etapy:** žádný nový průvodce obnovou ani automatická synchronizace
 při startu; jen dohodnutý ručně spouštěný příkaz.
+
+**Výsledek etapy 6:**
+
+- `File > Read transactions from Trading212...` spouští ověření účtu,
+  kontrolu/obnovu místního archivu, roční exporty a import. První propojení
+  nabízí nastavení a vyžaduje potvrzení ověřeného účtu; další správa je
+  v `Options > Trading212 connection...`. Prostředí/účet nelze vázané DB
+  tiše změnit. Key/Secret zůstávají výhradně v nativním Správci pověření.
+- HTTP, limity, nejistý POST, ověřování a zveřejnění archivu zůstávají
+  v `Trading212API`. Volitelné bezpečné události a ověřené deskriptory
+  reportů předávají výsledek koordinátoru až po zveřejnění archivu.
+  Chyba následného importu nezpůsobí opakovaný POST.
+- Koordinátor a GUI používají vlastní worker/SQLite připojení, frontu,
+  průběh a zrušení. Souběžné importy a výměna DB jsou blokované menu
+  i obsluhou příkazů. Zavření progress okna pouze ruší běh; zavření
+  hlavního okna čeká na úklid workeru a potom standardně uloží session.
+  Pomocné Tk callbacky se po obnovení původní obsluhy odregistrují.
+- Schéma zůstává **2**, bez nové tabulky konfliktů. V `settings` jsou
+  ne-tajné údaje propojení a malé verzované stavy podle roku/SHA-256,
+  základní počty a časy pokusů/dokončení. Nedokončené/částečné/chybové
+  importy se opakují přes deduplikaci; dokončený shodný soubor se
+  přeskočí, pokud uživatel výslovně nevybere obnovu daného roku.
+- Přehled odděluje pokrytí archivu (celý/průběžný rok) od úspěchu
+  importu, načtené/přidané počty, duplicity, nepodporované/ignorované
+  akce a chyby/konflikty. Při řádkových konfliktech pokračují další roky;
+  chyby identity, archivu, DB nebo uložení stavu ukončí běh viditelně.
+  Potvrzené CSV i dříve commitnuté řádky zůstávají pro opakování.
+- `View last import conflicts...` nabízí pouze čtení, také po ručním
+  CSV importu. Zobrazuje identifikované kandidáty, původní zdroj,
+  skutečná uložená pole, zaznamenaný původní snapshot a očekávané
+  hodnoty jen tam, kde už byly spočteny. Nekombinuje částky v různých
+  měnách a nedostupné interpretace nenahrazuje nulou.
+  Porovnání jsou pouze v paměti aktuálního běhu, nikoli v DB/settings.
+  Zmizí při dalším importu, výměně/uvolnění DB či ukončení aplikace.
+
+**Ověření výsledku:** **240 cílených offline testů prošlo**. Pokrývají
+nový koordinátor a skutečná Tk okna, rušení oběma způsoby zavření,
+chybu uložení pověření/stavu, částečný rok následovaný úspěšným rokem,
+opakování po chybě disku, kandidáty a původní snapshoty bez zápisu,
+reimport 32 starých dividend, ADR poplatky, migraci a zamčená párování.
+Prošla kontrola syntaxe a whitespace; nová syntaxe je slučitelná s
+deklarovaným Pythonem 3.10, běhové testy proběhly na Pythonu 3.12.
+Jednotlivé dřívější kontroly Pylance nenahrazují celoprojektový type-check.
+Reálné API, skutečné pověření ani pracovní DB nebyly při této etapě
+použity. Živé hranice exportů, zabalená Windows aplikace a úplná
+závěrečná regrese zůstávají etapě 7.
 
 #### Etapa 7 — obnova, Windows executable a závěrečná regrese
 

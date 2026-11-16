@@ -1,5 +1,33 @@
 # CSV Import Compatibility Notes
 
+## GUI synchronization and current-run conflicts
+
+- **File > Read transactions from Trading212...** uses verified annual archives
+  and the same importer as manual CSV import. **Options > Trading212 connection...**
+  manages the account binding, first year, archive folder and native Windows
+  credentials. The connection is verified and explicitly confirmed before saving.
+- Schema remains **2**. Existing `settings` stores only non-secret connection
+  details and compact versioned import status/counts per year and CSV hash.
+  Running/partial/cancelled/failed reports are retried; a completed unchanged
+  revision is skipped unless explicitly refreshed.
+- Progress, cancellation and competing-operation guards apply to API imports.
+  Closing the progress window leaves the app open; closing the main window waits
+  for worker cleanup before normal exit. Committed rows and archives are retained.
+- Row conflicts and unsupported actions produce a partial result and do not stop
+  later years. Fatal account/archive/database failures stop synchronization.
+  Missing exchange rates remain row errors, with no change of rate mode or zero
+  substitution. Add the required rates and retry the retained CSV.
+- Both import paths provide **View last import conflicts...**: read-only
+  source/DB comparisons, all identified candidates, recorded original snapshots,
+  and expected stored values only where already computed. Raw foreign-currency
+  totals are not directly compared with CZK totals; unavailable values are not zero.
+- Comparisons exist only in memory until the next import, database switch/release
+  or exit. No conflict table, raw-row settings, permanent dismissal or correction
+  controls are added. Restarting loses the list; reimport reconstructs it.
+- The result distinguishes full-year/year-to-date archive coverage from complete/
+  partial/cancelled/failed **import**, and shows per-category read/added counts,
+  duplicates, unsupported actions, intentional skips and errors/conflicts.
+
 ## Broker export 2026
 
 - Import supports both time column variants:

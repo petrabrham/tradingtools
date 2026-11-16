@@ -14,6 +14,7 @@ from tradingtools.db.dbmanager import DatabaseManager
 from tradingtools.db.import_identity import ImportIdentity
 from tradingtools.db.repositories.dividends import DividendsRepository
 from tradingtools.db.repositories.fees import FeesRepository
+from tradingtools.import_diagnostics import build_comparisons
 
 
 class TestCSVIdentity(unittest.TestCase):
@@ -88,6 +89,49 @@ class TestCSVIdentity(unittest.TestCase):
 
     def import_rows(self, rows):
         return self.db.import_dataframe(pd.DataFrame(rows))
+
+    def test_comparison_keeps_all_ambiguous_legacy_candidates_without_rate_or_database_writes(self):
+        row = self.row()
+        ids = [self.seed_legacy(row), self.seed_legacy(row)]
+        frame = pd.DataFrame([row])
+        result = self.db.import_dataframe(frame)
+        before = list(self.conn.iterdump())
+        self.rate.reset_mock()
+        comparisons = build_comparisons(self.db, frame, result, "synthetic.csv", 2024)
+        self.assertEqual(len(comparisons), 1)
+        comparison = comparisons[0]
+        self.assertEqual({candidate.record_id for candidate in comparison.candidates}, set(ids))
+        self.assertIsNotNone(comparison.expected)
+        self.assertEqual(comparison.expected["net_czk"], comparison.candidates[0].stored["net_czk"])
+        self.assertEqual(comparison.incoming["Currency (Total)"], "USD")
+        self.assertIsNone(comparison.candidates[0].source)
+        self.rate.assert_not_called()
+        self.assertEqual(list(self.conn.iterdump()), before)
+
+    def test_comparison_shows_local_edit_against_recorded_snapshot_without_guessing_import_values(self):
+        row = self.row("Interest on cash", ID="edited")
+        frame = pd.DataFrame([row])
+        self.db.import_dataframe(frame)
+        self.conn.execute("UPDATE interests SET total_czk=999")
+        self.conn.commit()
+        result = self.db.import_dataframe(frame)
+        self.rate.reset_mock()
+        comparison = build_comparisons(self.db, frame, result, "synthetic.csv")[0]
+        self.assertEqual(comparison.code, "local_edit")
+        self.assertEqual(comparison.candidates[0].stored["total_czk"], 999)
+        self.assertEqual(comparison.candidates[0].recorded["total_czk"], 4)
+        self.assertIsNone(comparison.expected)
+        self.rate.assert_not_called()
+
+    def test_comparison_does_not_choose_first_of_multiple_tracked_anonymous_candidates(self):
+        self.import_rows([self.row(ID="first"), self.row(ID="second", Total=3)])
+        frame = pd.DataFrame([self.row(Total=4)])
+        result = self.db.import_dataframe(frame)
+        comparison = build_comparisons(self.db, frame, result, "synthetic.csv")[0]
+        self.assertEqual(comparison.code, "ambiguous")
+        self.assertEqual(len(comparison.candidates), 2)
+        self.assertEqual({candidate.source["Total"] for candidate in comparison.candidates}, {2, 3})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0], 2)
 
     def test_migration_backs_up_preserves_ids_times_amounts_pairings_and_sequence(self):
         self.seed_legacy(self.row())

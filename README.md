@@ -26,12 +26,13 @@ automatically, with the same filters and views as File > Connect Database.
 Missing files are skipped without creating a new database. Existing user
 configurations need no migration; the new setting is added on exit.
 
-## Trading 212 integration (stages 1-3)
+## Trading 212 integration
 
-[Trading212API](src/tradingtools/trading212_api.py) currently provides account
+[Trading212API](src/tradingtools/trading212_api.py) provides account
 identity verification, credential management, and export/download of a CSV
 report for a supplied interval, annual archiving, and restart recovery.
-The synchronization menu and automatic database import are not implemented yet.
+The GUI connects annual archives to the existing CSV importer. Synchronization
+is started manually; it never runs automatically at startup.
 
 The API integration requires Windows and the native Windows backend of
 `keyring`. API Key and Secret are stored together in Windows Credential
@@ -45,6 +46,54 @@ pair. `load_credentials`, `verify_account`, and `delete_credentials` operate
 on the connected account. Deleting local credentials does not revoke the
 key at Trading 212 or delete the database. A database backup does not
 include credentials; configure the connection again on another computer.
+
+### Using the GUI
+
+1. Create or connect a database, choosing its normal daily/annual exchange-rate
+   mode. For annual rates, import the required years before synchronization.
+2. Select **Options > Trading212 connection...** (also offered on the first sync).
+   Choose demo/live, the first year of account history, a protected archive folder,
+   and enter the masked Key and Secret. Verification does not save the entered
+   pair until you confirm the displayed account.
+3. Select **File > Read transactions from Trading212...**. Leave the optional
+   comma-separated refresh-years field blank for normal synchronization.
+   Explicitly selected older years are exported and rechecked even when unchanged.
+4. Read the per-year result: archive coverage (full year/year to date) is separate
+   from import status. Counts distinguish read/added transactions, duplicates,
+   unsupported actions, intentional skips, errors and conflicts.
+
+One database is bound to one account and environment; changing either is refused.
+Connection settings and compact per-year/hash import statuses use the existing
+`settings` table, with **no schema change (still version 2)**. Key replacement
+must verify the bound account. Leave both credential fields blank to reuse the
+saved pair. Removing local credentials keeps the DB, archive and binding.
+
+Workers own their API and SQLite connections. The progress window shows phases,
+rate-limit waits and processed rows. Closing it cancels locally but leaves the
+application open. Closing the main application requests cancellation and exits
+only after worker cleanup and normal session saving. An active CSV read, rate
+lookup or socket operation must finish first. Competing imports and database
+changes are blocked until cleanup.
+
+Verified unfinished archived imports are retried before requesting more reports.
+An identical successfully imported revision is skipped; partial/cancelled/failed
+imports are retried safely through existing deduplication. Already committed rows
+and verified archives survive cancellation or failure. Recoverable row conflicts
+allow later years to continue with an overall partial result. Fatal account,
+archive, database or status-persistence failures stop the run visibly.
+Missing annual rates are errors, never guessed values: import the rates and retry.
+
+**File > View last import conflicts...** opens read-only comparisons for the
+current run, also available after manual CSV import. It separates raw CSV/source
+values, stored fields, expected values when known, and recorded original snapshots;
+missing conversions/timezone interpretations remain unavailable. Ambiguous
+candidates are shown without choosing a match. There are no correction/accept/
+ignore actions. Details live **only in memory**, disappear on the next import,
+database switch/release or exit, and are not saved to a conflict table or settings.
+Reimport the CSV to reconstruct them after restart. Legacy timezone reconciliation
+still requires the explicit non-GUI helper; the viewer does not shift timestamps.
+
+### API surface and archive behavior
 
 CSV report methods:
 
@@ -89,6 +138,13 @@ Annual archive methods:
   API. It can finish a validated local download whose metadata commit was
   interrupted. If a report still needs the API, it logs a warning and returns
   only already committed files.
+
+Both annual methods accept an optional `on_report` callback with a verified
+`ArchivedCSV` descriptor. New reports are notified only after durable publication;
+callback/import failures do not repeat export POSTs. The optional `on_progress`
+constructor callback receives safe phase/year/wait metadata, never raw CSVs,
+credentials or signed URLs. `verify_credentials` checks an entered pair without
+overwriting saved credentials.
 
 Calendar years use **Europe/Prague**, independently of the computer's timezone.
 API requests use UTC. For example, full 2024 runs from
