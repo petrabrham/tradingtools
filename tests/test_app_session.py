@@ -5,7 +5,6 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
-import pandas as pd
 
 from tradingtools.app import TradingToolsApp
 from tradingtools.config.config_loader import ConfigLoader
@@ -159,9 +158,10 @@ class TestApplicationSession(unittest.TestCase):
 
     def test_csv_read_failure_never_shows_success_or_uses_uninitialized_result(self):
         self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
         with (
             patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
-            patch("tradingtools.app.pd.read_csv", side_effect=ValueError("Invalid CSV")),
+            patch("tradingtools.app.CSVImportDialog.show", side_effect=ValueError("Invalid CSV")),
             patch("tradingtools.app.messagebox.showinfo") as info,
         ):
             self.app.open_csv_file()
@@ -172,6 +172,7 @@ class TestApplicationSession(unittest.TestCase):
 
     def test_csv_partial_import_shows_issues_not_success(self):
         self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
         self.db.import_dataframe.return_value = {
             "records": 4, "processed": 4, "status": "partial",
             "read": {"buy": 1, "sell": 0, "interest": 1, "dividend": 0, "insignificant": 1, "unknown": 1},
@@ -182,7 +183,7 @@ class TestApplicationSession(unittest.TestCase):
         }
         with (
             patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
-            patch("tradingtools.app.pd.read_csv", return_value=pd.DataFrame()),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=self.db.import_dataframe.return_value),
             patch("tradingtools.app.messagebox.showinfo") as info,
             patch("tradingtools.app.messagebox.showwarning") as warning,
         ):
@@ -199,6 +200,7 @@ class TestApplicationSession(unittest.TestCase):
 
     def test_csv_duplicate_only_import_still_shows_success_with_zero_added(self):
         self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
         self.db.import_dataframe.return_value = {
             "records": 1, "processed": 1, "status": "complete",
             "read": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0, "insignificant": 0, "unknown": 0},
@@ -208,7 +210,7 @@ class TestApplicationSession(unittest.TestCase):
         }
         with (
             patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
-            patch("tradingtools.app.pd.read_csv", return_value=pd.DataFrame()),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=self.db.import_dataframe.return_value),
             patch("tradingtools.app.messagebox.showinfo") as info,
             patch("tradingtools.app.messagebox.showwarning") as warning,
         ):
@@ -217,6 +219,19 @@ class TestApplicationSession(unittest.TestCase):
         self.showerror.assert_not_called()
         self.assertEqual(info.call_args.args[0], "Success")
         self.assertIn("Duplicates: 1", info.call_args.args[1])
+
+    def test_csv_cancelled_before_import_does_not_show_success(self):
+        self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=None),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+        ):
+            self.app.open_csv_file()
+        info.assert_not_called()
+        self.showerror.assert_not_called()
+        self.db.import_dataframe.assert_not_called()
 
 
 if __name__ == "__main__":

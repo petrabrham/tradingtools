@@ -143,8 +143,16 @@ one final result. Batches limit execution between yields, not transaction size:
 the existing per-row commits remain. Cancellation is checked before every row;
 an active row or exchange-rate lookup finishes first. Previously committed
 rows remain available, and the full CSV can be retried with existing deduplication.
-Iterate on the thread owning the SQLite connection. GUI scheduling and an
-interactive Cancel button are not added in stage 4.
+Iterate on the thread owning the SQLite connection.
+
+Manual CSV import displays a modal progress window with processed/total row
+counts and a Cancel button. CSV reading and import run on a worker with its own
+SQLite connection, leaving the UI responsive during exchange-rate lookups.
+CSV loading initially uses an indeterminate indicator. Closing the progress
+window requests cancellation; it waits for the active operation and preserves
+already committed rows. Other application controls remain blocked until the
+worker closes its connection. Cancellation during file reading or a rate lookup
+takes effect after that operation returns.
 
 Missing mandatory values, invalid/non-finite amounts, missing currencies for
 nonzero amounts, and write/rate errors are reported instead of silently replaced

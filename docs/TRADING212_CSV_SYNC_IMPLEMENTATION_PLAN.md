@@ -600,6 +600,14 @@ nebyly plošně opravovány. Nebyly použity osobní transakce ani živé API.
 API/archivní třída, databázové schéma a dividendová identita se nemění.
 Pokračování etapou 5 vyžaduje další výslovný pokyn.
 
+**Následné doplnění na žádost uživatele:** ruční CSV import má nyní modální
+progress dialog s počtem řádků, procenty a tlačítkem Cancel. Při čtení CSV
+zobrazuje neurčitý průběh. Import běží v pracovním vlákně s vlastní SQLite
+connection, GUI se aktualizuje přes frontu a `after`; původní connection
+aplikace se mezi vlákny nesdílí. Dialog při zrušení počká na dokončení
+aktivního řádku/čtení/kurzu a zachová již potvrzené transakce. Tato změna
+nezapojuje Trading212 menu ani neposouvá dividendovou migraci etapy 5.
+
 #### Etapa 5 — dividendová identita a staré časové údaje
 
 **Stav:** čeká. **Předpoklad:** etapa 4 a odsouhlasení konkrétního

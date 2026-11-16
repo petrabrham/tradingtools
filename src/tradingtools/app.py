@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk  # Required for Treeview and Notebook
 from tkcalendar import DateEntry
-import pandas as pd
 import os
 from tradingtools.db.dbmanager import DatabaseManager
 from datetime import datetime, timedelta
@@ -18,6 +17,7 @@ from tradingtools.views.pairs_view import PairsView
 from tradingtools.views.open_positions_view import OpenPositionsView
 from tradingtools.dialogs.exchange_rate_dialog import ExchangeRateDialog
 from tradingtools.dialogs.import_rates_dialog import ImportRatesDialog
+from tradingtools.dialogs.csv_import_dialog import CSVImportDialog
 from tradingtools.ui import MenuManager, FilterManager, copy_treeview_to_clipboard
 
 class TradingToolsApp:
@@ -124,13 +124,11 @@ class TradingToolsApp:
         )
         if file_path:
             try:
-                # Read CSV file
-                df = pd.read_csv(file_path)
-
-                self.db.logger.info(f"Importing CSV file: {file_path}")
-
-                # Use DatabaseManager to import DataFrame
-                meta = self.db.import_dataframe(df)
+                if self.db.current_db_path is None:
+                    raise RuntimeError("The open database has no file path")
+                meta = CSVImportDialog(self.root, self.db.current_db_path, file_path).show()
+                if meta is None:
+                    return
                 self.filter_manager.update_year_list()
             except Exception as e:
                 self.db.logger.exception("CSV import failed")
@@ -164,6 +162,10 @@ class TradingToolsApp:
                 message += "\nSee the log for all errors."
             if meta["status"] == "complete":
                 messagebox.showinfo("Success", message)
+            elif meta["status"] == "cancelled":
+                messagebox.showwarning(
+                    "Import cancelled", message + "\nAlready imported rows have been kept."
+                )
             else:
                 messagebox.showwarning("Import incomplete", message)
 
