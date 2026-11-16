@@ -1,7 +1,7 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapy 1–2 dokončeny, etapa 3 čeká na potvrzení.
+Stav: etapová implementace; etapy 1–3 dokončeny, etapa 4 čeká na potvrzení.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -94,11 +94,19 @@ skládání dílčích exportů. Nevydávat dílčí soubor za úplný roční p
 - První rok archivu zvolí uživatel, typicky rok prvních transakcí na účtu.
   Datum nejnovější transakce v DB samo neurčuje začátek úplného archivu.
 
-Konkrétní API timestampy hranic stanovit až po ověření časové sémantiky.
-Pro archiv použít jedno explicitně zvolené roční časové členění,
-sladěné s brokerovým exportem a evidencí aplikace; nespoléhat na aktuální
-časovou zónu počítače. Otestovat přelom roku a přestupný rok.
-Názvem roku neskrývat nesoulad mezi požadovaným a skutečným pokrytím.
+Uživatel pro etapu 3 výslovně zvolil **Europe/Prague**, tedy český místní
+kalendářní rok nezávisle na nastavení počítače. Pro API se hranice převádějí
+do UTC: úplný rok 2024 od `2023-12-31T23:00:00Z` do
+`2024-12-31T22:59:59.999999Z`. Požadovaný konec je poslední mikrosekunda
+místního roku; export průběžného roku končí zachyceným okamžikem synchronizace.
+Časová zóna je součástí metadat. Všechny CSV timestampy musejí mít zónu
+a ležet v požadovaném intervalu; původní bytes se kvůli ročnímu členění nefiltrují.
+
+Přelom roku, přestupný rok a poslední zlomek sekundy ověřit offline.
+Konkrétní přesné pražské hranice a jejich interpretace brokerem ještě nebyly
+ověřeny živým API; původní živé ověření etapy 0 používalo UTC interval
+zakončený celou sekundou. Neshodu vráceného intervalu neobcházet
+tolerancí ani automatickým prohlášením souboru za úplný.
 
 ### Umístění a soubory
 
@@ -112,14 +120,17 @@ Navržené členění:
 <vybraná složka>\Trading212\<prostředí>\<účet>\
     archive.json
     2025\
-        Trading212_2025_full_<čas-stažení>_<reportId>.csv
+        Trading212_2025_<UTC-čas-verze>_<reportId>.csv
     2026\
-        Trading212_2026_partial_<čas-stažení>_<reportId>.csv
+        Trading212_2026_<UTC-čas-verze>_<reportId>.csv
 ```
 
 Jména mají obsahovat bezpečné identifikátory a UTC čas bez dvojteček.
 Žádná credentials v názvech ani metadatech. Archiv obsahuje citlivá
 finanční data; doporučit uživateli chráněné úložiště a samostatnou zálohu.
+Jméno označuje neměnnou verzi souboru, nikoli poslední potvrzené pokrytí.
+Úplnost a doporučená revize jsou v metadatech: nezměněný soubor lze tak
+znovu použít i při finalizaci roku bez přejmenování či vytvoření další kopie.
 
 - Uchovat originální CSV bytes bez přepočtů, filtrace a přepisování sloupců.
 - `archive.json` uložit mimo DB: rok, účet/prostředí, reportId, požadovaný
@@ -461,7 +472,7 @@ python -m unittest discover -s tests -p "test_trading212_api.py" -v
 
 #### Etapa 3 — roční archiv a plánování exportů
 
-**Stav:** čeká. **Předpoklad:** etapa 2.
+**Stav:** dokončena. **Předpoklad:** etapa 2.
 
 - Do stejné třídy doplnit výběr roků od uživatelem zadaného prvního roku.
 - Rozlišovat uzavřený rok a průběžný aktuální rok; finalizovat předchozí
@@ -476,6 +487,45 @@ nezměněná/změněná revize, chyba disku a pád mezi CSV a metadaty.
 
 **Hranice etapy:** archiv a API jsou použitelné bez Tkinter a otevřené DB.
 Ještě neimportovat automaticky do databáze.
+
+**Výsledek etapy 3:**
+
+- `Trading212API.sync_yearly_csv(archive_directory, first_year, ...)` exportuje
+  chybějící a aktuální roky, finalizuje průběžný starší rok a respektuje
+  sedmidenní překryv. `refresh_years` umožňuje výslovnou opravu starších roků.
+  Časový rozpočet platí samostatně pro jeden rok; limity API jsou společné
+  pro všechna volání stejné instance.
+- Archiv je oddělený podle prostředí a účtu a používá `Europe/Prague`.
+  `archive.json` eviduje všechny potvrzené exporty a doporučené `reportId`
+  pro jednotlivé roky. Při stejných bytes může více exportů odkazovat na
+  jeden soubor; změněné verze zůstávají vedle původních.
+- Záměr, původní report IDs a nejistota vzniku reportu jsou zapsané před
+  odesláním POST. Po restartu se dohledává původní report nebo pokračuje
+  známým ID; nejasný výsledek nezpůsobí další slepý POST. Potvrzené
+  vzdálené `Failed`/`Canceled` dovolí nový pokus až při dalším běhu.
+- Journal obsahuje konkrétní dočasnou a cílovou cestu i ověřený hash
+  před zveřejněním CSV. Metadata potvrzených revizí se mění až poté.
+  Windows zámek archivu brání souběžným zapisovačům a operační systém
+  jej při zániku procesu uvolní; není nutné ručně odstraňovat „stale lock“.
+- `get_archived_csvs(...)` ověří místní soubory a bez credentials či API
+  vrátí doporučené revize. Umí dokončit přerušené zveřejnění ověřeného
+  CSV; rozpracovaný report vyžadující API ohlásí varováním a poskytne
+  pouze již potvrzené soubory. Neodhaduje pokrytí neznámého orphan CSV.
+- Nová přímá Windows závislost `tzdata` poskytuje data pro `ZoneInfo`.
+  Výběr složky a prvního roku je zatím parametr metody, nikoli GUI dialog.
+
+**Ověřeno:** 43 offline testů včetně celé regrese etap 1–2. Pokryty jsou
+pražské hranice roku a přestupný rok, sedmidenní překryv, prázdný report,
+chybějící rok, nezměněné a změněné revize, nesprávné pokrytí a hash,
+nesprávná identita/metadatová cesta, přerušení a timeout, chyba zápisu
+před POST a po CSV, restart nejistého/známého reportu a lokální obnova
+ověřeného `.part` souboru. Pylance nehlásí chyby syntaxe ani typů.
+Použit stejný cílený testovací příkaz jako v etapě 2.
+
+Žádný skutečný API klíč ani účet nebyl při této etapě použit. Přesné
+pražské hranice je ještě nutné ověřit živým API; viz část 4. GUI,
+databázový import a řešení historických časů zůstávají beze změny.
+Pokračování etapou 4 vyžaduje další výslovný pokyn.
 
 #### Etapa 4 — spolehlivý výsledek existujícího CSV importu
 

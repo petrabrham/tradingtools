@@ -13,6 +13,7 @@ dependencies = [
     "tkcalendar>=1.6,<2",
     "keyring>=25,<26",
     "pywin32-ctypes>=0.2,<1; sys_platform == 'win32'",
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

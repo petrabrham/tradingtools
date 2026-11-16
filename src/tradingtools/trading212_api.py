@@ -2,28 +2,72 @@
 
 import base64
 import csv
+import hashlib
 import http.client
 import json
 import logging
 import math
 import os
+import re
 import ssl
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from threading import Event
-from typing import Literal, NoReturn
+from typing import Generator, Literal, NoReturn, TypedDict, TypeGuard
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 import keyring
 from keyring.backends import Windows
 from keyring.errors import KeyringError
 
 if sys.platform == "win32":
+    import msvcrt
     from win32ctypes.pywin32 import pywintypes, win32cred
+
+
+class _ArchiveReport(TypedDict):
+    year: int
+    timeFrom: str
+    timeTo: str
+    dataIncluded: dict[str, bool]
+    complete: bool
+    reportId: int
+    downloadedAt: str
+    file: str
+    size: int
+    sha256: str
+
+
+class _ArchivePending(TypedDict):
+    year: int
+    timeFrom: str
+    timeTo: str
+    dataIncluded: dict[str, bool]
+    complete: bool
+    state: Literal["prepared", "uncertain", "waiting", "failed"]
+    baselineIds: list[int]
+    reportId: int | None
+    downloadedAt: str
+    file: str | None
+    temporary: str | None
+    size: int | None
+    sha256: str | None
+
+
+class _ArchiveState(TypedDict):
+    version: int
+    environment: str
+    account_id: int
+    timezone: str
+    reports: list[_ArchiveReport]
+    recommended: dict[str, int]
+    pending: _ArchivePending | None
 
 
 class Trading212API:
@@ -32,6 +76,8 @@ class Trading212API:
     _ACCOUNT_PATH = "/api/v0/equity/account/summary"
     _EXPORT_PATH = "/api/v0/equity/history/exports"
     _MAX_CSV_BYTES = 100 * 1024 * 1024
+    _MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
+    _ARCHIVE_TIMEZONE = "Europe/Prague"
 
     def __init__(
         self,
@@ -64,6 +110,8 @@ class Trading212API:
         self._pending_creation: tuple[dict[str, object], set[int]] | None = None
         self._report_requests: dict[int, dict[str, object]] = {}
         self._post_dispatched = False
+        self._archive_root: Path | None = None
+        self._archive_state: _ArchiveState | None = None
 
     @property
     def environment(self) -> Literal["live", "demo"]:
@@ -231,6 +279,8 @@ class Trading212API:
                 context=ssl.create_default_context(),
             )
             if method == "POST":
+                self._check_operation(cancel_event, deadline)
+                self._checkpoint_creation(uncertain=True)
                 self._post_dispatched = True
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
@@ -420,6 +470,13 @@ class Trading212API:
             raise ValueError("CSV report dates must include a time zone.")
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _history_content() -> dict[str, bool]:
+        return {
+            "includeOrders": True, "includeDividends": True,
+            "includeInterest": True, "includeTransactions": True,
+        }
+
     def _report_matches(self, report: dict[str, object], payload: dict[str, object]) -> bool:
         if report.get("dataIncluded") != payload["dataIncluded"]:
             return False
@@ -453,6 +510,7 @@ class Trading212API:
             self._fail("Trading212 returned an invalid recovered report ID.")
         self._report_requests[report_id] = payload
         self._pending_creation = None
+        self._checkpoint_creation(report_id=report_id)
         return report_id
 
     def request_csv_report(
@@ -463,10 +521,7 @@ class Trading212API:
         payload: dict[str, object] = {
             "timeFrom": self._utc_time(time_from),
             "timeTo": self._utc_time(time_to),
-            "dataIncluded": {
-                "includeOrders": True, "includeDividends": True,
-                "includeInterest": True, "includeTransactions": True,
-            },
+            "dataIncluded": self._history_content(),
         }
         if time_from > time_to:
             raise ValueError("CSV report start must not be after its end.")
@@ -484,6 +539,7 @@ class Trading212API:
         self._pending_creation = payload, existing_ids
         self._post_dispatched = False
         try:
+            self._checkpoint_creation()
             for attempt in range(3):
                 try:
                     status, content, _ = self._api_exchange(
@@ -508,15 +564,20 @@ class Trading212API:
                         return self._recover_creation(cancel_event, deadline)
                     self._report_requests[report_id] = payload
                     self._pending_creation = None
+                    self._checkpoint_creation(report_id=report_id)
                     return report_id
                 if status == 408 or 500 <= status < 600:
                     return self._recover_creation(cancel_event, deadline)
                 if status != 429 or attempt == 2:
                     self._pending_creation = None
+                    self._checkpoint_creation()
                     self._raise_api_status(status, self._EXPORT_PATH)
+                self._post_dispatched = False
+                self._checkpoint_creation()
         finally:
             if not self._post_dispatched:
                 self._pending_creation = None
+                self._checkpoint_creation()
         self._fail("Could not request a Trading212 CSV report.")
 
     def list_csv_reports(
@@ -550,6 +611,13 @@ class Trading212API:
                 self._download_target(link)
                 return link
             if status in ("Failed", "Canceled"):
+                if (
+                    self._archive_state is not None
+                    and (pending := self._archive_state["pending"]) is not None
+                    and pending["reportId"] == report_id
+                ):
+                    pending["state"] = "failed"
+                    self._save_archive()
                 self._fail(f"Trading212 report generation ended with {status}.")
             if status not in ("Queued", "Processing", "Running"):
                 self._fail("Trading212 returned an unknown report status.")
@@ -671,6 +739,8 @@ class Trading212API:
                     if total > self._MAX_CSV_BYTES:
                         self._fail("CSV download exceeds the size limit.")
                     file.write(chunk)
+                file.flush()
+                os.fsync(file.fileno())
         except (InterruptedError, TimeoutError, ConnectionError):
             raise
         except OSError:
@@ -726,9 +796,15 @@ class Trading212API:
             )
             temporary = Path(filename)
             os.close(descriptor)
+            self._checkpoint_download(temporary, cancel_event, deadline, validated=False)
             self._download_to_file(url, temporary, cancel_event, deadline)
             self._validate_csv(temporary, cancel_event, deadline)
+            reused = self._checkpoint_download(
+                temporary, cancel_event, deadline, validated=True,
+            )
             self._check_operation(cancel_event, deadline)
+            if reused is not None:
+                return reused
             # Windows rename publishes atomically without replacing an existing destination.
             temporary.rename(destination)
             return destination
@@ -742,3 +818,557 @@ class Trading212API:
                     temporary.unlink()
                 except OSError:
                     self._fail("Could not remove the incomplete Trading212 CSV file.")
+
+    def _year_bounds(self, year: int) -> tuple[datetime, datetime]:
+        zone = ZoneInfo(self._ARCHIVE_TIMEZONE)
+        try:
+            start = datetime(year, 1, 1, tzinfo=zone).astimezone(timezone.utc)
+            end = datetime(year + 1, 1, 1, tzinfo=zone).astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            raise ValueError("Archive year cannot be represented in Prague and UTC time.") from None
+        return start, end - timedelta(microseconds=1)
+
+    def _archive_directory(self, directory: str | Path) -> Path:
+        if self._account_id is None:
+            self._fail("Connect a Trading212 account before accessing its archive.")
+        base = Path(directory).expanduser().resolve()
+        root = base / "Trading212" / self._environment / str(self._account_id)
+        if not root.resolve().is_relative_to(base):
+            self._fail("Trading212 archive directory escapes the selected folder.")
+        return root
+
+    def _archive_path(
+        self, root: Path, relative: str, year: int, *, temporary: bool = False,
+    ) -> Path:
+        path = Path(relative)
+        pattern = (
+            r"\.trading212-[a-zA-Z0-9_-]+\.part" if temporary
+            else rf"Trading212_{year}_[0-9]{{8}}T[0-9]{{12}}Z_[1-9][0-9]*\.csv"
+        )
+        if (
+            path.is_absolute() or path.drive or len(path.parts) != 2
+            or path.parts[0] != str(year) or not re.fullmatch(pattern, path.name)
+        ):
+            self._fail("Trading212 archive contains an unsafe file path.")
+        target = root / path
+        if target.is_symlink() or not target.resolve().is_relative_to(root.resolve()):
+            self._fail("Trading212 archive file escapes its account directory.")
+        return target
+
+    def _valid_archive_record(self, value: object, *, pending: bool) -> bool:
+        if not isinstance(value, dict):
+            return False
+        common = {
+            "year", "timeFrom", "timeTo", "dataIncluded", "complete",
+            "reportId", "downloadedAt", "file", "size", "sha256",
+        }
+        if set(value) != common | ({"state", "baselineIds", "temporary"} if pending else set()):
+            return False
+        year = value["year"]
+        if not isinstance(year, int) or isinstance(year, bool) or not 1 <= year < 9999:
+            return False
+        if type(value["complete"]) is not bool or value["dataIncluded"] != self._history_content():
+            return False
+        included = value["dataIncluded"]
+        if not isinstance(included, dict) or any(type(flag) is not bool for flag in included.values()):
+            return False
+        try:
+            dates = []
+            for key in ("timeFrom", "timeTo", "downloadedAt"):
+                text = value[key]
+                if not isinstance(text, str):
+                    return False
+                date = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if self._utc_time(date) != text:
+                    return False
+                dates.append(date)
+            start, end = self._year_bounds(year)
+            if dates[0] != start or not start <= dates[1] <= end:
+                return False
+            if value["complete"] and dates[1] != end:
+                return False
+        except (ValueError, OverflowError):
+            return False
+        report_id, filename, size, digest = (
+            value["reportId"], value["file"], value["size"], value["sha256"],
+        )
+        if pending:
+            if value["state"] not in ("prepared", "uncertain", "waiting", "failed"):
+                return False
+            ids = value["baselineIds"]
+            if (
+                not isinstance(ids, list)
+                or any(type(item) is not int or item <= 0 for item in ids)
+                or len(ids) != len(set(ids))
+            ):
+                return False
+            if value["state"] in ("prepared", "uncertain"):
+                if any(item is not None for item in (
+                    report_id, filename, size, digest, value["temporary"],
+                )):
+                    return False
+                return True
+            if value["temporary"] is not None and not isinstance(value["temporary"], str):
+                return False
+            if (size is None) != (digest is None):
+                return False
+        if type(report_id) is not int or report_id <= 0:
+            return False
+        if filename is not None and not isinstance(filename, str):
+            return False
+        if not pending and filename is None:
+            return False
+        if size is None and digest is None and pending:
+            return True
+        return (
+            isinstance(size, int) and not isinstance(size, bool)
+            and 0 < size <= self._MAX_CSV_BYTES
+            and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            and isinstance(filename, str)
+        )
+
+    def _valid_archive_state(self, value: object) -> TypeGuard[_ArchiveState]:
+        if not isinstance(value, dict) or set(value) != {
+            "version", "environment", "account_id", "timezone", "reports", "recommended", "pending",
+        }:
+            return False
+        if (
+            type(value["version"]) is not int or value["version"] != 1
+            or type(value["account_id"]) is not int or value["account_id"] != self._account_id
+            or value["environment"] != self._environment
+            or value["timezone"] != self._ARCHIVE_TIMEZONE
+        ):
+            return False
+        reports = value["reports"]
+        recommended = value["recommended"]
+        return (
+            isinstance(reports, list)
+            and all(self._valid_archive_record(item, pending=False) for item in reports)
+            and isinstance(recommended, dict)
+            and all(
+                isinstance(year, str) and year.isdecimal()
+                and type(report_id) is int and report_id > 0
+                for year, report_id in recommended.items()
+            )
+            and (value["pending"] is None or self._valid_archive_record(value["pending"], pending=True))
+        )
+
+    def _file_digest(self, path: Path, cancel_event: Event | None, deadline: float) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with path.open("rb") as file:
+                while True:
+                    self._check_operation(cancel_event, deadline)
+                    chunk = file.read(64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > self._MAX_CSV_BYTES:
+                        self._fail("Archived Trading212 CSV exceeds the size limit.")
+                    digest.update(chunk)
+        except (InterruptedError, TimeoutError):
+            raise
+        except OSError:
+            self._fail("Could not read an archived Trading212 CSV file.")
+        return size, digest.hexdigest()
+
+    def _validate_archive_csv(
+        self, path: Path, record: _ArchiveReport | _ArchivePending,
+        cancel_event: Event | None, deadline: float,
+    ) -> tuple[datetime | None, datetime | None]:
+        self._validate_csv(path, cancel_event, deadline)
+        start = datetime.fromisoformat(record["timeFrom"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(record["timeTo"].replace("Z", "+00:00"))
+        minimum: datetime | None = None
+        maximum: datetime | None = None
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as file:
+                reader = csv.DictReader(file, strict=True)
+                for row in reader:
+                    self._check_operation(cancel_event, deadline)
+                    text = row["Time (UTC)"] if "Time (UTC)" in row else row["Time"]
+                    date = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    if date.utcoffset() is None or not start <= date <= end:
+                        self._fail("Archived CSV timestamps do not match the requested annual interval.")
+                    minimum = date if minimum is None else min(minimum, date)
+                    maximum = date if maximum is None else max(maximum, date)
+        except (InterruptedError, TimeoutError):
+            raise
+        except (OSError, UnicodeError, csv.Error, ValueError):
+            self._fail("Could not validate the archived Trading212 CSV coverage.")
+        return minimum, maximum
+
+    def _load_archive(
+        self, root: Path, cancel_event: Event | None, deadline: float,
+    ) -> _ArchiveState:
+        if self._account_id is None:
+            self._fail("Connect a Trading212 account before accessing its archive.")
+        metadata = root / "archive.json"
+        if metadata.is_symlink():
+            self._fail("Trading212 archive metadata must not be a symbolic link.")
+        if not metadata.exists():
+            if root.exists() and any(root.glob("*/*.csv")):
+                self._fail("CSV files exist without archive metadata; restore archive.json before syncing.")
+            return {
+                "version": 1, "environment": self._environment,
+                "account_id": self._account_id, "timezone": self._ARCHIVE_TIMEZONE,
+                "reports": [], "recommended": {}, "pending": None,
+            }
+        try:
+            if metadata.stat().st_size > self._MAX_ARCHIVE_BYTES:
+                self._fail("Trading212 archive metadata exceeds the size limit.")
+            with metadata.open(encoding="utf-8") as file:
+                data: object = json.load(file)
+        except (OSError, UnicodeError, ValueError):
+            self._fail("Could not read Trading212 archive metadata.")
+        if not self._valid_archive_state(data):
+            self._fail("Trading212 archive schema, account, environment, timezone or coverage is invalid.")
+        if data["recommended"] != {
+            str(year): report["reportId"]
+            for year, report in self._recommended_reports(data).items()
+        }:
+            self._fail("Trading212 archive recommended revisions are inconsistent.")
+        ids: set[int] = set()
+        checked: dict[Path, tuple[int, str]] = {}
+        coverage: dict[Path, tuple[datetime | None, datetime | None]] = {}
+        for report in data["reports"]:
+            if report["reportId"] in ids:
+                self._fail("Trading212 archive contains duplicate report identities.")
+            ids.add(report["reportId"])
+            path = self._archive_path(root, report["file"], report["year"])
+            if path not in checked:
+                checked[path] = self._file_digest(path, cancel_event, deadline)
+                coverage[path] = self._validate_archive_csv(path, report, cancel_event, deadline)
+            if checked[path] != (report["size"], report["sha256"]):
+                self._fail("Archived Trading212 CSV size or SHA-256 does not match its metadata.")
+            minimum, maximum = coverage[path]
+            start = datetime.fromisoformat(report["timeFrom"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(report["timeTo"].replace("Z", "+00:00"))
+            if (minimum is not None and minimum < start) or (maximum is not None and maximum > end):
+                self._fail("Archived CSV timestamps do not match the requested annual interval.")
+        if (pending := data["pending"]) is not None:
+            if pending["file"] is not None:
+                self._archive_path(root, pending["file"], pending["year"])
+            if pending["temporary"] is not None:
+                self._archive_path(root, pending["temporary"], pending["year"], temporary=True)
+            if pending["reportId"] in ids:
+                self._fail("Pending Trading212 report is already recorded in the archive.")
+        known = set(checked)
+        if pending is not None and pending["file"] is not None:
+            known.add(self._archive_path(root, pending["file"], pending["year"]))
+        if root.exists() and any(path not in known for path in root.glob("*/*.csv")):
+            self._fail("Trading212 archive contains an untracked CSV; do not silently discard it.")
+        return data
+
+    @contextmanager
+    def _lock_archive(self, root: Path) -> Generator[None, None, None]:
+        if sys.platform != "win32":
+            self._fail("Trading212 archive synchronization requires Windows file locking.")
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            lock_path = root / ".archive.lock"
+            if lock_path.is_symlink() or lock_path.resolve().parent != root.resolve():
+                self._fail("Trading212 archive lock must not be a symbolic link.")
+            with lock_path.open("a+b") as lock:
+                if lock.tell() == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    self._fail("Trading212 archive is in use or could not be locked.")
+                try:
+                    yield
+                finally:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        except (InterruptedError, TimeoutError):
+            raise
+        except OSError:
+            self._fail("Could not access or unlock the Trading212 archive.")
+
+    def _save_archive(self) -> None:
+        if self._archive_root is None or self._archive_state is None:
+            self._fail("No active Trading212 archive to persist.")
+        self._archive_state["recommended"] = {
+            str(year): report["reportId"]
+            for year, report in self._recommended_reports(self._archive_state).items()
+        }
+        content = json.dumps(self._archive_state, indent=2, sort_keys=True).encode("utf-8")
+        if len(content) > self._MAX_ARCHIVE_BYTES:
+            self._fail("Trading212 archive metadata exceeds the size limit.")
+        temporary: Path | None = None
+        try:
+            descriptor, filename = tempfile.mkstemp(
+                prefix=".archive-", suffix=".tmp", dir=self._archive_root,
+            )
+            temporary = Path(filename)
+            with os.fdopen(descriptor, "wb") as file:
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, self._archive_root / "archive.json")
+        except OSError:
+            self._fail("Could not persist Trading212 archive metadata.")
+        finally:
+            if temporary is not None and temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    self._fail("Could not remove temporary Trading212 archive metadata.")
+
+    def _checkpoint_creation(self, report_id: int | None = None, *, uncertain: bool = False) -> None:
+        if self._archive_state is None:
+            return
+        pending = self._archive_state["pending"]
+        if pending is None:
+            self._fail("No annual report intent to persist.")
+        if report_id is not None:
+            pending["reportId"] = report_id
+            pending["state"] = "waiting"
+        elif self._pending_creation is not None:
+            pending["baselineIds"] = sorted(self._pending_creation[1])
+            pending["state"] = "uncertain" if uncertain or self._post_dispatched else "prepared"
+        else:
+            pending["baselineIds"] = []
+            pending["state"] = "prepared"
+        self._save_archive()
+
+    def _checkpoint_download(
+        self, temporary: Path, cancel_event: Event | None, deadline: float, *, validated: bool,
+    ) -> Path | None:
+        if self._archive_state is None or self._archive_root is None:
+            return None
+        pending = self._archive_state["pending"]
+        if pending is None or pending["file"] is None:
+            self._fail("No annual download destination to persist.")
+        pending["temporary"] = str(temporary.relative_to(self._archive_root))
+        if validated:
+            self._validate_archive_csv(temporary, pending, cancel_event, deadline)
+            pending["size"], pending["sha256"] = self._file_digest(temporary, cancel_event, deadline)
+            pending["downloadedAt"] = self._utc_time(datetime.now(timezone.utc))
+            for old in reversed(self._archive_state["reports"]):
+                if (
+                    old["year"] == pending["year"]
+                    and (old["size"], old["sha256"]) == (pending["size"], pending["sha256"])
+                ):
+                    pending["file"] = old["file"]
+                    self._save_archive()
+                    return self._archive_path(self._archive_root, old["file"], old["year"])
+        self._save_archive()
+        return None
+
+    @staticmethod
+    def _archive_payload(pending: _ArchivePending) -> dict[str, object]:
+        return {
+            "timeFrom": pending["timeFrom"], "timeTo": pending["timeTo"],
+            "dataIncluded": pending["dataIncluded"],
+        }
+
+    def _finish_archive_report(self, cancel_event: Event | None, deadline: float) -> None:
+        if self._archive_state is None or self._archive_root is None:
+            self._fail("No active Trading212 archive.")
+        pending = self._archive_state["pending"]
+        if pending is None or pending["reportId"] is None or pending["file"] is None:
+            self._fail("Annual Trading212 report is not ready for publication.")
+        path = self._archive_path(self._archive_root, pending["file"], pending["year"])
+        self._validate_archive_csv(path, pending, cancel_event, deadline)
+        size, digest = self._file_digest(path, cancel_event, deadline)
+        if (size, digest) != (pending["size"], pending["sha256"]):
+            self._fail("Uncommitted Trading212 CSV does not match its persisted SHA-256.")
+        if pending["temporary"] is not None:
+            temporary = self._archive_path(
+                self._archive_root, pending["temporary"], pending["year"], temporary=True,
+            )
+            if temporary.exists():
+                temporary.unlink()
+        self._archive_state["reports"].append({
+            "year": pending["year"], "timeFrom": pending["timeFrom"],
+            "timeTo": pending["timeTo"], "dataIncluded": pending["dataIncluded"],
+            "complete": pending["complete"], "reportId": pending["reportId"],
+            "downloadedAt": pending["downloadedAt"], "file": pending["file"],
+            "size": size, "sha256": digest,
+        })
+        self._archive_state["pending"] = None
+        self._check_operation(cancel_event, deadline)
+        self._save_archive()
+
+    def _resume_archive_report(
+        self, cancel_event: Event | None, deadline: float, *, local_only: bool = False,
+    ) -> None:
+        if self._archive_state is None or self._archive_root is None:
+            self._fail("No active Trading212 archive.")
+        pending = self._archive_state["pending"]
+        if pending is None:
+            return
+        self._check_operation(cancel_event, deadline)
+        if pending["file"] is not None:
+            path = self._archive_path(self._archive_root, pending["file"], pending["year"])
+            if path.exists():
+                self._finish_archive_report(cancel_event, deadline)
+                return
+        if pending["temporary"] is not None:
+            temporary = self._archive_path(
+                self._archive_root, pending["temporary"], pending["year"], temporary=True,
+            )
+            if temporary.exists():
+                if pending["sha256"] is not None and pending["file"] is not None:
+                    if self._file_digest(temporary, cancel_event, deadline) != (
+                        pending["size"], pending["sha256"],
+                    ):
+                        self._fail("Interrupted Trading212 CSV does not match its persisted SHA-256.")
+                    self._validate_archive_csv(temporary, pending, cancel_event, deadline)
+                    temporary.rename(self._archive_path(
+                        self._archive_root, pending["file"], pending["year"],
+                    ))
+                    self._finish_archive_report(cancel_event, deadline)
+                    return
+                if not local_only:
+                    temporary.unlink()
+        if local_only:
+            return
+        payload = self._archive_payload(pending)
+        if pending["state"] == "uncertain":
+            self._pending_creation = payload, set(pending["baselineIds"])
+        if pending["state"] == "failed":
+            pending.update(
+                state="prepared", reportId=None, file=None, temporary=None, size=None, sha256=None,
+            )
+            self._save_archive()
+        if pending["reportId"] is None:
+            self._check_operation(cancel_event, deadline)
+            self.request_csv_report(
+                datetime.fromisoformat(pending["timeFrom"].replace("Z", "+00:00")),
+                datetime.fromisoformat(pending["timeTo"].replace("Z", "+00:00")),
+                cancel_event=cancel_event, wait_timeout=max(0.001, deadline - time.monotonic()),
+            )
+        report_id = pending["reportId"]
+        if report_id is None:
+            self._fail("Trading212 annual report creation returned no identity.")
+        self._report_requests[report_id] = payload
+        if pending["file"] is None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            pending["file"] = str(Path(str(pending["year"])) / f"Trading212_{pending['year']}_{stamp}_{report_id}.csv")
+        pending["temporary"], pending["size"], pending["sha256"] = None, None, None
+        self._save_archive()
+        destination = self._archive_path(self._archive_root, pending["file"], pending["year"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._check_operation(cancel_event, deadline)
+        self.download_csv_report(
+            report_id, destination, cancel_event=cancel_event,
+            wait_timeout=max(0.001, deadline - time.monotonic()),
+        )
+        self._finish_archive_report(cancel_event, deadline)
+
+    @staticmethod
+    def _recommended_reports(state: _ArchiveState) -> dict[int, _ArchiveReport]:
+        recommended: dict[int, _ArchiveReport] = {}
+        for report in state["reports"]:
+            previous = recommended.get(report["year"])
+            key = (report["complete"], datetime.fromisoformat(report["timeTo"].replace("Z", "+00:00")))
+            if previous is None or key >= (
+                previous["complete"], datetime.fromisoformat(previous["timeTo"].replace("Z", "+00:00")),
+            ):
+                recommended[report["year"]] = report
+        return recommended
+
+    def get_archived_csvs(
+        self, archive_directory: str | Path, *,
+        cancel_event: Event | None = None, wait_timeout: float = 600.0,
+    ) -> list[Path]:
+        """Verify committed CSVs and recover validated local downloads, without API calls."""
+        deadline = self._deadline(wait_timeout)
+        self._check_operation(cancel_event, deadline)
+        root = self._archive_directory(archive_directory)
+        if self._archive_state is not None:
+            self._fail("Trading212 archive synchronization is already active on this instance.")
+        if not root.exists():
+            return []
+        with self._lock_archive(root):
+            state = self._load_archive(root, cancel_event, deadline)
+            self._archive_root, self._archive_state = root, state
+            try:
+                self._resume_archive_report(cancel_event, deadline, local_only=True)
+                if state["pending"] is not None:
+                    self._logger.warning(
+                        "Trading212 archive has an unfinished report; returning only committed CSVs."
+                    )
+                recommended = self._recommended_reports(state)
+                return [
+                    self._archive_path(root, recommended[year]["file"], year)
+                    for year in sorted(recommended)
+                ]
+            finally:
+                self._archive_root, self._archive_state = None, None
+
+    def sync_yearly_csv(
+        self, archive_directory: str | Path, first_year: int, *,
+        refresh_years: tuple[int, ...] = (), as_of: datetime | None = None,
+        cancel_event: Event | None = None, wait_timeout: float = 600.0,
+    ) -> list[Path]:
+        """Archive Prague calendar years; never import into the analytical database."""
+        now = datetime.now(timezone.utc) if as_of is None else as_of
+        self._utc_time(now)
+        current_year = now.astimezone(ZoneInfo(self._ARCHIVE_TIMEZONE)).year
+        if (
+            type(first_year) is not int or not 1 <= first_year <= current_year < 9999
+            or any(type(year) is not int or not first_year <= year <= current_year for year in refresh_years)
+        ):
+            raise ValueError("Archive years must be integers from the first year through the current year.")
+        for year in range(first_year, current_year + 1):
+            self._year_bounds(year)
+        deadline = self._deadline(wait_timeout)
+        self._check_operation(cancel_event, deadline)
+        root = self._archive_directory(archive_directory)
+        if self._archive_state is not None:
+            self._fail("Trading212 archive synchronization is already active on this instance.")
+        with self._lock_archive(root):
+            state = self._load_archive(root, cancel_event, deadline)
+            pending = state["pending"]
+            if self._pending_creation is not None and (
+                pending is None or pending["state"] != "uncertain"
+                or self._pending_creation != (self._archive_payload(pending), set(pending["baselineIds"]))
+            ):
+                self._fail("Resolve the uncertain standalone CSV request before synchronizing this archive.")
+            self._archive_root, self._archive_state = root, state
+            try:
+                resumed = None if pending is None else (
+                    pending["year"], pending["timeFrom"], pending["timeTo"], pending["complete"],
+                )
+                self._resume_archive_report(cancel_event, self._deadline(wait_timeout))
+                recommended = self._recommended_reports(state)
+                for year in range(first_year, current_year + 1):
+                    deadline = self._deadline(wait_timeout)
+                    self._check_operation(cancel_event, deadline)
+                    start, end = self._year_bounds(year)
+                    time_to = end if year < current_year else now
+                    if resumed == (
+                        year, self._utc_time(start), self._utc_time(time_to), year < current_year,
+                    ):
+                        continue
+                    old = recommended.get(year)
+                    if (
+                        year != current_year and old is not None and old["complete"]
+                        and year not in refresh_years and end < now - timedelta(days=7)
+                    ):
+                        continue
+                    state["pending"] = {
+                        "year": year, "timeFrom": self._utc_time(start),
+                        "timeTo": self._utc_time(time_to),
+                        "dataIncluded": self._history_content(),
+                        "complete": year < current_year, "state": "prepared",
+                        "baselineIds": [], "reportId": None,
+                        "downloadedAt": self._utc_time(datetime.now(timezone.utc)),
+                        "file": None, "temporary": None, "size": None, "sha256": None,
+                    }
+                    self._save_archive()
+                    self._resume_archive_report(cancel_event, deadline)
+                recommended = self._recommended_reports(state)
+                return [
+                    self._archive_path(root, recommended[year]["file"], year)
+                    for year in range(first_year, current_year + 1)
+                ]
+            finally:
+                self._archive_root, self._archive_state = None, None

@@ -1,16 +1,19 @@
 import base64
+import hashlib
 import json
 import logging
+import os
 import ssl
 import sys
 import tempfile
 import traceback
 import unittest
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 from keyring.backends import Windows
 from keyring.backends.null import Keyring as NullKeyring
@@ -244,7 +247,7 @@ class TestTrading212API(unittest.TestCase):
         self.write.assert_not_called()
 
 
-class TestTrading212CSVReports(unittest.TestCase):
+class _CSVReportFixture(unittest.TestCase):
     CSV = (
         b"\xef\xbb\xbfAction,Time (UTC),ID,Total,Currency (Total)\r\n"
         b"Interest on cash,2024-01-01 12:00:00+00:00,cash-1,1.23,CZK\r\n"
@@ -278,11 +281,12 @@ class TestTrading212CSVReports(unittest.TestCase):
         self.clock += duration
 
     def queue(self, method, path, data, *, status=200, host="live.trading212.com",
-              headers=None, error=None, on_read=None):
+              headers=None, error=None, on_read=None, on_request=None):
         self.responses.append({
             "method": method, "path": path, "host": host, "status": status,
             "body": data if isinstance(data, bytes) else json.dumps(data).encode(),
             "headers": headers or {}, "error": error, "on_read": on_read,
+            "on_request": on_request,
         })
 
     def connect(self, host, **kwargs):
@@ -300,6 +304,8 @@ class TestTrading212CSVReports(unittest.TestCase):
                 "host": host, "method": method, "path": path, "body": body,
                 "headers": headers, "time": self.clock, "timeout": kwargs["timeout"],
             })
+            if spec["on_request"] is not None:
+                spec["on_request"]()
             if spec["error"] is not None:
                 raise spec["error"]
             response.status = spec["status"]
@@ -354,6 +360,8 @@ class TestTrading212CSVReports(unittest.TestCase):
     def assert_no_files(self):
         self.assertEqual(list(self.directory.iterdir()), [])
 
+
+class TestTrading212CSVReports(_CSVReportFixture):
     def test_request_wait_and_download_preserve_original_csv_without_credentials(self):
         self.account()
         self.queue("GET", "/api/v0/equity/history/exports", [])
@@ -690,6 +698,351 @@ class TestTrading212CSVReports(unittest.TestCase):
             with self.subTest(method=method):
                 with self.assertRaises(ValueError):
                     self.api._api_exchange(method, path)
+        self.assertFalse(self.requests)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows archive file locking required")
+class TestTrading212AnnualArchive(_CSVReportFixture):
+    NOW = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    ZONE = ZoneInfo("Europe/Prague")
+    HEADER = b"\xef\xbb\xbfAction,Time (UTC),ID,Total,Currency (Total)\r\n"
+
+    @property
+    def root(self):
+        return self.directory.resolve() / "Trading212" / "live" / "123"
+
+    def metadata(self):
+        return json.loads((self.root / "archive.json").read_text(encoding="utf-8"))
+
+    def annual_report(self, year, now, report_id=77):
+        report = self.report(report_id=report_id)
+        start = datetime(year, 1, 1, tzinfo=self.ZONE).astimezone(timezone.utc)
+        end = (
+            datetime(year + 1, 1, 1, tzinfo=self.ZONE).astimezone(timezone.utc)
+            - timedelta(microseconds=1)
+            if year < now.astimezone(self.ZONE).year else now.astimezone(timezone.utc)
+        )
+        report.update(timeFrom=start.isoformat().replace("+00:00", "Z"),
+                      timeTo=end.isoformat().replace("+00:00", "Z"))
+        return report
+
+    def annual_csv(self, year, *, amount="1.23", timestamp=None):
+        if timestamp is None:
+            timestamp = datetime(year, 1, 1, tzinfo=self.ZONE).astimezone(timezone.utc).isoformat(" ")
+        return self.HEADER + f"Interest on cash,{timestamp},cash-1,{amount},CZK\r\n".encode()
+
+    def queue_download(self, report, content, *, on_read=None):
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [report])
+        self.queue("GET", "/history.csv?token=signed-test-token", content, host=self.HOST,
+                   headers={"Content-Length": str(len(content))}, on_read=on_read)
+
+    def queue_year(self, year, now, report_id, content=None, *, on_post=None, on_read=None):
+        report = self.annual_report(year, now, report_id)
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, {"reportId": report_id}, on_request=on_post)
+        self.queue_download(report, self.annual_csv(year) if content is None else content, on_read=on_read)
+        return report
+
+    def restart(self):
+        self.api = Trading212API(account_id=123, logger=self.logger)
+        self.load = self.stack.enter_context(patch.object(
+            self.api, "load_credentials", return_value=("test-key", "test-secret"),
+        ))
+
+    def posts(self):
+        return [request for request in self.requests if request["method"] == "POST"]
+
+    def test_first_run_leap_year_prague_boundaries_and_original_bytes(self):
+        content = self.annual_csv(2024, timestamp="2024-02-29 12:00:00+00:00")
+        content += b"Dividend adjustment,2024-12-31 22:59:59.999999+00:00,adjustment-1,0.02,CZK\r\n"
+        self.queue_year(2024, self.NOW, 77, content)
+        self.queue_year(2025, self.NOW, 78)
+        paths = self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW)
+        self.assertEqual([path.parent.name for path in paths], ["2024", "2025"])
+        self.assertEqual(paths[0].read_bytes(), content)
+        payload = json.loads(self.posts()[0]["body"])
+        self.assertEqual(payload["timeFrom"], "2023-12-31T23:00:00Z")
+        self.assertEqual(payload["timeTo"], "2024-12-31T22:59:59.999999Z")
+        self.assertTrue(all(payload["dataIncluded"].values()))
+        state = self.metadata()
+        self.assertEqual(state["timezone"], "Europe/Prague")
+        self.assertEqual([entry["complete"] for entry in state["reports"]], [True, False])
+        self.assertEqual(state["reports"][0]["sha256"], hashlib.sha256(content).hexdigest())
+        serialized = json.dumps(state)
+        for secret in ("test-key", "test-secret", "signed-test-token", "downloadLink", "Authorization"):
+            self.assertNotIn(secret, serialized)
+        self.assertFalse(list(self.root.glob("*/*.part")))
+        polls = [request["time"] for request in self.requests
+                 if request["method"] == "GET" and request["path"] == self.api._EXPORT_PATH]
+        self.assertTrue(all(right - left >= 60 for left, right in zip(polls, polls[1:])))
+        self.load.reset_mock()
+        self.assertEqual(self.api.get_archived_csvs(self.directory), paths)
+        self.load.assert_not_called()
+
+    def test_missing_year_normal_refresh_identical_bytes_and_changed_old_revision(self):
+        self.queue_year(2024, self.NOW, 77)
+        self.queue_year(2025, self.NOW, 78)
+        original = self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW)
+        later = self.NOW + timedelta(days=1)
+        self.queue_year(2023, later, 79)
+        self.queue_year(2025, later, 80)
+        paths = self.api.sync_yearly_csv(self.directory, 2023, as_of=later)
+        self.assertEqual(paths[1:], original)
+        self.assertEqual(len(list(self.root.glob("*/*.csv"))), 3)
+        self.queue_year(2023, later, 81, self.annual_csv(2023, amount="2.34"))
+        self.queue_year(2025, later, 82)
+        refreshed = self.api.sync_yearly_csv(self.directory, 2023, as_of=later, refresh_years=(2023,))
+        self.assertNotEqual(refreshed[0], paths[0])
+        self.assertTrue(paths[0].exists())
+        self.assertEqual(refreshed[1:], original)
+        self.assertEqual(len(list(self.root.glob("*/*.csv"))), 4)
+        self.assertEqual(self.metadata()["recommended"], {"2023": 81, "2024": 77, "2025": 82})
+        with patch.object(self.api, "_validate_archive_csv", wraps=self.api._validate_archive_csv) as validate:
+            self.assertEqual(self.api.get_archived_csvs(self.directory), refreshed)
+        self.assertEqual(validate.call_count, 4)
+        self.assertFalse(self.responses)
+
+    def test_rollover_uses_local_year_finalizes_partial_and_has_seven_day_overlap(self):
+        before = datetime(2024, 12, 31, 22, 30, tzinfo=timezone.utc)
+        self.queue_year(2024, before, 77)
+        original = self.api.sync_yearly_csv(self.directory, 2024, as_of=before)[0]
+        after = datetime(2024, 12, 31, 23, 30, tzinfo=timezone.utc)
+        self.queue_year(2024, after, 78)
+        self.queue_year(2025, after, 79)
+        paths = self.api.sync_yearly_csv(self.directory, 2024, as_of=after)
+        self.assertEqual(paths[0], original)
+        self.assertTrue(self.api._recommended_reports(self.metadata())[2024]["complete"])
+        inside = datetime(2025, 1, 7, 22, 59, 59, tzinfo=timezone.utc)
+        self.queue_year(2024, inside, 80)
+        self.queue_year(2025, inside, 81)
+        self.api.sync_yearly_csv(self.directory, 2024, as_of=inside)
+        outside = datetime(2025, 1, 7, 23, tzinfo=timezone.utc)
+        self.queue_year(2025, outside, 82)
+        self.api.sync_yearly_csv(self.directory, 2024, as_of=outside)
+        self.assertEqual(len(self.posts()), 6)
+        self.assertEqual(len(list(self.root.glob("*/*.csv"))), 2)
+        self.assertFalse(self.responses)
+
+    def test_empty_report_valid_but_out_of_range_or_naive_timestamps_never_publish(self):
+        self.queue_year(2025, self.NOW, 77, self.HEADER)
+        paths = self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(paths[0].read_bytes(), self.HEADER)
+        for timestamp in ("2024-12-31 22:59:59+00:00", "2025-01-01 00:00:00"):
+            with self.subTest(timestamp=timestamp):
+                report_id = 78 + len(self.posts())
+                self.queue_year(2025, self.NOW, report_id, self.annual_csv(2025, timestamp=timestamp))
+                self.assert_safe_failure(
+                    lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "timestamps",
+                )
+                self.assertEqual(len(list(self.root.glob("*/*.csv"))), 1)
+                self.assertFalse(list(self.root.glob("*/*.part")))
+                self.root.joinpath("archive.json").write_text(
+                    json.dumps({**self.metadata(), "pending": None}), encoding="utf-8",
+                )
+
+    def test_tampered_hash_identity_schema_coverage_and_paths_fail_before_network(self):
+        self.queue_year(2025, self.NOW, 77)
+        path = self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)[0]
+        original = self.metadata()
+        for field, value in (("account_id", 124), ("environment", "demo"), ("timezone", "UTC"),
+                             ("version", 2), ("api_secret", "test-secret")):
+            with self.subTest(field=field):
+                changed = {**original, field: value}
+                (self.root / "archive.json").write_text(json.dumps(changed), encoding="utf-8")
+                self.assert_safe_failure(lambda: self.api.get_archived_csvs(self.directory), "invalid")
+        for field, value in (("complete", True), ("file", "..\\outside.csv"),
+                             ("file", "C:\\outside.csv"), ("sha256", "0" * 64)):
+            with self.subTest(field=field, value=value):
+                changed = json.loads(json.dumps(original))
+                changed["reports"][0][field] = value
+                (self.root / "archive.json").write_text(json.dumps(changed), encoding="utf-8")
+                self.assert_safe_failure(lambda: self.api.get_archived_csvs(self.directory),
+                                         "invalid|unsafe|SHA-256")
+        (self.root / "archive.json").write_text(json.dumps(original), encoding="utf-8")
+        path.write_bytes(self.annual_csv(2025, amount="9.99"))
+        self.assert_safe_failure(lambda: self.api.get_archived_csvs(self.directory), "SHA-256")
+        self.assertEqual(len(self.posts()), 1)
+        self.assertFalse(self.responses)
+
+    def test_crash_after_csv_or_validated_partial_is_recovered_offline(self):
+        self.queue_year(2025, self.NOW, 77)
+        with patch.object(self.api, "_finish_archive_report", side_effect=OSError("test-secret")):
+            self.assert_safe_failure(
+                lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "archive",
+            )
+        pending = self.metadata()["pending"]
+        final = self.root / pending["file"]
+        self.assertTrue(final.exists())
+        final.rename(self.root / pending["temporary"])
+        self.restart()
+        paths = self.api.get_archived_csvs(self.directory)
+        self.assertEqual(paths, [final])
+        self.load.assert_not_called()
+        self.assertIsNone(self.metadata()["pending"])
+        self.assertFalse(list(self.root.glob("*/*.part")))
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_crash_after_publication_before_metadata_recovers_known_report_without_post(self):
+        self.queue_year(2025, self.NOW, 77)
+        original_replace = os.replace
+
+        def fail_commit(source, destination):
+            state = self.api._archive_state
+            self.assertIsNotNone(state)
+            if state is not None and state["pending"] is None:
+                raise OSError("test-secret")
+            return original_replace(source, destination)
+
+        with patch("tradingtools.trading212_api.os.replace", side_effect=fail_commit):
+            self.assert_safe_failure(
+                lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "persist",
+            )
+        self.assertTrue((self.root / self.metadata()["pending"]["file"]).exists())
+        self.assertFalse(list(self.root.glob(".archive-*.tmp")))
+        self.restart()
+        paths = self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(len(self.posts()), 1)
+        self.load.assert_not_called()
+
+    def test_uncertain_post_checkpoint_survives_restart_and_excludes_old_matching_id(self):
+        report = self.annual_report(2025, self.NOW, 77)
+        old = {**report, "reportId": 76}
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [old])
+
+        def assert_checkpoint():
+            pending = self.metadata()["pending"]
+            self.assertEqual(pending["state"], "uncertain")
+            self.assertEqual(pending["baselineIds"], [76])
+            self.assertIsNone(pending["reportId"])
+            self.assertNotIn("signed-test-token", json.dumps(pending))
+
+        self.queue("POST", self.api._EXPORT_PATH, None, error=ConnectionError("test-secret"),
+                   on_request=assert_checkpoint)
+        self.queue("GET", self.api._EXPORT_PATH, [old])
+        self.assert_safe_failure(
+            lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "uncertain",
+        )
+        self.restart()
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [old, report])
+        self.queue_download(report, self.annual_csv(2025))
+        self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(self.metadata()["reports"][0]["reportId"], 77)
+
+    def test_unresolved_restart_never_creates_a_second_report(self):
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, None, error=ConnectionError("test-secret"))
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.assert_safe_failure(
+            lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "uncertain",
+        )
+        self.restart()
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.assert_safe_failure(
+            lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "uncertain",
+        )
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(self.metadata()["pending"]["state"], "uncertain")
+
+    def test_disk_failure_before_dispatch_is_safe_to_retry_after_restart(self):
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        original_replace = os.replace
+
+        def fail_intent(source, destination):
+            state = self.api._archive_state
+            self.assertIsNotNone(state)
+            pending = None if state is None else state["pending"]
+            if pending is not None and pending["state"] == "uncertain":
+                raise OSError("test-secret")
+            return original_replace(source, destination)
+
+        with patch("tradingtools.trading212_api.os.replace", side_effect=fail_intent):
+            self.assert_safe_failure(
+                lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "persist",
+            )
+        self.assertFalse(self.posts())
+        self.assertIsNone(self.api._pending_creation)
+        self.assertEqual(self.metadata()["pending"]["state"], "prepared")
+        self.restart()
+        self.queue_year(2025, self.NOW, 77)
+        self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_cancelled_download_keeps_identity_and_resumes_without_post(self):
+        cancelled = Event()
+        report = self.queue_year(2025, self.NOW, 77, on_read=cancelled.set)
+        with patch.object(cancelled, "wait", side_effect=self.advance):
+            with self.assertRaises(InterruptedError):
+                self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW, cancel_event=cancelled)
+        self.assertEqual(self.metadata()["pending"]["reportId"], 77)
+        self.assertFalse(list(self.root.glob("*/*.csv")))
+        self.assertFalse(list(self.root.glob("*/*.part")))
+        self.restart()
+        with self.assertLogs(self.logger, level="WARNING") as logs:
+            self.assertEqual(self.api.get_archived_csvs(self.directory), [])
+        self.assertIn("only committed CSVs", "".join(logs.output))
+        self.load.assert_not_called()
+        self.queue_download(report, self.annual_csv(2025))
+        self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_confirmed_remote_failure_allows_new_report_only_on_next_run(self):
+        failed = self.annual_report(2025, self.NOW, 77)
+        failed["status"] = "Failed"
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, {"reportId": 77})
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [failed])
+        self.assert_safe_failure(
+            lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "Failed",
+        )
+        self.assertEqual(self.metadata()["pending"]["state"], "failed")
+        self.restart()
+        self.queue_year(2025, self.NOW, 78)
+        self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(self.posts()), 2)
+
+    def test_year_deadline_keeps_known_identity_for_the_next_run(self):
+        report = self.annual_report(2025, self.NOW, 77)
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, {"reportId": 77})
+        self.account()
+        with self.assertLogs(self.logger, level="ERROR"):
+            with self.assertRaises(TimeoutError):
+                self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW, wait_timeout=60)
+        self.assertEqual(self.clock, 60)
+        self.assertEqual(self.metadata()["pending"]["reportId"], 77)
+        self.assertFalse(list(self.root.glob("*/*.csv")))
+        self.restart()
+        self.queue_download(report, self.annual_csv(2025))
+        self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_invalid_years_and_concurrent_writer_never_send_requests(self):
+        for first, refresh, now in (
+            (True, (), self.NOW), (0, (), self.NOW), (1, (), self.NOW), (2026, (), self.NOW),
+            (2024, (2023,), self.NOW), (2024, (True,), self.NOW),
+            (2024, (), datetime(2025, 1, 1)),
+        ):
+            with self.subTest(first=first, refresh=refresh):
+                with self.assertRaises(ValueError):
+                    self.api.sync_yearly_csv(self.directory, first, as_of=now, refresh_years=refresh)
+        self.assertFalse(self.requests)
+        self.assertFalse(self.root.exists())
+        with self.api._lock_archive(self.root):
+            self.assert_safe_failure(
+                lambda: self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW), "in use",
+            )
         self.assertFalse(self.requests)
 
 
