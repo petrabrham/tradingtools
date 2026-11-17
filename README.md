@@ -203,6 +203,49 @@ wrong account/environment/timezone, untracked CSVs, and disk errors fail explici
 Restore both CSVs and `archive.json` when moving or recovering the archive.
 Do not infer complete coverage from an orphan CSV alone.
 
+### Recovering a database from the archive
+
+A database backup is the preferred recovery method: CSVs do not contain manual
+pairings, locks, notes, application settings, account bindings or exchange-rate
+tables. Keep separate backups of the database and the complete archive.
+
+To rebuild transactions without contacting Trading212:
+
+1. Restore the complete account archive, including `archive.json` and all CSV
+   revisions. Do not select every CSV revision for import.
+2. Obtain the verified recommended CSVs in chronological order using the local
+   API below (the account ID and environment must match the archive):
+
+   ```python
+   from tradingtools.trading212_api import Trading212API
+
+   archive = Trading212API("demo", account_id=12345678)  # replace with your account
+   paths = archive.get_archived_csvs(r"D:\TradingArchives")
+   for path in paths:
+       print(path)
+   ```
+
+   This checks identity, intervals and file hashes without credentials or network
+   requests. An invalid archive is an error; incomplete coverage is not repaired
+   by guessing which file to use.
+3. Create a new database with the original daily/annual exchange-rate mode.
+   For annual mode, import the same rate tables for every required year and
+   currency before importing transactions. Daily mode normally obtains CNB rates
+   online; a fully offline daily reconstruction needs those same rates available
+   to the rate provider. Broker CSV conversion rates are not a substitute.
+4. Use **File > Import CSV** on each listed file, oldest year first. Check each
+   result for missing rates, unsupported actions and errors. Importing the same
+   recommended files again does not insert duplicates.
+
+With the same rates, supported transaction counts and stored CZK amounts can be
+reconstructed. Manual pairings/locks and settings must be restored separately
+or recreated; recalculated pairings are not guaranteed to match earlier manual
+choices. Standalone ADR fees are restored but still excluded from tax/financial
+summaries. `Dividend adjustment` remains unsupported and causes a partial result.
+Manual recovery does not assign account metadata or require API credentials.
+On another computer, select the local archive root and configure credentials
+separately before the next API synchronization.
+
 Annual synchronization uses a separate `wait_timeout` budget per year (including
 requesting, waiting and downloading), plus local archive validation; cancellation
 and endpoint pacing remain active. Retrying finishes the saved interval first;
@@ -353,6 +396,10 @@ or tax summaries**, and there is no new fee view or menu.
 python -m unittest discover -s tests -v
 ```
 
+Discovery is offline and uses synthetic data and credential adapters. The
+optional network demonstration is excluded; run it explicitly with
+`python tests\manual_annual_rates.py` only when CNB network access is intended.
+
 ## Build a single Windows executable
 
 ```powershell
@@ -363,3 +410,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 The executable is written to `dist\TradingTools.exe`. The default JSON files
 are bundled into the executable and copied to the user's AppData directory on
 first launch.
+
+To build and test the actual executable:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -SmokeTest
+```
+
+The smoke test checks GUI startup, bundled defaults, database/account title,
+Prague timezone data, native Windows keyring backend selection and credential
+roundtrip through an in-memory storage adapter. It uses temporary AppData,
+blocks network connections and never reads/writes the real credential vault.
+Failure is reported with a nonzero exit code and JSON diagnostics. This is not
+a live API check or a real Windows Credential Manager persistence test.
+For diagnostics on an existing build, run
+`TradingTools.exe --smoke-test C:\Temp\TradingTools-smoke.json`
+with an absolute report path in an existing directory.

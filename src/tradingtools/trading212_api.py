@@ -1180,7 +1180,15 @@ class Trading212API:
                 file.write(content)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary, self._archive_root / "archive.json")
+            for attempt in range(4):
+                try:
+                    os.replace(temporary, self._archive_root / "archive.json")
+                    break
+                except PermissionError as error:
+                    if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 3:
+                        raise
+                    self._logger.warning("Windows denied atomic archive metadata replacement; retrying.")
+                    time.sleep(0.05 * 2 ** attempt)
         except OSError:
             self._fail("Could not persist Trading212 archive metadata.")
         finally:

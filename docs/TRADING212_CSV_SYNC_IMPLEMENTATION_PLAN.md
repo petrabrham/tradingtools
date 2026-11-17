@@ -1,7 +1,8 @@
 # Plán synchronizace Trading 212 přes export/import CSV
 
 Datum: 2026-11-15  
-Stav: etapová implementace; etapy 1–6 dokončeny, etapa 7 čeká na pokyn.
+Stav: etapy 1–6 dokončeny; automatická část etapy 7 ověřena, ruční ověření
+skutečného úložiště pověření v executable zbývá.
 
 Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
 
@@ -839,7 +840,8 @@ o změnu schématu DB. Starý formát 1 se načte bez využití uložené cesty 
 uložení propojení nebo ověřené synchronizaci se přepíše. Bez místního kořene
 aplikace vyžádá jeho výběr; cestu z přenesené DB automaticky nepřebírá.
 
-**Stav:** čeká. **Předpoklad:** etapa 6.
+**Stav:** automatická část dokončena; ruční kontrola skutečného Windows
+Credential Manageru v executable zbývá. **Předpoklad:** etapa 6.
 
 - Ověřit lokální obnovu prázdné DB z doporučených ročních CSV bez API,
   se stejnými kurzy a s přiznanými omezeními párování/nastavení.
@@ -850,6 +852,45 @@ aplikace vyžádá jeho výběr; cestu z přenesené DB automaticky nepřebírá
 
 **Ověření:** shoda podporovaných transakcí a finančních souhrnů po obnově,
 funkční credential storage v executable a zachované běžné funkce aplikace.
+
+**Výsledky automatického ověření:**
+
+- **280 testů prošlo** při plném `unittest discover`. Samostatný opakovaný
+  běh celé sady prošel i s blokovaným síťovým připojením a skutečnými
+  `CredRead`/`CredWrite`/`CredDelete`; testy používají vlastní adaptéry.
+- Síťová demonstrace ročních kurzů byla přesunuta do
+  `tests/manual_annual_rates.py`, aby samotný discovery nespouštěl CNB dotazy.
+- Nový scénář sestaví archiv dvou roků včetně změněné historické revize,
+  vybere doporučené CSV bez credentials/API a obnoví novou DB. V obou
+  režimech kurzů porovnává všechny řádky podporovaných transakcí i explicitní
+  CZK součty obchodů, daně, obou úroků, dividend a podepsaných ADR poplatků.
+  Opakovaný import přidá nulu; nepodporované akce nadále hlásí partial.
+- Denní kurzy jsou v offline testu poskytovány pevnými testovacími daty;
+  běžná denní obnova v aplikaci vyžaduje dostupné stejné CNB kurzy.
+  Roční tabulky, párování, zámky a nastavení nejsou součástí CSV.
+- Běh odhalil přechodné odmítnutí `os.replace` s WinError 5. Stejná
+  atomická operace po krátkém čekání uspěla. Zápis metadat nyní omezeně
+  opakuje pouze WinError 5/32/33, s varováním; trvalé a jiné chyby zůstávají
+  chybou. Test ověřuje i zachování původních metadat a úklid dočasného souboru.
+  Nejde o opakování API POST.
+- PyInstaller úspěšně vytvořil `dist\TradingTools.exe`.
+  `scripts\build_windows.ps1 -SmokeTest` spustil skutečný executable:
+  `frozen=true`, GUI, výchozí JSON, schéma DB, titulek s účtem,
+  `Europe/Prague` a `keyring.backends.Windows.WinVaultKeyring` prošly.
+  Přidán explicitní diagnostický režim `--smoke-test REPORT`, nikoli
+  automatická kontrola při běžném startu.
+- Smoke test používá dočasné AppData, blokuje síť a nahrazuje úložiště
+  pověření paměťovým adaptérem. Nečte ani nemění skutečný Windows vault.
+  Ověřeno i chybové ukončení s nenulovým kódem a JSON diagnostikou.
+- Změněný Python kód prošel kontrolou syntaxe pro Python 3.10; runtime
+  a executable byly ověřeny na Pythonu 3.12 a Windows.
+  Doplněny kroky obnovy a její omezení v README a CSV poznámkách.
+
+**Zbývající ruční akceptace:** v zabalené aplikaci propojit demo účet,
+aplikaci ukončit, znovu otevřít a ověřit použití uloženého pověření
+bez nového zadání; následně případně ověřit odstranění pověření.
+Tento krok vyžaduje skutečný vault a API, a proto nebyl automaticky proveden.
+Živé mezní časové intervaly exportu také nejsou tímto offline během ověřeny.
 
 Reálné API kontroly jen s výslovným souhlasem uživatele; automatické testy
 musí fungovat offline s fiktivními daty a bez skutečného Správce pověření.

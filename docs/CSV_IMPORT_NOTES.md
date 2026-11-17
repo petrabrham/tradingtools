@@ -54,6 +54,30 @@
   partial/cancelled/failed **import**, and shows per-category read/added counts,
   duplicates, unsupported actions, intentional skips and errors/conflicts.
 
+## Recovery from annual archives
+
+- Prefer a full database backup when pairings, locks, notes and settings must
+  survive. CSV archives reconstruct transactions, not the complete application
+  state or account binding.
+- Restore the whole archive including `archive.json`. Use
+  `Trading212API(environment, account_id=...).get_archived_csvs(root)` to verify
+  metadata/hashes and select one recommended revision per year without API
+  credentials or network access. Import only those files, oldest year first,
+  through the existing manual CSV importer.
+- Reuse the original daily/annual conversion mode and the same exchange rates.
+  Annual rate tables must be imported separately; daily CNB lookup normally
+  needs network access unless its rate provider already has the required data.
+- The synthetic recovery regression covers both rate modes, revised archives,
+  buys, sells, both interest types, dividend gross/net/withholding values,
+  trade tax and signed ADR fees. It compares all transaction rows and explicit
+  CZK totals with a clean import, then checks repeated imports add nothing.
+- Unsupported actions and deliberately ignored cash movements remain visible
+  in the import result. `Dividend adjustment` still means partial, not complete.
+- On Windows, atomic archive-metadata replacement retries only access/sharing
+  errors (WinError 5/32/33), at most three retries. Each retry logs a warning;
+  persistent or other disk errors fail explicitly, preserve old metadata and
+  clean up the temporary file. No export POST is repeated by this write retry.
+
 ## Broker export 2026
 
 - Import supports both time column variants:

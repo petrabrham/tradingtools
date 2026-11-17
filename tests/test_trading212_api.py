@@ -15,11 +15,14 @@ from threading import Event
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from keyring.backends import Windows
 from keyring.backends.null import Keyring as NullKeyring
 from keyring.errors import PasswordDeleteError
 
 from tradingtools.trading212_api import Trading212API
+from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.trading212_sync import Trading212Connection, load_connection, save_connection
 
 if sys.platform == "win32":
     from win32ctypes.pywin32 import pywintypes, win32cred
@@ -802,6 +805,158 @@ class TestTrading212AnnualArchive(_CSVReportFixture):
 
     def posts(self):
         return [request for request in self.requests if request["method"] == "POST"]
+
+    def test_windows_metadata_replacement_retries_only_bounded_access_errors(self):
+        self.api._archive_root = self.root
+        self.root.mkdir(parents=True)
+        self.api._archive_state = {
+            "version": 1, "environment": "live", "account_id": 123,
+            "timezone": "Europe/Prague", "reports": [], "recommended": {}, "pending": None,
+        }
+        replace = os.replace
+        for winerror in (5, 32, 33):
+            with self.subTest(winerror=winerror):
+                error = PermissionError(13, "Synthetic Windows lock")
+                error.winerror = winerror
+                with patch("os.replace") as replaced:
+                    def replacement(source, target):
+                        if replaced.call_count == 1:
+                            raise error
+                        replace(source, target)
+
+                    replaced.side_effect = replacement
+                    with self.assertLogs(self.logger, level="WARNING"):
+                        self.api._save_archive()
+                    self.assertEqual(replaced.call_count, 2)
+                self.assertEqual(self.metadata()["pending"], None)
+                self.assertFalse(list(self.root.glob(".archive-*.tmp")))
+
+        before = (self.root / "archive.json").read_bytes()
+        for error, attempts in ((PermissionError(13, "Not a Windows lock"), 1), (error, 4), (OSError("Disk failure"), 1)):
+            with self.subTest(error=error, attempts=attempts):
+                with patch("os.replace", side_effect=error) as replaced:
+                    with self.assertLogs(self.logger, level="WARNING"):
+                        with self.assertRaisesRegex(RuntimeError, "persist"):
+                            self.api._save_archive()
+                    self.assertEqual(replaced.call_count, attempts)
+                self.assertEqual((self.root / "archive.json").read_bytes(), before)
+                self.assertFalse(list(self.root.glob(".archive-*.tmp")))
+        self.assertFalse(self.requests)
+
+    def test_offline_database_recovery_uses_recommended_revisions_and_preserves_czk_values(self):
+        def rows(year):
+            common = {
+                "Time (UTC)": f"{year}-05-01 12:00:00+00:00",
+                "ISIN": "US0000000001", "Ticker": "TEST", "Name": "Synthetic security",
+                "No. of shares": 2, "Price / share": 5,
+                "Currency (Price / share)": "USD", "Total": 10, "Currency (Total)": "USD",
+            }
+            return [
+                {**common, "Action": "Market buy", "ID": f"buy-{year}",
+                 "Stamp duty reserve tax": 1, "Currency (Stamp duty reserve tax)": "USD"},
+                {**common, "Action": "Market sell", "ID": f"sell-{year}",
+                 "No. of shares": 1, "Price / share": 8, "Total": 8},
+                {**common, "Action": "Interest on cash", "ID": f"cash-{year}",
+                 "Total": 0.5, "Notes": "Interest on cash"},
+                {**common, "Action": "Lending interest", "ID": f"lending-{year}",
+                 "Total": 0.25, "Currency (Total)": "EUR", "Notes": "Share lending interest"},
+                {**common, "Action": "Dividend (Dividend)", "ID": f"dividend-{year}",
+                 "Price / share": 1, "Total": 1.6,
+                 "Withholding tax": 0.4, "Currency (Withholding tax)": "USD"},
+                {**common, "Action": "ADR Fee", "ID": f"fee-{year}", "Total": -0.1},
+                {**common, "Action": "Deposit", "ID": f"deposit-{year}", "Total": 100},
+                {**common, "Action": "Dividend adjustment", "ID": f"adjustment-{year}", "Total": 0.02},
+            ]
+
+        def csv(records):
+            return pd.DataFrame(records).to_csv(index=False).encode("utf-8-sig")
+
+        first, second = rows(2024), rows(2025)
+        self.queue_year(2024, self.NOW, 77, csv(first[:-3]))
+        self.queue_year(2025, self.NOW, 78, csv(second))
+        self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW)
+        self.queue_year(2024, self.NOW, 79, csv(first))
+        self.queue_year(2025, self.NOW, 80, csv(second))
+        self.api.sync_yearly_csv(self.directory, 2024, refresh_years=(2024,), as_of=self.NOW)
+        self.assertFalse(self.responses)
+
+        offline = Trading212API(account_id=123, logger=self.logger)
+        with (
+            patch.object(offline, "load_credentials", side_effect=AssertionError("Offline recovery read credentials")),
+            patch("http.client.HTTPSConnection", side_effect=AssertionError("Offline recovery used the network")),
+        ):
+            reports = []
+            paths = offline.get_archived_csvs(self.directory, on_report=reports.append)
+            self.assertEqual([report.report_id for report in reports], [79, 80])
+            self.assertEqual(len(paths), 2)
+            self.assertEqual(len(self.metadata()["reports"]), 4)
+            for annual in (False, True):
+                with self.subTest(annual=annual), ExitStack() as stack:
+                    stack.enter_context(patch(
+                        "tradingtools.db.dbmanager.setup_logger", return_value=self.logger,
+                    ))
+                    daily = stack.enter_context(patch(
+                        "tradingtools.config.cnb_rate.cnb_rate._fetch_daily_rates",
+                        side_effect=lambda date: {
+                            "USD": 20 + date.year - 2024, "EUR": 25 + date.year - 2024,
+                        },
+                    ))
+                    databases = []
+                    for name in ("source", "restored"):
+                        database = DatabaseManager()
+                        stack.callback(database.close)
+                        database.use_annual_rates = annual
+                        database.create_database(str(self.directory / f"{name}-{annual}.db"))
+                        if annual:
+                            for year in (2024, 2025):
+                                database.insert_annual_rate(year, "USD", 1, 22 + year - 2024)
+                                database.insert_annual_rate(year, "EUR", 1, 27 + year - 2024)
+                                database.insert_annual_rate(year, "CZK", 1, 1)
+                        databases.append(database)
+                    source, restored = databases
+                    save_connection(source, Trading212Connection("live", 123, 2024))
+                    source.set_setting("synthetic-original-setting", "not in CSV")
+                    source_result = source.import_dataframe(pd.DataFrame(first + second))
+                    self.assertEqual(source_result["status"], "partial")
+                    self.assertEqual(source_result["unknown_actions"], {"Dividend adjustment": 2})
+                    for path in paths:
+                        result = restored.import_dataframe(pd.read_csv(path))
+                        self.assertEqual(result["status"], "partial")
+                        self.assertEqual(result["errors"], [])
+                        self.assertEqual(result["unknown_actions"], {"Dividend adjustment": 1})
+                        self.assertEqual(result["skipped_actions"], {"Deposit": 1})
+                        self.assertEqual(result["added"], {
+                            "buy": 1, "sell": 1, "interest": 2, "dividend": 1, "fee": 1,
+                        })
+                    assert source.conn is not None and restored.conn is not None
+                    for table, count in (("trades", 4), ("interests", 4), ("dividends", 2), ("fees", 2)):
+                        self.assertEqual(restored.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], count)
+                        self.assertEqual(
+                            source.conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall(),
+                            restored.conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall(),
+                        )
+                    usd = 45 if annual else 41
+                    eur = 55 if annual else 51
+                    for query, expected in (
+                        ("SELECT SUM(total_czk),SUM(stamp_tax_czk) FROM trades", (-2 * usd, -usd)),
+                        ("SELECT SUM(gross_czk),SUM(net_czk),SUM(withholding_tax_czk) FROM dividends",
+                         (2 * usd, 1.6 * usd, 0.4 * usd)),
+                        ("SELECT SUM(total_czk) FROM interests", (0.5 * usd + 0.25 * eur,)),
+                        ("SELECT SUM(total_czk) FROM fees", (-0.1 * usd,)),
+                    ):
+                        for actual, target in zip(restored.conn.execute(query).fetchone(), expected):
+                            self.assertAlmostEqual(actual, target)
+                    self.assertIsNone(load_connection(restored))
+                    self.assertEqual(restored.get_setting("synthetic-original-setting", ""), "")
+                    self.assertEqual(restored.conn.execute("SELECT COUNT(*) FROM pairings").fetchone()[0], 0)
+                    for path in paths:
+                        repeated = restored.import_dataframe(pd.read_csv(path))
+                        self.assertEqual(sum(repeated["added"].values()), 0)
+                        self.assertEqual(sum(repeated["duplicates"].values()), 6)
+                    if annual:
+                        daily.assert_not_called()
+                    else:
+                        self.assertTrue(daily.called)
 
     def test_first_run_leap_year_prague_boundaries_and_original_bytes(self):
         content = self.annual_csv(2024, timestamp="2024-02-29 12:00:00+00:00")
