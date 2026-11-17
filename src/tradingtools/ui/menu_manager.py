@@ -35,6 +35,7 @@ class MenuManager:
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Import CSV", command=self.app.open_csv_file, state='disabled')
         self.file_menu.add_command(label="Read transactions from Trading212...", command=self.app.read_trading212_transactions, state='disabled')
+        self.file_menu.add_command(label="Refresh older Trading212 years...", command=self.app.refresh_trading212_years, state='disabled')
         self.file_menu.add_command(label="View last import conflicts...", command=self.app.show_import_conflicts, state='disabled')
         self.file_menu.add_command(label="Import Annual Exchange Rates...", command=self.app.import_annual_rates, state='disabled')
         self.file_menu.add_separator()
@@ -74,6 +75,7 @@ class MenuManager:
             self.file_menu.entryconfig(label, state="disabled" if busy else "normal")
         available = bool(db_manager.conn) and not busy
         self.file_menu.entryconfig("Read transactions from Trading212...", state="normal" if available else "disabled")
+        self.file_menu.entryconfig("Refresh older Trading212 years...", state="normal" if available else "disabled")
         self.file_menu.entryconfig(
             "View last import conflicts...",
             state="normal" if available and getattr(self.app, "last_import_comparisons", []) else "disabled",

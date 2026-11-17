@@ -7,7 +7,9 @@ from threading import Event, get_ident
 from unittest.mock import Mock, patch
 
 from tradingtools.db.dbmanager import DatabaseManager
-from tradingtools.dialogs.trading212_dialog import Trading212ConnectionDialog, Trading212WorkerDialog
+from tradingtools.dialogs.trading212_dialog import (
+    Trading212ConnectionDialog, Trading212RefreshDialog, Trading212WorkerDialog,
+)
 from tradingtools.dialogs.import_conflicts_dialog import ImportConflictsDialog
 from tradingtools.import_diagnostics import ComparisonCandidate, ImportComparison
 from tradingtools.trading212_sync import SyncProgress, load_connection
@@ -84,6 +86,32 @@ class TestTrading212Dialog(unittest.TestCase):
             dialog.show()
         self.assertFalse(dialog.exit_requested)
         self.assertTrue(self.root.winfo_exists())
+
+    def test_refresh_selects_years_without_text_parsing_and_restores_root_close_handler(self):
+        previous = self.root.protocol("WM_DELETE_WINDOW")
+        for close_root in (False, True):
+            dialog = Trading212RefreshDialog(self.root, 2020)
+
+            def choose():
+                if close_root:
+                    self.root.tk.call(self.root.protocol("WM_DELETE_WINDOW"))
+                else:
+                    dialog.years.selection_set(0)
+                    dialog.years.selection_set(2)
+                    dialog._confirm()
+
+            def when_visible():
+                if hasattr(dialog, "years") and dialog.years.winfo_viewable():
+                    self.root.after(10, choose)
+                else:
+                    self.root.after(10, when_visible)
+
+            self.root.after(10, when_visible)
+            with patch("tradingtools.dialogs.trading212_dialog.Trading212API.current_archive_year", return_value=2024):
+                result = dialog.show()
+            self.assertEqual(result, None if close_root else (2020, 2022))
+            self.assertEqual(dialog.exit_requested, close_root)
+            self.assertEqual(self.root.protocol("WM_DELETE_WINDOW"), previous)
 
     def test_vault_failure_never_binds_database_or_reports_success_and_clears_fields(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -779,6 +779,56 @@ Reálné API, skutečné pověření ani pracovní DB nebyly při této etapě
 použity. Živé hranice exportů, zabalená Windows aplikace a úplná
 závěrečná regrese zůstávají etapě 7.
 
+**Následná oprava po vyzkoušení GUI:**
+
+- Povolená čtecí diagnostika (`GET` přehledu účtu a seznamu exportů) potvrdila,
+  že broker vrací konec reportu s přesností na milisekundy, zatímco požadavek
+  používá mikrosekundy. Čtyři přepínače obsahu se shodovaly. Jde o ověření
+  metadat, nikoli krajních CSV transakcí; nebyl vytvořen nový export ani
+  zapsáno do pracovní DB/archivu.
+- Porovnání rozpoznává toto zkrácení pouze na stejnou milisekundu.
+  Jiná milisekunda, jiný obsah a neshodné přesnější časové razítko se odmítají.
+  Požadované intervaly ani přesná kontrola časů uvnitř CSV se nemění.
+  Známý čekající report lze dokončit po restartu; nejistý POST stále vyžaduje
+  právě jedno nové odpovídající ID, ne automatické opakování požadavku.
+- Běžný příkaz načítání spustí synchronizaci rovnou. Prvotní nastavení je
+  automatické jen pro nepropojenou DB; správa zůstává v Options.
+  Samostatný příkaz `Refresh older Trading212 years...` nabízí klikací
+  výběr uzavřených let místo opakovaného textového dotazu.
+- Opravu ověřilo **62 cílených offline testů**: skutečně pozorovaná
+  přesnost metadat, odmítnutí odlišných intervalů, obnova nejistého POSTu,
+  restart čekajícího exportu, zachování původních bytes/hranice roku
+  a GUI včetně prvotního nastavení, přímého spuštění a výběru let.
+
+**Následné schválené sjednocení starého času:**
+
+- Import smí opravit skutečný DB timestamp jen u jednoznačné uložené identity,
+  pokud se kanonický zdroj liší pouze naivní/UTC interpretací stejného času
+  a uložený snapshot nebyl změněn. Původní místní parser musí být přesně
+  reprodukovatelný; nezkouší se tolerance jedné či dvou hodin.
+- Nejednoznačné/neexistující DST časy, nereprodukovatelná původní zóna,
+  změna kurzového dne, UTC daňového roku, pořadí nákupu/prodeje nebo kalendářního
+  časového testu zůstávají konflikty.
+- Před prvním pokusem o opravu v každém CSV importu vznikne sousední SQLite
+  záloha `*.pre-time-normalization-*.bak`; její chyba zastaví import.
+  Změna timestampu, zdroje, původního aliasu, snapshotu a odvozených dnů držení
+  je atomická po řádku. Částky v CZK, množství, ID, vazby párování, metody,
+  výsledek časového testu, poznámky a zámky se nemění.
+- Schválené rozšíření přepočítá uložené celé dny držení, pokud se při opravě
+  času změní, ale časový test a platnost párování zůstanou stejné. Původní počet
+  musí odpovídat původním timestampům; nekonzistentní hodnoty se nepřepisují
+  a chybějící hodnoty zůstávají NULL. Výjimka platí i pro zamčená párování;
+  záloha vzniká před prvním zápisem do párování.
+- Staré i nové CSV lze bezpečně opakovat. Přehledy ručního/API importu uvádějí
+  počet sjednocení jako podmnožinu duplicit a cestu k záloze. Konflikty se
+  nadále neukládají. Schéma zůstává **2**; neprobíhá zápis do Trading212.
+- Ověření: **209 cílených offline testů prošlo**. Zahrnují zimní/letní čas,
+  všechny podporované kategorie, původní i UTC reimport, nejednoznačné
+  identity, hranice dne/roku/DST, změnu místní zóny, selhání zálohy i
+  rollback identity i odvozených dnů držení, zrušení/částečný import,
+  přepočet dnů u zamčených párů na straně nákupu i prodeje a GUI přehledy.
+  Použity byly pouze dočasné testovací DB a simulované API.
+
 #### Etapa 7 — obnova, Windows executable a závěrečná regrese
 
 **Stav:** čeká. **Předpoklad:** etapa 6.

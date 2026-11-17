@@ -111,6 +111,65 @@ class Trading212WorkerDialog(Generic[T]):
         return self.outcome.value
 
 
+class Trading212RefreshDialog:
+    def __init__(self, parent: tk.Tk, first_year: int) -> None:
+        self.parent, self.first_year = parent, first_year
+        self.result: tuple[int, ...] | None = None
+        self.exit_requested = False
+
+    def _confirm(self) -> None:
+        selected = self.years.curselection()
+        if not selected:
+            messagebox.showwarning("Select years", "Select at least one year to refresh.", parent=self.dialog)
+            return
+        self.result = tuple(int(self.years.get(index)) for index in selected)
+        self.dialog.destroy()
+
+    def _close_parent(self) -> None:
+        self.exit_requested = True
+        self.dialog.destroy()
+
+    def show(self) -> tuple[int, ...] | None:
+        years = range(self.first_year, Trading212API.current_archive_year())
+        if not years:
+            messagebox.showinfo("Refresh Trading212 years", "There are no closed years to refresh.", parent=self.parent)
+            return None
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Refresh older Trading212 years")
+        self.dialog.transient(self.parent)
+        frame = ttk.Frame(self.dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text="Click years to select/unselect them.\n"
+            "Selected years will be exported again and reimported.\n"
+            "Other years follow normal synchronization.",
+        ).pack(anchor="w", pady=5)
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill="both", expand=True)
+        self.years = tk.Listbox(list_frame, selectmode="multiple", exportselection=False, height=min(len(years), 10))
+        for year in years:
+            self.years.insert("end", str(year))
+        scrollbar = ttk.Scrollbar(list_frame, command=self.years.yview)
+        self.years.configure(yscrollcommand=scrollbar.set)
+        self.years.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        ttk.Button(frame, text="Refresh selected years", command=self._confirm).pack(side="left", pady=10)
+        ttk.Button(frame, text="Cancel", command=self.dialog.destroy).pack(side="right", pady=10)
+        previous_close = self.parent.protocol("WM_DELETE_WINDOW")
+        self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
+        temporary_close = self.parent.protocol("WM_DELETE_WINDOW")
+        try:
+            self.dialog.wait_visibility()
+            self.dialog.grab_set()
+            self.parent.wait_window(self.dialog)
+        finally:
+            self.parent.protocol("WM_DELETE_WINDOW", previous_close)
+            self.parent.deletecommand(temporary_close)
+            if self.dialog.winfo_exists():
+                self.dialog.destroy()
+        return self.result
+
+
 class Trading212ConnectionDialog:
     def __init__(self, parent: tk.Tk, database_path: str, original: Trading212Connection | None) -> None:
         self.parent, self.database_path, self.original = parent, database_path, original

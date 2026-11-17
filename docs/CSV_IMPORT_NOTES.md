@@ -6,6 +6,13 @@
   and the same importer as manual CSV import. **Options > Trading212 connection...**
   manages the account binding, first year, archive folder and native Windows
   credentials. The connection is verified and explicitly confirmed before saving.
+- Saved connections start normal synchronization directly, without a repeated
+  setup/refresh question. **File > Refresh older Trading212 years...** separately
+  offers a clickable year list when an explicit historical refresh is needed.
+- Report metadata timestamps are matched at the broker's observed millisecond
+  precision when sub-millisecond digits were truncated. Requests, archive bounds
+  and exact CSV coverage validation are not altered; different milliseconds,
+  content or conflicting higher-precision timestamps remain errors.
 - Schema remains **2**. Existing `settings` stores only non-secret connection
   details and compact versioned import status/counts per year and CSV hash.
   Running/partial/cancelled/failed reports are retried; a completed unchanged
@@ -97,10 +104,10 @@ Example action seen in 2026 export that is currently skipped as unknown:
   The manual import summary displays the conflict count.
 - Original CSV source evidence and the transaction are committed atomically per
   row. Cancellation or an error does not leave an inserted row without its identity.
-- A legacy `Time` without an offset is **not** silently interpreted as UTC for
-  identity matching. Its existing import timestamp behavior is preserved.
-  Nearby old dividends are an ambiguity guard, never a reason to shift/match time.
-- Before accepting overlapping UTC exports, use the original CSV with
+- A legacy `Time` without an offset keeps its original local-time interpretation
+  on initial import. A later aware UTC source may prove the time-only correction
+  described below; proximity alone never proves a timezone correction.
+- For cases without that proof, use the original CSV with
   `DatabaseManager.reconcile_legacy_dataframe`, explicitly supplying both
   `source_timezone` and `imported_timezone`. This currently has no GUI workflow.
   A successful reconciliation retains the original naive source as an accepted
@@ -128,3 +135,35 @@ Example action seen in 2026 export that is currently skipped as unknown:
 - Opening an old database automatically creates a sibling
   `<filename>.pre-v2-<random>.bak` before the transactional schema upgrade.
   Keep and protect that backup; older application versions cannot open schema 2.
+
+### Automatic time-only normalization
+
+- Both manual and API CSV imports can normalize a uniquely proven naive/UTC
+  difference in an already recorded source. Canonical fields other than time
+  must be identical, broker IDs must not disagree, and the stored immutable
+  snapshot must still match. No source evidence is fabricated for untracked rows.
+- The naive wall-clock value must equal the incoming UTC wall-clock value, and
+  the old stored timestamp must exactly reproduce the original system-local
+  parser. Fold checks and round trips reject ambiguous/nonexistent DST times.
+  A changed machine timezone that cannot reproduce that interpretation remains
+  a conflict; no fixed offset or tolerance is guessed.
+- Normalization changes the timestamp, current source, accepted original source
+  alias, stored snapshot and any affected recorded `holding_period_days`.
+  A day count is updated only if its old value matches the old timestamps;
+  inconsistent counts that would need updating remain conflicts, and NULL counts
+  stay NULL. This applies to locked pairs too, without unlocking them.
+  CZK values, quantities, IDs, pairing links, methods, time-test flags, notes and
+  locks remain unchanged. Changes to the local rate date, UTC tax year, pairing
+  chronology or calendar time test are still conflicts.
+- Before the first attempted correction in each CSV import, a sibling SQLite
+  backup `<filename>.pre-time-normalization-<random>.bak` is created from the
+  committed database. Backup failure stops import before mutation. The row's
+  timestamp, identity and derived holding-day updates roll back together on any
+  subsequent failure.
+- `time_normalized` counts committed corrections as a subset of `duplicates`,
+  not `added` or `errors`. `time_backup` provides the backup path when created.
+  Manual/API summaries display both; cancellation and partial imports retain
+  honest committed counts. Both original and UTC sources remain idempotent.
+- This uses existing schema-2 fields, with no schema-version bump, conflict
+  table, API change or write to the broker. Backups contain sensitive database
+  data and require the same protection.

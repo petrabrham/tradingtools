@@ -210,6 +210,7 @@ class TestApplicationSession(unittest.TestCase):
             "added": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
             "duplicates": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0},
             "errors": [], "unknown_actions": {},
+            "time_normalized": 1, "time_backup": "synthetic.db.pre-time-normalization-example.bak",
         }
         with (
             patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
@@ -222,6 +223,9 @@ class TestApplicationSession(unittest.TestCase):
         self.showerror.assert_not_called()
         self.assertEqual(info.call_args.args[0], "Success")
         self.assertIn("Duplicates: 1", info.call_args.args[1])
+        self.assertIn("Automatically normalized times: 1 (included in duplicates)", info.call_args.args[1])
+        self.assertIn("Before-normalization backup: synthetic.db.pre-time-normalization-example.bak",
+                      info.call_args.args[1])
 
     def test_csv_cancelled_before_import_does_not_show_success(self):
         self.db.conn = Mock()
@@ -247,9 +251,10 @@ class TestApplicationSession(unittest.TestCase):
                 self.app.create_database, self.app.open_database, self.app.release_database,
                 self.app.save_database_as, self.app.open_csv_file, self.app.import_annual_rates,
                 self.app.read_trading212_transactions, self.app.configure_trading212,
+                self.app.refresh_trading212_years,
             ):
                 handler()
-        self.assertEqual(warning.call_count, 8)
+        self.assertEqual(warning.call_count, 9)
         choose.assert_not_called()
         worker.assert_not_called()
         self.db.close.assert_not_called()
@@ -266,6 +271,7 @@ class TestApplicationSession(unittest.TestCase):
         for label in (
             "New Database", "Connect Database", "Save Database Copy As...", "Release Database",
             "Import CSV", "Read transactions from Trading212...", "Import Annual Exchange Rates...",
+            "Refresh older Trading212 years...",
         ):
             menu.entryconfig.assert_any_call(label, state="disabled")
         manager.options_menu.entryconfig.assert_any_call("Trading212 connection...", state="disabled")
@@ -278,7 +284,7 @@ class TestApplicationSession(unittest.TestCase):
         outcome = SyncResult(status="partial", comparisons=[Mock()])
         with (
             patch("tradingtools.app.load_connection", return_value=binding),
-            patch("tradingtools.app.simpledialog.askstring", return_value=""),
+            patch("tradingtools.app.Trading212RefreshDialog") as refresh,
             patch("tradingtools.app.Trading212WorkerDialog") as worker,
             patch.object(self.app, "_show_sync_result") as summary,
         ):
@@ -290,6 +296,7 @@ class TestApplicationSession(unittest.TestCase):
         self.filter_manager.update_year_list.assert_called_once()
         self.update_views.assert_called_once()
         summary.assert_called_once_with(outcome)
+        refresh.assert_not_called()
 
     def test_sync_root_close_exits_only_after_worker_cleanup_without_summary(self):
         from tradingtools.trading212_sync import SyncResult, Trading212Connection
@@ -298,7 +305,6 @@ class TestApplicationSession(unittest.TestCase):
         binding = Trading212Connection("demo", 123, str(self.directory / "archive"), 2020)
         with (
             patch("tradingtools.app.load_connection", return_value=binding),
-            patch("tradingtools.app.simpledialog.askstring", return_value=""),
             patch("tradingtools.app.Trading212WorkerDialog") as worker,
             patch.object(self.app, "_show_sync_result") as summary,
             patch.object(self.app, "on_exit") as close,
@@ -322,6 +328,49 @@ class TestApplicationSession(unittest.TestCase):
         worker.assert_not_called()
         summary.assert_not_called()
         self.showerror.assert_called_once()
+
+    def test_setup_is_only_automatic_for_database_without_saved_connection(self):
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, str(self.directory / "archive"), 2020)
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.load_connection", side_effect=[None, binding]),
+            patch.object(self.app, "_setup_trading212", return_value=binding) as setup,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch.object(self.app, "_show_sync_result"),
+        ):
+            worker.return_value.show.return_value = SyncResult()
+            worker.return_value.exit_requested = False
+            self.app.read_trading212_transactions()
+            self.app.read_trading212_transactions()
+        setup.assert_called_once()
+
+    def test_explicit_refresh_passes_selected_years_to_worker_and_cancel_does_not_start_it(self):
+        from threading import Event
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, str(self.directory / "archive"), 2020)
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.load_connection", return_value=binding),
+            patch("tradingtools.app.Trading212RefreshDialog") as options,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch("tradingtools.app.Trading212Sync") as sync,
+            patch.object(self.app, "_show_sync_result"),
+        ):
+            options.return_value.show.return_value = (2020, 2022)
+            options.return_value.exit_requested = False
+            worker.return_value.show.side_effect = lambda: worker.call_args.args[2](Event(), Mock())
+            worker.return_value.exit_requested = False
+            sync.return_value.run.return_value = SyncResult()
+            self.app.refresh_trading212_years()
+            self.assertEqual(sync.call_args.kwargs["refresh_years"], (2020, 2022))
+            worker.reset_mock()
+            options.return_value.show.return_value = None
+            self.app.refresh_trading212_years()
+            worker.assert_not_called()
+        self.assertFalse(self.app.data_operation_active)
 
 
 if __name__ == "__main__":

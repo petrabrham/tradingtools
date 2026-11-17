@@ -541,13 +541,22 @@ class Trading212API:
             return False
         for field in ("timeFrom", "timeTo"):
             value = report.get(field)
-            if not isinstance(value, str):
+            expected = payload.get(field)
+            if not isinstance(value, str) or not isinstance(expected, str):
                 return False
             try:
-                normalized = self._utc_time(datetime.fromisoformat(value.replace("Z", "+00:00")))
+                reported = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                normalized = self._utc_time(reported)
+                if normalized == expected:
+                    continue
+                reported = reported.astimezone(timezone.utc)
+                requested = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+                # Broker metadata truncate sub-millisecond digits, not the original CSV/request.
+                if reported.microsecond % 1000 or normalized != self._utc_time(
+                    requested.replace(microsecond=requested.microsecond // 1000 * 1000),
+                ):
+                    return False
             except ValueError:
-                return False
-            if normalized != payload[field]:
                 return False
         return True
 

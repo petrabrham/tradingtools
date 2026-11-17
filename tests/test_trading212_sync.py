@@ -144,6 +144,33 @@ class TestTrading212Sync(unittest.TestCase):
         self.assertEqual(comparison.candidates[0].stored["total_czk"], 4)
         self.assertEqual(self.conn.execute("SELECT total_czk FROM interests ORDER BY id").fetchall(), [(4.0,), (8.0,)])
         self.assertEqual(self.rate.call_count, 1)
+
+    def test_time_normalization_is_reported_with_backup_and_not_as_conflict(self):
+        incoming = self.row("normalize")
+        original = {key: value for key, value in incoming.items() if key != "Time (UTC)"}
+        original["Time"] = incoming["Time (UTC)"][:-6]
+        self.database.import_dataframe(pd.DataFrame([original]))
+        before = self.conn.execute("SELECT * FROM interests").fetchall()
+        self.archived = [self.report(2020, [incoming])]
+        self.rate.reset_mock()
+        result = self.run_sync()
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.comparisons, [])
+        item = result.reports[0]
+        self.assertEqual((item.time_normalized, item.counts["duplicates"], item.conflicts), (1, 1, 0))
+        self.assertIn("normalized times: 1", result.summary())
+        self.assertIn(str(item.time_backup), result.summary())
+        backup = sqlite3.connect(item.time_backup)
+        try:
+            self.assertEqual(backup.execute("SELECT * FROM interests").fetchall(), before)
+        finally:
+            backup.close()
+        self.assertEqual(json.loads(self.database.get_setting(self.key(item.report)))["time_normalized"], 1)
+        self.published = self.archived
+        retried = self.run_sync(refresh_years=(2020,)).reports[0]
+        self.assertEqual((retried.time_normalized, retried.counts["duplicates"]), (0, 1))
+        self.assertIsNone(retried.time_backup)
+        self.rate.assert_not_called()
         settings = self.conn.execute("SELECT value FROM settings WHERE key LIKE 'trading212.import.%'").fetchall()
         for (text,) in settings:
             state = json.loads(text)
@@ -190,10 +217,10 @@ class TestTrading212Sync(unittest.TestCase):
         error = sqlite3.OperationalError("Synthetic disk full")
         error.sqlite_errorcode = sqlite3.SQLITE_FULL
 
-        def fail_second(database, row, category):
+        def fail_second(database, row, category, **kwargs):
             if row["ID"] == "two":
                 raise error
-            return original(database, row, category)
+            return original(database, row, category, **kwargs)
 
         with patch.object(DatabaseManager, "_import_csv_row", new=fail_second):
             result = self.run_sync()

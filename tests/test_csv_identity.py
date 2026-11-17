@@ -17,6 +17,20 @@ from tradingtools.db.repositories.fees import FeesRepository
 from tradingtools.import_diagnostics import build_comparisons
 
 
+class PragueDateTime(datetime):
+    local_zone = ZoneInfo("Europe/Prague")
+
+    def timestamp(self):
+        if self.tzinfo is None:
+            return datetime.timestamp(self.replace(tzinfo=self.local_zone))
+        return super().timestamp()
+
+    @classmethod
+    def fromtimestamp(cls, timestamp, tz=None):
+        value = super().fromtimestamp(timestamp, cls.local_zone if tz is None else tz)
+        return value.replace(tzinfo=None) if tz is None else value
+
+
 class TestCSVIdentity(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -33,6 +47,10 @@ class TestCSVIdentity(unittest.TestCase):
         rate_patch = patch.object(self.db, "get_exchange_rate", return_value=2.0)
         self.rate = rate_patch.start()
         self.addCleanup(rate_patch.stop)
+        for module in ("dbmanager", "import_identity", "repositories.pairings"):
+            clock = patch(f"tradingtools.db.{module}.datetime", PragueDateTime)
+            clock.start()
+            self.addCleanup(clock.stop)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -296,20 +314,333 @@ class TestCSVIdentity(unittest.TestCase):
                 )
                 self.assertEqual(repeated["linked"], 1)
 
-    def test_known_naive_sources_still_need_explicit_timezone_reconciliation(self):
+    def test_known_naive_sources_are_normalized_and_both_formats_remain_duplicates(self):
         old = self.row()
         timestamp = int(datetime.fromisoformat(old["Time"]).replace(tzinfo=ZoneInfo("Europe/Prague")).timestamp())
         with patch.object(DatabaseManager, "timestr_to_timestamp", return_value=timestamp):
             self.import_rows([old])
+        result = self.import_rows([self.utc(old)])
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(result["time_normalized"], 1)
+        self.assertEqual(result["duplicates"]["dividend"], 1)
+        self.assertEqual(self.conn.execute("SELECT timestamp FROM dividends").fetchone()[0],
+                         int(datetime.fromisoformat(self.utc(old)["Time (UTC)"]).timestamp()))
+        backup = sqlite3.connect(result["time_backup"])
+        try:
+            self.assertEqual(backup.execute("SELECT timestamp FROM dividends").fetchone()[0], timestamp)
+        finally:
+            backup.close()
+        self.assertEqual(self.import_rows([self.utc(old)])["duplicates"]["dividend"], 1)
+        self.assertEqual(self.import_rows([old])["duplicates"]["dividend"], 1)
+
+    def test_normalization_preserves_values_and_backs_up_once_for_winter_and_summer(self):
+        rows = [self.row(action, Time=text, ID=f"{action}-{text}", **{
+                    "Currency conversion fee": 0.3, "Currency (Currency conversion fee)": "USD",
+                })
+                for text in ("2024-01-15 12:00:00", "2024-07-15 12:00:00")
+                for action in ("Market buy", "Market sell", "Interest on cash", "Dividend (Dividend)", "ADR Fee")]
+        self.import_rows(rows)
+        before = {table: self.conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+                  for table in ("trades", "interests", "dividends", "fees")}
+        sources = self.conn.execute("SELECT category,record_id,source FROM csv_identities").fetchall()
+        self.rate.reset_mock()
+        result = self.import_rows([self.utc(row) for row in rows])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["time_normalized"], len(rows))
+        self.assertEqual(sum(result["duplicates"].values()), len(rows))
+        self.assertEqual(sum(result["added"].values()), 0)
+        self.assertEqual(len(list(self.directory.glob("*.pre-time-normalization-*.bak"))), 1)
+        self.rate.assert_not_called()
+        backup = sqlite3.connect(result["time_backup"])
+        try:
+            for table, records in before.items():
+                self.assertEqual(backup.execute(f"SELECT * FROM {table} ORDER BY id").fetchall(), records)
+                after = self.conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+                for old, new in zip(records, after):
+                    delta = 3600 if datetime.fromtimestamp(old[1], ZoneInfo("Europe/Prague")).month == 1 else 7200
+                    self.assertEqual(new, (old[0], old[1] + delta, *old[2:]))
+        finally:
+            backup.close()
+        self.assertEqual(self.conn.execute(
+            "SELECT category,record_id,legacy_source FROM csv_identities"
+        ).fetchall(), sources)
+        for retry in (rows, [self.utc(row) for row in rows]):
+            repeated = self.import_rows(retry)
+            self.assertEqual(repeated["time_normalized"], 0)
+            self.assertEqual(sum(repeated["duplicates"].values()), len(rows))
+            self.assertNotIn("time_backup", repeated)
+
+    def test_anonymous_time_normalization_needs_one_exact_source_candidate(self):
+        old = self.row()
+        self.import_rows([{**old, "ID": "one"}, {**old, "ID": "two"}])
+        before = list(self.conn.iterdump())
         with self.assertLogs(self.logger, level="ERROR"):
             result = self.import_rows([self.utc(old)])
         self.assertEqual(len(result["conflicts"]), 1)
-        linked = self.db.reconcile_legacy_dataframe(
-            pd.DataFrame([old]), source_timezone="UTC", imported_timezone="Europe/Prague",
+        self.assertEqual(result["time_normalized"], 0)
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertNotIn("time_backup", result)
+
+    def test_no_id_fee_normalizes_and_repeated_no_id_groups_do_not(self):
+        old = {key: value for key, value in self.fee_row(ISIN=None).items() if key != "Time (UTC)"}
+        old["Time"] = "2024-06-01 12:00:00"
+        self.import_rows([old])
+        with self.assertLogs(self.logger, level="ERROR"):
+            ambiguous = self.import_rows([self.utc(old), self.utc(old)])
+        self.assertEqual(ambiguous["time_normalized"], 0)
+        self.assertEqual(len(ambiguous["conflicts"]), 2)
+        normalized = self.import_rows([self.utc(old)])
+        self.assertEqual(normalized["time_normalized"], 1)
+        self.assertEqual(self.import_rows([old])["duplicates"]["fee"], 1)
+
+    def test_time_normalization_rejects_other_source_changes_and_local_edits(self):
+        old = self.row("Market buy", ID="buy")
+        self.import_rows([old])
+        before = list(self.conn.iterdump())
+        for changes in ({"Total": 99}, {"ISIN": "US0000000002"}, {"No. of shares": 99},
+                        {"Action": "Market sell"}, {"Time (UTC)": "2024-06-01 12:00:01+00:00"},
+                        {"Currency conversion fee": 1, "Currency (Currency conversion fee)": "USD"}):
+            with self.subTest(changes=changes), self.assertLogs(self.logger, level="ERROR"):
+                result = self.import_rows([{**self.utc(old), **changes}])
+            self.assertEqual(len(result["conflicts"]), 1)
+            self.assertEqual(result["time_normalized"], 0)
+            self.assertEqual(list(self.conn.iterdump()), before)
+            self.assertNotIn("time_backup", result)
+        self.conn.execute("UPDATE trades SET total_czk=999")
+        self.conn.commit()
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(old)])
+        self.assertEqual(result["conflicts"][0]["code"], "local_edit")
+        self.assertEqual(self.conn.execute("SELECT total_czk FROM trades").fetchone()[0], 999)
+
+    def test_time_normalization_rejects_date_year_and_dst_boundaries(self):
+        for index, text in enumerate(("2024-06-01 23:30:00", "2024-01-01 00:30:00",
+                                      "2024-03-31 02:30:00", "2024-10-27 02:30:00")):
+            with self.subTest(time=text):
+                old = self.row("Interest on cash", Time=text, ID=f"unsafe-{index}")
+                self.import_rows([old])
+                before = list(self.conn.iterdump())
+                with self.assertLogs(self.logger, level="ERROR"):
+                    result = self.import_rows([self.utc(old)])
+                self.assertEqual(len(result["conflicts"]), 1)
+                self.assertEqual(result["time_normalized"], 0)
+                self.assertEqual(list(self.conn.iterdump()), before)
+                self.assertNotIn("time_backup", result)
+
+    def test_time_normalization_does_not_guess_original_machine_timezone(self):
+        old = self.row("Interest on cash", ID="moved")
+        self.import_rows([old])
+        before = list(self.conn.iterdump())
+        with (patch.object(PragueDateTime, "local_zone", ZoneInfo("America/New_York")),
+              self.assertLogs(self.logger, level="ERROR")):
+            result = self.import_rows([self.utc(old)])
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertNotIn("time_backup", result)
+
+    def test_time_backup_failure_prevents_all_repairs(self):
+        old = self.row("Interest on cash", ID="backup")
+        self.import_rows([old])
+        before = list(self.conn.iterdump())
+        failures = (
+            patch.object(self.db, "_backup_database", side_effect=PermissionError("Synthetic backup failure")),
+            patch("tradingtools.db.dbmanager.sqlite3.connect",
+                  side_effect=sqlite3.OperationalError("Synthetic backup database failure")),
         )
-        self.assertEqual(linked["linked"], 1)
-        self.assertEqual(self.import_rows([self.utc(old)])["duplicates"]["dividend"], 1)
-        self.assertEqual(self.import_rows([old])["duplicates"]["dividend"], 1)
+        for failure in failures:
+            with failure, self.assertRaisesRegex(RuntimeError, "without a verified database backup"):
+                self.import_rows([self.utc(old)])
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(list(self.directory.glob("*.bak")), [])
+
+    def test_time_identity_write_failure_rolls_back_timestamp_and_keeps_backup(self):
+        old = self.row("Interest on cash", ID="rollback")
+        self.import_rows([old])
+        self.conn.execute(
+            "CREATE TRIGGER reject_time_identity BEFORE UPDATE OF source ON csv_identities "
+            "BEGIN SELECT RAISE(ABORT,'Synthetic identity failure'); END"
+        )
+        self.conn.commit()
+        before = list(self.conn.iterdump())
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(old)])
+        self.assertEqual(result["failed"]["interest"], 1)
+        self.assertEqual(result["time_normalized"], 0)
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertTrue(Path(result["time_backup"]).is_file())
+
+    def test_time_repair_counts_and_backup_survive_cancellation_and_retry(self):
+        rows = [self.row("Interest on cash", ID=f"cancel-{index}") for index in range(3)]
+        self.import_rows(rows)
+        cancel = Event()
+        batches = self.db.import_dataframe_batches(pd.DataFrame([self.utc(row) for row in rows]),
+                                                   batch_size=1, cancel_event=cancel)
+        first = next(batches)
+        cancel.set()
+        final = next(batches)
+        self.assertEqual((final["status"], final["processed"], final["time_normalized"]),
+                         ("cancelled", 1, 1))
+        self.assertEqual(final["time_backup"], first["time_backup"])
+        retried = self.import_rows([self.utc(row) for row in rows])
+        self.assertEqual((retried["status"], retried["time_normalized"]), ("complete", 2))
+        self.assertEqual(retried["duplicates"]["interest"], 3)
+
+    def test_partial_import_counts_only_successfully_normalized_rows(self):
+        rows = [self.row("Interest on cash", ID=identifier) for identifier in ("normalize", "changed")]
+        self.import_rows(rows)
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(rows[0]), {**self.utc(rows[1]), "Total": 99}])
+        self.assertEqual((result["status"], result["processed"], result["time_normalized"]),
+                         ("partial", 2, 1))
+        self.assertEqual(result["duplicates"]["interest"], 1)
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertTrue(Path(result["time_backup"]).is_file())
+
+    def test_time_repair_keeps_locked_pairing_and_remaining_quantities(self):
+        buy = self.row("Market buy", Time="2020-06-01 12:00:00", ID="paired-buy")
+        sell = self.utc(self.row("Market sell", Time="2024-07-01 16:00:00", ID="paired-sell"))
+        self.import_rows([buy, sell])
+        self.conn.execute(
+            "INSERT INTO pairings(purchase_trade_id,sale_trade_id,quantity,method,locked,locked_reason,"
+            "holding_period_days,time_test_qualified) "
+            "VALUES(1,2,1,'Manual',1,'Keep unchanged',1491,1)"
+        )
+        self.conn.execute("UPDATE trades SET remaining_quantity=0")
+        self.conn.commit()
+        pairings = self.conn.execute("SELECT * FROM pairings").fetchall()
+        trades = self.conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
+        result = self.import_rows([self.utc(buy)])
+        self.assertEqual(result["time_normalized"], 1)
+        self.assertEqual(self.conn.execute("SELECT * FROM pairings").fetchall(), pairings)
+        after = self.conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
+        self.assertEqual(after[0], (trades[0][0], trades[0][1] + 7200, *trades[0][2:]))
+        self.assertEqual(after[1], trades[1])
+
+    def seed_pair_with_holding_day_change(self, category="buy"):
+        buy_time = "2024-09-20 12:00:00" if category == "buy" else "2024-06-01 12:00:00"
+        buy = self.row("Market buy", Time=buy_time, ID=f"day-buy-{category}")
+        sell_time = "2024-11-07 11:00:00" if category == "buy" else "2024-06-02 13:00:00"
+        sell = self.row("Market sell", Time=sell_time, ID=f"day-sell-{category}")
+        self.import_rows([buy if category == "buy" else self.utc(buy),
+                          sell if category == "sell" else self.utc(sell)])
+        buy_id, buy_timestamp = self.conn.execute(
+            "SELECT id,timestamp FROM trades WHERE id_string=?", (buy["ID"],),
+        ).fetchone()
+        sell_id, sell_timestamp = self.conn.execute(
+            "SELECT id,timestamp FROM trades WHERE id_string=?", (sell["ID"],),
+        ).fetchone()
+        cursor = self.conn.execute(
+            "INSERT INTO pairings(purchase_trade_id,sale_trade_id,quantity,method,locked,locked_reason,"
+            "holding_period_days,time_test_qualified,notes) VALUES(?,?,1,'Manual',1,'Keep lock',?,0,'Keep note')",
+            (buy_id, sell_id, (sell_timestamp - buy_timestamp) // 86400),
+        )
+        self.conn.execute("UPDATE trades SET remaining_quantity=0")
+        self.conn.commit()
+        return buy if category == "buy" else sell, cursor.lastrowid
+
+    def test_time_repair_refreshes_only_derived_days_for_locked_buy_and_sell_pairs(self):
+        for category, day_change in (("buy", -1), ("sell", 1)):
+            with self.subTest(category=category):
+                row, pair_id = self.seed_pair_with_holding_day_change(category)
+                before_trades = self.conn.execute("SELECT * FROM trades ORDER BY id").fetchall()
+                cursor = self.conn.execute("SELECT * FROM pairings ORDER BY id")
+                day_index = [column[0] for column in cursor.description].index("holding_period_days")
+                before_pairs = cursor.fetchall()
+                record_id = self.conn.execute(
+                    "SELECT id FROM trades WHERE id_string=?", (row["ID"],),
+                ).fetchone()[0]
+                result = self.import_rows([self.utc(row)])
+                self.assertEqual((result["status"], result["time_normalized"]), ("complete", 1))
+                expected_pairs = [
+                    (*pair[:day_index], pair[day_index] + day_change, *pair[day_index + 1:])
+                    if pair[0] == pair_id else pair for pair in before_pairs
+                ]
+                self.assertEqual(self.conn.execute("SELECT * FROM pairings ORDER BY id").fetchall(),
+                                 expected_pairs)
+                expected_timestamp = int(datetime.fromisoformat(self.utc(row)["Time (UTC)"]).timestamp())
+                expected_trades = [
+                    (trade[0], expected_timestamp, *trade[2:]) if trade[0] == record_id else trade
+                    for trade in before_trades
+                ]
+                self.assertEqual(self.conn.execute("SELECT * FROM trades ORDER BY id").fetchall(),
+                                 expected_trades)
+                backup = sqlite3.connect(result["time_backup"])
+                try:
+                    self.assertEqual(backup.execute("SELECT * FROM trades ORDER BY id").fetchall(),
+                                     before_trades)
+                    self.assertEqual(backup.execute("SELECT * FROM pairings ORDER BY id").fetchall(),
+                                     before_pairs)
+                finally:
+                    backup.close()
+                for retry in (row, self.utc(row)):
+                    repeated = self.import_rows([retry])
+                    self.assertEqual(repeated["time_normalized"], 0)
+                    self.assertEqual(repeated["duplicates"][category], 1)
+                    self.assertEqual(self.conn.execute("SELECT * FROM pairings ORDER BY id").fetchall(),
+                                     expected_pairs)
+
+    def test_time_repair_does_not_replace_inconsistent_or_unset_pairing_days(self):
+        row, pair_id = self.seed_pair_with_holding_day_change()
+        self.conn.execute("UPDATE pairings SET holding_period_days=999 WHERE id=?", (pair_id,))
+        self.conn.commit()
+        before = list(self.conn.iterdump())
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(row)])
+        self.assertEqual(result["conflicts"][0]["code"], "time_pairing")
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertNotIn("time_backup", result)
+        self.conn.execute("UPDATE pairings SET holding_period_days=NULL WHERE id=?", (pair_id,))
+        self.conn.commit()
+        result = self.import_rows([self.utc(row)])
+        self.assertEqual(result["time_normalized"], 1)
+        self.assertIsNone(self.conn.execute(
+            "SELECT holding_period_days FROM pairings WHERE id=?", (pair_id,),
+        ).fetchone()[0])
+
+    def test_pairing_day_refresh_waits_for_backup_and_rolls_back_with_identity(self):
+        row, _ = self.seed_pair_with_holding_day_change()
+        before = list(self.conn.iterdump())
+        with (patch.object(self.db, "_backup_database", side_effect=PermissionError("Synthetic backup failure")),
+              self.assertRaisesRegex(RuntimeError, "without a verified database backup")):
+            self.import_rows([self.utc(row)])
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.conn.execute(
+            "CREATE TRIGGER reject_paired_time_identity BEFORE UPDATE OF source ON csv_identities "
+            "BEGIN SELECT RAISE(ABORT,'Synthetic identity failure'); END"
+        )
+        self.conn.commit()
+        before = list(self.conn.iterdump())
+        with self.assertLogs(self.logger, level="ERROR"):
+            result = self.import_rows([self.utc(row)])
+        self.assertEqual(result["failed"]["buy"], 1)
+        self.assertEqual(result["time_normalized"], 0)
+        self.assertTrue(Path(result["time_backup"]).is_file())
+        self.assertEqual(list(self.conn.iterdump()), before)
+
+    def test_time_repair_blocks_pairing_chronology_and_time_test_changes(self):
+        for index, (buy_time, sell_time) in enumerate((
+            ("2024-06-01 12:00:00", "2024-06-01 11:00:00"),
+            ("2020-03-28 12:00:00", "2023-03-28 10:30:00"),
+        )):
+            with self.subTest(buy=buy_time, sell=sell_time):
+                buy = self.row("Market buy", Time=buy_time, ID=f"unsafe-buy-{index}")
+                sell = self.utc(self.row("Market sell", Time=sell_time, ID=f"unsafe-sell-{index}"))
+                self.import_rows([buy, sell])
+                buy_id, sell_id = self.conn.execute("SELECT id FROM trades ORDER BY id DESC LIMIT 2").fetchall()[::-1]
+                self.conn.execute(
+                    "INSERT INTO pairings(purchase_trade_id,sale_trade_id,quantity,method,locked) "
+                    "VALUES(?,?,1,'Manual',1)", (buy_id[0], sell_id[0]),
+                )
+                self.conn.commit()
+                before = list(self.conn.iterdump())
+                with (patch("tradingtools.db.repositories.pairings.get_time_test_holding_period_years",
+                            return_value=3), self.assertLogs(self.logger, level="ERROR")):
+                    result = self.import_rows([self.utc(buy)])
+                self.assertEqual(result["time_normalized"], 0)
+                self.assertEqual(result["conflicts"][0]["code"], "time_pairing")
+                self.assertEqual(list(self.conn.iterdump()), before)
+                self.assertNotIn("time_backup", result)
 
     def test_reconciled_trade_interest_and_locked_pairing_survive_both_csv_formats(self):
         rows = [self.row(action, ID=action) for action in
@@ -522,9 +853,6 @@ class TestCSVIdentity(unittest.TestCase):
         with patch.object(DatabaseManager, "timestr_to_timestamp", return_value=timestamp):
             self.import_rows([old])
         before = self.conn.execute("SELECT * FROM fees").fetchall()
-        with self.assertLogs(self.logger, level="ERROR"):
-            result = self.import_rows([self.utc(old)])
-        self.assertEqual(len(result["conflicts"]), 1)
         linked = self.db.reconcile_legacy_dataframe(
             pd.DataFrame([old]), source_timezone="UTC", imported_timezone="Europe/Prague",
         )

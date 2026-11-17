@@ -5,6 +5,7 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from typing import Callable
 
 
 class ImportConflict(ValueError):
@@ -95,6 +96,71 @@ class ImportIdentity:
             for key, value in expected.items()
         )
 
+    def normalize_legacy_time(
+        self, category: str, broker_id: str | None, source: dict[str, object],
+        candidate_ids: tuple[int, ...], before_update: Callable[[int, int], None],
+    ) -> bool:
+        text = source.get("time")
+        if not isinstance(text, str) or text.startswith("naive:"):
+            return False
+        incoming = datetime.fromisoformat(text)
+        if incoming.utcoffset() is None:
+            return False
+        incoming = incoming.astimezone(timezone.utc)
+        candidates = []
+        for record_id in candidate_ids:
+            record = self.conn.execute(
+                "SELECT record_id,broker_id,source,stored,legacy_source FROM csv_identities "
+                "WHERE category=? AND record_id=?", (category, record_id),
+            ).fetchone()
+            if record is None or (broker_id is not None and record[1] not in (None, broker_id)):
+                continue
+            previous = json.loads(record[2])
+            previous_time = previous.get("time")
+            if not isinstance(previous_time, str) or not previous_time.startswith("naive:"):
+                continue
+            if {key: value for key, value in previous.items() if key != "time"} != {
+                key: value for key, value in source.items() if key != "time"
+            }:
+                continue
+            old = datetime.fromisoformat(previous_time[6:])
+            if old.utcoffset() is not None or old != incoming.replace(tzinfo=None):
+                continue
+            candidates.append((record, old))
+        if len(candidates) != 1:
+            return False
+        record, old = candidates[0]
+        self.check_stored(category, record)
+        if record[4] not in (None, record[2]):
+            return False
+        stored = json.loads(record[3])
+        old_timestamp, new_timestamp = stored["timestamp"], int(incoming.timestamp())
+        # Reproduce the original local-time parser; do not infer a one/two-hour tolerance.
+        if (
+            int(old.timestamp()) != old_timestamp
+            or int(old.replace(fold=0).timestamp()) != int(old.replace(fold=1).timestamp())
+            or datetime.fromtimestamp(old_timestamp) != old.replace(microsecond=0)
+        ):
+            return False
+        if (
+            datetime.fromtimestamp(old_timestamp).date() != datetime.fromtimestamp(new_timestamp).date()
+            or datetime.fromtimestamp(old_timestamp, timezone.utc).year != incoming.year
+        ):
+            return False
+        before_update(record[0], new_timestamp)
+        self.conn.execute(
+            f"UPDATE {self.TABLES[category]} SET timestamp=? WHERE id=?", (new_timestamp, record[0]),
+        )
+        stored["timestamp"] = new_timestamp
+        if self.snapshot(category, record[0]) != self.encode(stored):
+            raise ImportConflict("Time normalization changed other stored fields", code="time_normalization")
+        self.conn.execute(
+            "UPDATE csv_identities SET source=?,stored=?,legacy_source=?,broker_id=COALESCE(broker_id,?) "
+            "WHERE category=? AND record_id=?",
+            (self.encode(source), self.encode(stored), record[2], broker_id, category, record[0]),
+        )
+        return True
+
     def match(self, category: str, broker_id: str | None, source: dict[str, object]) -> int | None:
         encoded = self.encode(source)
         if broker_id is not None:
@@ -142,7 +208,7 @@ class ImportIdentity:
                                          candidate_ids=(other[0],), candidate_category=opposite)
             return None
 
-        # A nearby timestamp is only an ambiguity guard, never a timezone correction.
+        # Proximity only supplies conflict candidates; normalization needs separate exact proof.
         source_time = str(source["time"])
         if source_time.startswith("naive:"):
             center = int(datetime.fromisoformat(source_time[6:]).timestamp())

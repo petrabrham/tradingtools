@@ -5,13 +5,13 @@ import time
 import math
 import tempfile
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from numbers import Real
 from copy import deepcopy
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from threading import Event
-from typing import Optional, Tuple, Dict, List, Iterator, Generator, Literal, TypedDict, TYPE_CHECKING
+from typing import Optional, Tuple, Dict, List, Iterator, Generator, Literal, TypedDict, TYPE_CHECKING, Callable, NamedTuple
 import pandas as pd
 from tradingtools.config.cnb_rate import cnb_rate
 import logging
@@ -44,6 +44,8 @@ class ImportIssue(_ImportIssueDetails):
 
 class _ImportComparisons(TypedDict, total=False):
     comparisons: list["ImportComparison"]
+    time_normalized: int
+    time_backup: str
 
 
 class ImportResult(_ImportComparisons):
@@ -65,6 +67,11 @@ class ReconciliationResult(TypedDict):
     linked: int
     conflicts: List[ImportIssue]
     status: Literal["complete", "partial"]
+
+
+class _CSVRowResult(NamedTuple):
+    added: bool = False
+    time_normalized: bool = False
 
 
 class DatabaseManager:
@@ -277,21 +284,26 @@ class DatabaseManager:
                 raise
 
     def _backup_before_identity_migration(self) -> Path:
+        return self._backup_database("pre-v2")
+
+    def _backup_database(self, label: str) -> Path:
         if self.conn is None or self.current_db_path is None:
             raise RuntimeError("No database to back up")
         if self.current_db_path == ":memory:":
-            raise RuntimeError("Persist the legacy database before identity migration")
+            raise RuntimeError("Persist the database before creating a safety backup")
         path = Path(self.current_db_path)
         descriptor, name = tempfile.mkstemp(
-            prefix=path.name + ".pre-v2-", suffix=".bak", dir=path.resolve().parent,
+            prefix=path.name + f".{label}-", suffix=".bak", dir=path.resolve().parent,
         )
         os.close(descriptor)
         backup = Path(name)
         target: sqlite3.Connection | None = None
         try:
             target = sqlite3.connect(backup)
-            with target:
-                self.conn.backup(target)
+            # A separate reader also works while a CSV row holds BEGIN IMMEDIATE.
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+                with target:
+                    source.backup(target)
         except Exception:
             if target is not None:
                 target.close()
@@ -301,7 +313,7 @@ class DatabaseManager:
         finally:
             if target is not None:
                 target.close()
-        self.logger.info("Saved pre-migration database backup: %s", backup)
+        self.logger.info("Saved %s database backup: %s", label, backup)
         return backup
 
     def _migrate_csv_identities(self, version: int) -> None:
@@ -492,7 +504,16 @@ class DatabaseManager:
             "duplicates": dict.fromkeys(categories, 0),
             "failed": dict.fromkeys((*categories, "unknown"), 0),
             "errors": [], "unknown_actions": {}, "skipped_actions": {}, "conflicts": [],
+            "time_normalized": 0,
         }
+
+        def before_time_update() -> None:
+            if "time_backup" not in result:
+                try:
+                    result["time_backup"] = str(self._backup_database("pre-time-normalization"))
+                except (OSError, sqlite3.Error) as error:
+                    raise RuntimeError("Cannot normalize times without a verified database backup") from error
+
         ambiguous_sources = self._ambiguous_anonymous_sources(df, cancel_event)
         self.logger.info("Starting import of DataFrame with %d rows", len(df))
         for position, (_, row) in enumerate(df.iterrows(), start=1):
@@ -516,8 +537,10 @@ class DatabaseManager:
                     if category in ambiguous_sources:
                         if ImportIdentity.encode(self._csv_source(row, category)) in ambiguous_sources[category]:
                             raise ImportConflict(f"Indistinguishable no-ID {category} events occur more than once in this CSV")
-                    inserted = self._import_csv_row(row, category)
-                    counts = result["added"] if inserted else result["duplicates"]
+                    outcome = self._import_csv_row(row, category, before_time_update=before_time_update)
+                    if outcome.time_normalized:
+                        result["time_normalized"] += 1
+                    counts = result["added"] if outcome.added else result["duplicates"]
                     counts[category] += 1
             except (ValueError, TypeError, sqlite3.Error, OSError) as error:
                 if isinstance(error, sqlite3.Error) and self.conn is not None:
@@ -666,14 +689,23 @@ class DatabaseManager:
             for category in ("dividend", "fee")
         }
 
-    def _import_csv_row(self, row: pd.Series, category: str) -> int:
+    def _import_csv_row(
+        self, row: pd.Series, category: str, *, before_time_update: Callable[[], None],
+    ) -> _CSVRowResult:
         if self.conn is None:
             raise RuntimeError("No open database for CSV identity check")
         source = self._csv_source(row, category)
         broker_id = self._csv_text(row, "ID", required=category not in ("dividend", "fee")) or None
-        identity = ImportIdentity(self.conn)
+        connection = self.conn
+        identity = ImportIdentity(connection)
 
-        def link_legacy(candidates: list[int], timestamp: int) -> int:
+        def prepare_time_update(record_id: int, new_timestamp: int) -> None:
+            updates = self._time_pairing_updates(category, record_id, new_timestamp)
+            before_time_update()
+            if updates:
+                connection.executemany("UPDATE pairings SET holding_period_days=? WHERE id=?", updates)
+
+        def link_legacy(candidates: list[int], timestamp: int) -> _CSVRowResult:
             if not candidates:
                 raise ImportConflict(
                     f"Legacy {category} timestamp differs; explicit source timezone reconciliation is required"
@@ -689,14 +721,25 @@ class DatabaseManager:
                 )
             identity.remember(category, matching[0], broker_id, source)
             self.logger.info("Verified original CSV for legacy %s record %d", category, matching[0])
-            return 0
+            return _CSVRowResult()
 
         with self._csv_transaction():
             time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)
             try:
                 if identity.match(category, broker_id, source) is not None:
-                    return 0
-            except LegacySourceRequired as error:
+                    return _CSVRowResult()
+            except ImportConflict as error:
+                if (
+                    error.code in ("source_changed", "timezone")
+                    and error.candidate_category in (None, category)
+                    and identity.normalize_legacy_time(
+                        category, broker_id, source, error.candidate_ids, prepare_time_update,
+                    )
+                ):
+                    self.logger.info("Normalized legacy %s source time", category)
+                    return _CSVRowResult(time_normalized=True)
+                if not isinstance(error, LegacySourceRequired):
+                    raise
                 timestamp = self.timestr_to_timestamp(time_str)
                 legacy_rows = self.conn.execute(
                     f"SELECT d.id FROM {identity.TABLES[category]} d "
@@ -727,7 +770,46 @@ class DatabaseManager:
                 raise ImportConflict("An existing transaction has no matching source identity")
             record_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             identity.remember(category, record_id, broker_id, source)
-        return inserted
+        return _CSVRowResult(added=bool(inserted))
+
+    def _time_pairing_updates(self, category: str, record_id: int, timestamp: int) -> list[tuple[int, int]]:
+        if category not in ("buy", "sell"):
+            return []
+        if self.conn is None or self.pairings_repo is None:
+            raise RuntimeError("No database for time normalization pairing checks")
+        rows = self.conn.execute(
+            "SELECT p.id,p.purchase_trade_id,p.sale_trade_id,b.timestamp,s.timestamp,p.holding_period_days "
+            "FROM pairings p "
+            "JOIN trades b ON b.id=p.purchase_trade_id JOIN trades s ON s.id=p.sale_trade_id "
+            "WHERE p.purchase_trade_id=? OR p.sale_trade_id=?", (record_id, record_id),
+        ).fetchall()
+        updates: list[tuple[int, int]] = []
+        for pair_id, buy_id, sell_id, old_buy, old_sell, cached_days in rows:
+            new_buy = timestamp if buy_id == record_id else old_buy
+            new_sell = timestamp if sell_id == record_id else old_sell
+            old_qualified = self.pairings_repo.check_time_test(
+                datetime.fromtimestamp(old_buy).isoformat(), datetime.fromtimestamp(old_sell).isoformat(),
+            )
+            new_qualified = self.pairings_repo.check_time_test(
+                datetime.fromtimestamp(new_buy).isoformat(), datetime.fromtimestamp(new_sell).isoformat(),
+            )
+            if (
+                new_buy > new_sell or old_buy > old_sell
+                or old_qualified != new_qualified
+            ):
+                raise ImportConflict(
+                    "Time normalization would change existing pairing chronology or time-test qualification",
+                    code="time_pairing", candidate_ids=(record_id,), candidate_category=category,
+                )
+            old_days, new_days = (old_sell - old_buy) // 86400, (new_sell - new_buy) // 86400
+            if cached_days is not None and old_days != new_days:
+                if cached_days != old_days:
+                    raise ImportConflict(
+                        "Stored pairing holding days do not match the existing timestamps",
+                        code="time_pairing", candidate_ids=(record_id,), candidate_category=category,
+                    )
+                updates.append((new_days, pair_id))
+        return updates
 
     def _insert_csv_row(self, row: pd.Series, category: str) -> int:
         time_str = self._csv_text(row, "Time") or self._csv_text(row, "Time (UTC)", required=True)

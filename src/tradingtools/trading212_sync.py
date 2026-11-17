@@ -93,6 +93,8 @@ class ReportImport:
     read_counts: dict[str, int] = field(default_factory=dict)
     skipped_actions: dict[str, int] = field(default_factory=dict)
     issues: tuple[str, ...] = ()
+    time_normalized: int = 0
+    time_backup: str | None = None
 
 
 @dataclass
@@ -124,8 +126,11 @@ class SyncResult:
                     for key, value in item.read_counts.items() if key not in ("unknown", "insignificant")
                 )
                 + f"; duplicates: {item.counts.get('duplicates', 0)}"
+                + f"; normalized times: {item.time_normalized} (included in duplicates)"
                 + f"; errors: {item.errors}, conflicts: {item.conflicts}"
             )
+            if item.time_backup:
+                lines.append(f"  Before-normalization backup: {item.time_backup}")
             if item.unknown_actions:
                 lines.append("  Unsupported: " + ", ".join(
                     f"{action}: {count}" for action, count in item.unknown_actions.items()
@@ -198,6 +203,7 @@ class Trading212Sync:
                     processed=meta["processed"], records=meta["records"],
                     added=sum(meta["added"].values()), duplicates=sum(meta["duplicates"].values()),
                     failed=sum(meta["failed"].values()),
+                    time_normalized=meta.get("time_normalized", 0),
                 )
             database.set_setting(key, json.dumps(payload), "Trading212 report import status (no row details)")
 
@@ -261,6 +267,7 @@ class Trading212Sync:
                 final["unknown_actions"], len(final["errors"]), len(final["conflicts"]),
                 final["read"], final["skipped_actions"],
                 tuple(f"  Row {issue['row']} ({issue['action']}): {issue['message']}" for issue in final["errors"][:5]),
+                time_normalized=final.get("time_normalized", 0), time_backup=final.get("time_backup"),
             ))
             imported.add(identity)
             if final["status"] == "cancelled":

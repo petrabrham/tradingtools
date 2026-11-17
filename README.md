@@ -55,9 +55,12 @@ include credentials; configure the connection again on another computer.
    Choose demo/live, the first year of account history, a protected archive folder,
    and enter the masked Key and Secret. Verification does not save the entered
    pair until you confirm the displayed account.
-3. Select **File > Read transactions from Trading212...**. Leave the optional
-   comma-separated refresh-years field blank for normal synchronization.
-   Explicitly selected older years are exported and rechecked even when unchanged.
+3. Select **File > Read transactions from Trading212...** to start normal
+   synchronization directly. Connection setup appears automatically only for a
+   database without a saved connection.
+   To recheck older years, use **File > Refresh older Trading212 years...**
+   and click the desired years in the selection list; no comma-separated input
+   is needed. Selected years are exported and rechecked even when unchanged.
 4. Read the per-year result: archive coverage (full year/year to date) is separate
    from import status. Counts distinguish read/added transactions, duplicates,
    unsupported actions, intentional skips, errors and conflicts.
@@ -90,8 +93,9 @@ missing conversions/timezone interpretations remain unavailable. Ambiguous
 candidates are shown without choosing a match. There are no correction/accept/
 ignore actions. Details live **only in memory**, disappear on the next import,
 database switch/release or exit, and are not saved to a conflict table or settings.
-Reimport the CSV to reconstruct them after restart. Legacy timezone reconciliation
-still requires the explicit non-GUI helper; the viewer does not shift timestamps.
+Reimport the CSV to reconstruct them after restart. Proven time-only legacy
+differences can be normalized during import as described below; the viewer itself
+does not shift timestamps. Other timezone reconciliation uses the non-GUI helper.
 
 ### API surface and archive behavior
 
@@ -153,6 +157,13 @@ The current year ends at the captured sync cutoff (`as_of`, an optional aware
 datetime, defaults to now). A partial report is never certified as a full year.
 These precise Prague boundaries have offline tests, not yet a live-API
 boundary verification.
+
+Trading 212's report metadata may truncate timestamp fractions to milliseconds
+(for example, `.999999Z` becomes `.999Z`). Matching recognizes that reported
+precision only: another millisecond, a different interval/content or a conflicting
+higher-precision timestamp is still rejected. Original request/archive boundaries
+and exact CSV timestamp validation are unchanged. Recovery still requires exactly
+one new matching report ID and never blindly repeats an uncertain POST.
 
 Choose a protected folder outside the public repository. Files are stored under
 `Trading212\<environment>\<account>\<year>\Trading212_<year>_<UTC-time>_<reportId>.csv`.
@@ -251,7 +262,28 @@ unchanged. For legacy dividends (including those without broker IDs), the
 importer similarly requires exactly one untracked record with the same timestamp,
 ISIN and all immutable financial values. It attaches only source evidence and
 counts a duplicate. A timestamp/financial mismatch or multiple possible matches
-remains an explicit conflict; no timezone is inferred or corrected.
+remains an explicit conflict unless the narrow time-only proof below succeeds.
+
+When an incoming UTC source differs from a recorded naive source **only in time
+interpretation**, import can automatically correct the actual stored timestamp.
+It requires one uniquely identified transaction, otherwise identical canonical
+source fields, an unchanged stored snapshot, and exact reproduction of the old
+local-time parser (including DST checks). No fixed one/two-hour tolerance is used.
+The correction must preserve the rate calendar date, UTC tax year, and existing
+pairing chronology and time-test qualification. Consistent recorded holding-day
+counts are recomputed from the corrected timestamps, including for locked pairs;
+unset counts remain unset. An inconsistent count is a conflict if it would need
+updating. All financial values, remaining quantities, IDs, pairing links,
+quantities, methods, time-test flags, notes and locks stay unchanged.
+
+Before the first such correction in each CSV import, a SQLite backup is saved
+beside the database as `<filename>.pre-time-normalization-<random>.bak`; failure
+stops import before correction. Timestamp, source alias, refreshed snapshot
+and derived holding-day updates commit atomically per row. Both old and UTC
+exports remain safe to reimport.
+Manual/API summaries show the normalization count (a subset of duplicates) and
+backup path. Protect these backups like the database. Ambiguous cases, changed
+values, missing source evidence and unsafe date/pairing changes remain conflicts.
 
 For timezone reconciliation, the headless method
 `reconcile_legacy_dataframe(df, source_timezone="UTC", imported_timezone="Europe/Prague")`

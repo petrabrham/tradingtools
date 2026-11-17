@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox
 from tkinter import ttk  # Required for Treeview and Notebook
 from tkcalendar import DateEntry
 import os
@@ -18,11 +18,12 @@ from tradingtools.views.open_positions_view import OpenPositionsView
 from tradingtools.dialogs.exchange_rate_dialog import ExchangeRateDialog
 from tradingtools.dialogs.import_rates_dialog import ImportRatesDialog
 from tradingtools.dialogs.csv_import_dialog import CSVImportDialog
-from tradingtools.dialogs.trading212_dialog import Trading212ConnectionDialog, Trading212WorkerDialog
+from tradingtools.dialogs.trading212_dialog import (
+    Trading212ConnectionDialog, Trading212RefreshDialog, Trading212WorkerDialog,
+)
 from tradingtools.dialogs.import_conflicts_dialog import ImportConflictsDialog
 from tradingtools.import_diagnostics import ImportComparison
 from tradingtools.trading212_sync import SyncResult, Trading212Connection, Trading212Sync, load_connection
-from tradingtools.trading212_api import Trading212API
 from tradingtools.ui import MenuManager, FilterManager, copy_treeview_to_clipboard
 
 class TradingToolsApp:
@@ -171,9 +172,12 @@ class TradingToolsApp:
                 f"  Other:       {meta['read']['insignificant']} / -\n"
                 f"  Unknown:     {meta['read']['unknown']} / -\n"
                 f"Duplicates: {sum(meta['duplicates'].values())}\n"
+                f"Automatically normalized times: {meta.get('time_normalized', 0)} (included in duplicates)\n"
                 f"Failed: {len(meta['errors'])}\n"
                 f"Conflicts: {len(meta.get('conflicts', []))}"
             )
+            if meta.get("time_backup"):
+                message += f"\nBefore-normalization backup: {meta['time_backup']}"
             if meta["unknown_actions"]:
                 message += "\nUnsupported actions:\n" + "\n".join(
                     f"  {action}: {count}" for action, count in meta["unknown_actions"].items()
@@ -238,7 +242,10 @@ class TradingToolsApp:
         finally:
             self._end_operation()
 
-    def read_trading212_transactions(self) -> None:
+    def refresh_trading212_years(self) -> None:
+        self.read_trading212_transactions(select_refresh=True)
+
+    def read_trading212_transactions(self, *, select_refresh: bool = False) -> None:
         if self._operation_blocked() or self.db.current_db_path is None:
             return
         self._begin_operation()
@@ -250,18 +257,16 @@ class TradingToolsApp:
                 connection = self._setup_trading212()
             if connection is None or self._exit_after_operation:
                 return
-            text = simpledialog.askstring(
-                "Trading212 synchronization",
-                "Refresh older years (optional, comma-separated).\n"
-                "Leave blank for the normal yearly synchronization.\n"
-                "Unfinished archived imports are retried automatically.",
-                initialvalue="", parent=self.root,
-            )
-            if text is None:
-                return
-            refresh = tuple(sorted({int(item.strip()) for item in text.split(",") if item.strip()}))
-            if any(not connection.first_year <= year <= Trading212API.current_archive_year() for year in refresh):
-                raise ValueError("Refresh years must be within the configured archive range")
+            refresh: tuple[int, ...] = ()
+            if select_refresh:
+                options = Trading212RefreshDialog(self.root, connection.first_year)
+                try:
+                    selected = options.show()
+                finally:
+                    self._exit_after_operation = self._exit_after_operation or options.exit_requested
+                if selected is None or self._exit_after_operation:
+                    return
+                refresh = selected
             database_path = self.db.current_db_path
             if database_path is None:
                 raise RuntimeError("The database was closed")

@@ -376,6 +376,41 @@ class _CSVReportFixture(unittest.TestCase):
 
 
 class TestTrading212CSVReports(_CSVReportFixture):
+    def test_finished_report_uses_broker_millisecond_precision_without_changing_request(self):
+        end = self.end.replace(microsecond=999999)
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, {"reportId": 77})
+        self.api.request_csv_report(self.start, end)
+        self.assertEqual(json.loads(self.requests[-1]["body"])["timeTo"], "2024-12-31T23:59:59.999999Z")
+        report = self.report()
+        report.update(timeFrom="2024-01-01T00:00:00.000Z", timeTo="2024-12-31T23:59:59.999Z")
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [report])
+        self.assertEqual(self.api.wait_for_csv_report(77), self.URL)
+        self.assertEqual(sum(request["method"] == "POST" for request in self.requests), 1)
+
+    def test_millisecond_precision_does_not_accept_other_milliseconds_or_precise_mismatches(self):
+        payload = {
+            "timeFrom": "2024-01-01T00:00:00Z", "timeTo": "2024-12-31T23:59:59.999999Z",
+            "dataIncluded": self.api._history_content(),
+        }
+        for end in ("2024-12-31T23:59:59.998Z", "2024-12-31T23:59:59.999998Z", "2025-01-01T00:00:00Z"):
+            with self.subTest(end=end):
+                report = self.report()
+                report["timeTo"] = end
+                self.assertFalse(self.api._report_matches(report, payload))
+
+    def test_lost_post_response_recovers_millisecond_metadata_without_reposting(self):
+        report = self.report()
+        report["timeTo"] = "2024-12-31T23:59:59.999Z"
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, None, error=TimeoutError("synthetic transport failure"))
+        self.queue("GET", self.api._EXPORT_PATH, [report])
+        self.assertEqual(self.api.request_csv_report(self.start, self.end.replace(microsecond=999999)), 77)
+        self.assertEqual(sum(request["method"] == "POST" for request in self.requests), 1)
+
     def test_request_wait_and_download_preserve_original_csv_without_credentials(self):
         self.account()
         self.queue("GET", "/api/v0/equity/history/exports", [])
@@ -1036,6 +1071,26 @@ class TestTrading212AnnualArchive(_CSVReportFixture):
         self.queue_download(report, self.annual_csv(2025))
         self.api.sync_yearly_csv(self.directory, 2025, as_of=self.NOW)
         self.assertEqual(len(self.posts()), 1)
+
+    def test_restart_resumes_existing_microsecond_request_with_millisecond_metadata(self):
+        report = self.annual_report(2024, self.NOW, 77)
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [])
+        self.queue("POST", self.api._EXPORT_PATH, {"reportId": 77})
+        self.account()
+        self.queue("GET", self.api._EXPORT_PATH, [{**report, "timeTo": "2024-12-31T22:59:59.998Z"}])
+        self.assert_safe_failure(
+            lambda: self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW),
+            "does not match",
+        )
+        self.assertEqual(self.metadata()["pending"]["reportId"], 77)
+        self.restart()
+        self.queue_download({**report, "timeTo": "2024-12-31T22:59:59.999Z"}, self.annual_csv(2024))
+        self.queue_year(2025, self.NOW, 78)
+        paths = self.api.sync_yearly_csv(self.directory, 2024, as_of=self.NOW)
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(len(self.posts()), 2)
+        self.assertIsNone(self.metadata()["pending"])
 
     def test_confirmed_remote_failure_allows_new_report_only_on_next_run(self):
         failed = self.annual_report(2025, self.NOW, 77)
