@@ -1,22 +1,36 @@
 import gc
+import os
 import tempfile
 import tkinter as tk
 import unittest
+import pandas as pd
 from pathlib import Path
 from threading import Event, get_ident
 from unittest.mock import Mock, patch
 
 from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.config.config_loader import ConfigLoader, get_config
 from tradingtools.dialogs.trading212_dialog import (
     Trading212ConnectionDialog, Trading212RefreshDialog, Trading212WorkerDialog,
 )
 from tradingtools.dialogs.import_conflicts_dialog import ImportConflictsDialog
 from tradingtools.import_diagnostics import ComparisonCandidate, ImportComparison
-from tradingtools.trading212_sync import SyncProgress, load_connection
+from tradingtools.trading212_sync import SyncProgress, Trading212Connection, load_connection, save_connection
 
 
 class TestTrading212Dialog(unittest.TestCase):
     def setUp(self):
+        config_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(config_directory.cleanup)
+        patches = (
+            patch.dict(os.environ, {"APPDATA": config_directory.name}),
+            patch.object(ConfigLoader, "_instance", None),
+            patch.object(ConfigLoader, "_config", None),
+            patch("tradingtools.config.config_loader._config_loader", None),
+        )
+        for patched in patches:
+            patched.start()
+            self.addCleanup(patched.stop)
         self.root = tk.Tk()
         self.root.geometry("100x100")
         self.root.update()
@@ -153,6 +167,81 @@ class TestTrading212Dialog(unittest.TestCase):
                     self.assertEqual(dialog.secret.get(), "")
                 finally:
                     database.close()
+
+    def test_connection_confirmation_depends_on_existing_data_and_binding(self):
+        cases = (
+            ("empty", False, False, 123, True),
+            ("legacy_accept", True, False, 123, True),
+            ("legacy_decline", True, False, 123, False),
+            ("bound_same_account", True, True, 123, True),
+            ("bound_other_account", True, True, 456, True),
+        )
+        for name, populated, bound, verified_id, accepted in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "history.db"
+                with patch("tradingtools.db.dbmanager.setup_logger", return_value=Mock()):
+                    database = DatabaseManager()
+                    try:
+                        database.create_database(str(path))
+                        original = Trading212Connection("demo", 123, 2020)
+                        archive_directory = str((Path(directory) / "archive").resolve())
+                        if bound:
+                            save_connection(database, original)
+                        if populated:
+                            with patch.object(database, "get_exchange_rate", return_value=1):
+                                database.import_dataframe(pd.DataFrame([{
+                                    "Action": "Interest on cash", "Time": "2024-06-01 12:00:00",
+                                    "ID": "synthetic-interest", "Total": 1, "Currency (Total)": "CZK",
+                                    "Notes": "Interest on cash",
+                                }]))
+                        before = database.conn.execute("SELECT * FROM interests").fetchall()
+                        before_archive = get_config().get_trading212_archive_directory()
+                        dialog = Trading212ConnectionDialog(self.root, str(path), original if bound else None)
+                        dialog.dialog = tk.Toplevel(self.root)
+                        dialog.environment = tk.StringVar(value="demo")
+                        dialog.first_year = tk.StringVar(value="2020")
+                        dialog.archive = tk.StringVar(value=archive_directory)
+                        dialog.key = tk.StringVar(value="synthetic-key")
+                        dialog.secret = tk.StringVar(value="synthetic-secret")
+                        with (
+                            patch.object(dialog, "_work", side_effect=lambda title, job: job(Event(), Mock())),
+                            patch("tradingtools.dialogs.trading212_dialog.Trading212API") as api,
+                            patch("tradingtools.dialogs.trading212_dialog.messagebox.askyesno",
+                                  return_value=accepted) as confirm,
+                            patch("tradingtools.dialogs.trading212_dialog.messagebox.showerror") as error,
+                        ):
+                            api.return_value.verify_credentials.return_value = verified_id
+                            dialog._save()
+                        if populated and not bound:
+                            confirm.assert_called_once()
+                            self.assertIn("without account identification", confirm.call_args.args[1])
+                            self.assertIn("demo account 123", confirm.call_args.args[1])
+                            self.assertEqual(confirm.call_args.kwargs["default"], "no")
+                        else:
+                            confirm.assert_not_called()
+                        success = accepted and verified_id == 123
+                        if success:
+                            self.assertEqual(load_connection(database), original)
+                            self.assertEqual(dialog.result, original)
+                            api.return_value.save_credentials.assert_called_once()
+                            self.assertEqual(get_config().get_trading212_archive_directory(), archive_directory)
+                            error.assert_not_called()
+                        else:
+                            self.assertEqual(load_connection(database), original if bound else None)
+                            self.assertIsNone(dialog.result)
+                            api.return_value.save_credentials.assert_not_called()
+                            self.assertEqual(get_config().get_trading212_archive_directory(), before_archive)
+                            if bound:
+                                self.assertIn("does not match", error.call_args.args[1])
+                            else:
+                                error.assert_not_called()
+                        self.assertEqual(database.conn.execute("SELECT * FROM interests").fetchall(), before)
+                        self.assertEqual(dialog.key.get(), "")
+                        self.assertEqual(dialog.secret.get(), "")
+                        if dialog.dialog.winfo_exists():
+                            dialog.dialog.destroy()
+                    finally:
+                        database.close()
 
     def test_read_only_viewer_separates_raw_source_and_same_unit_recorded_differences(self):
         comparison = ImportComparison(

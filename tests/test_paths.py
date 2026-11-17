@@ -108,6 +108,44 @@ class TestApplicationPaths(unittest.TestCase):
                 self.assertEqual(config_path.read_bytes(), original)
                 self.assertEqual(list(config_path.parent.glob("config-*.tmp")), [])
 
+    def test_archive_root_is_local_and_preserves_session_and_other_settings(self):
+        with tempfile.TemporaryDirectory() as appdata:
+            with (
+                patch.dict(os.environ, {"APPDATA": appdata}),
+                patch.object(ConfigLoader, "_instance", None),
+                patch.object(ConfigLoader, "_config", None),
+            ):
+                loader = ConfigLoader()
+                self.assertEqual(loader.get_trading212_archive_directory(), "")
+                config_path = get_config_dir() / "config.json"
+                config_path.write_text('{"custom": 2}', encoding="utf-8")
+                archive = str((Path(appdata) / "archive").resolve())
+                loader.save_trading212_archive_directory(archive)
+                loader.save_last_database_path("example.db")
+                loader.reload()
+                self.assertEqual(loader.get_trading212_archive_directory(), archive)
+                saved = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved, {
+                    "custom": 2, "trading212_archive_directory": archive,
+                    "last_database_path": str(Path("example.db").resolve()),
+                })
+                before = config_path.read_bytes()
+                for value in ("", "relative", "   "):
+                    with self.subTest(value=value), self.assertRaises(ValueError):
+                        loader.save_trading212_archive_directory(value)
+                with patch("tradingtools.config.config_loader.os.replace",
+                           side_effect=PermissionError("Config is read-only")):
+                    with self.assertRaises(PermissionError):
+                        loader.save_trading212_archive_directory(str(Path(appdata) / "other"))
+                self.assertEqual(config_path.read_bytes(), before)
+                self.assertEqual(loader.get_trading212_archive_directory(), archive)
+                self.assertEqual(list(config_path.parent.glob("config-*.tmp")), [])
+                for value in (None, [], "relative"):
+                    config_path.write_text(json.dumps({"trading212_archive_directory": value}), encoding="utf-8")
+                    loader.reload()
+                    with self.subTest(value=value), self.assertRaises(ValueError):
+                        loader.get_trading212_archive_directory()
+
 
 if __name__ == "__main__":
     unittest.main()

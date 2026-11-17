@@ -105,13 +105,18 @@ class TradingToolsApp:
     # Title
     ###########################################################
     def update_title(self):
-        """Update the window title with the current database name"""
+        """Show the current database and its saved Trading212 account."""
         base_title = "Trading Tools"
         if self.db.current_db_path:
             db_name = os.path.basename(self.db.current_db_path)
-            self.root.title(f"{base_title} - {db_name}")
-        else:
-            self.root.title(base_title)
+            base_title += f" - {db_name}"
+            connection = load_connection(self.db)
+            if connection is not None:
+                base_title += (
+                    f" - Trading212 account {connection.account_id}"
+                    f" ({connection.environment.capitalize()})"
+                )
+        self.root.title(base_title)
 
     ###########################################################
     # Menu
@@ -226,7 +231,10 @@ class TradingToolsApp:
             raise RuntimeError("Open a database first")
         dialog = Trading212ConnectionDialog(self.root, self.db.current_db_path, load_connection(self.db))
         try:
-            return dialog.show()
+            connection = dialog.show()
+            if connection is not None:
+                self.update_title()
+            return connection
         finally:
             self._exit_after_operation = self._exit_after_operation or dialog.exit_requested
 
@@ -253,10 +261,13 @@ class TradingToolsApp:
         outcome: SyncResult | None = None
         try:
             connection = load_connection(self.db)
-            if connection is None:
+            if connection is None or not get_config().get_trading212_archive_directory():
                 connection = self._setup_trading212()
             if connection is None or self._exit_after_operation:
                 return
+            archive_directory = get_config().get_trading212_archive_directory()
+            if not archive_directory:
+                raise ValueError("Choose an archive directory on this computer in Trading212 connection settings")
             refresh: tuple[int, ...] = ()
             if select_refresh:
                 options = Trading212RefreshDialog(self.root, connection.first_year)
@@ -274,6 +285,7 @@ class TradingToolsApp:
                 self.root, "Read transactions from Trading212",
                 lambda cancel, notify: Trading212Sync(
                     database_path, connection, refresh_years=refresh,
+                    archive_directory=archive_directory,
                     cancel_event=cancel, on_progress=notify,
                 ).run(),
             )

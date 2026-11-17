@@ -12,7 +12,9 @@ import pandas as pd
 
 from tradingtools.db.dbmanager import DatabaseManager
 from tradingtools.trading212_api import ArchivedCSV
-from tradingtools.trading212_sync import Trading212Connection, Trading212Sync, load_connection, save_connection
+from tradingtools.trading212_sync import (
+    Trading212Connection, Trading212Sync, load_connection, requires_account_confirmation, save_connection,
+)
 
 
 class TestTrading212Sync(unittest.TestCase):
@@ -27,7 +29,8 @@ class TestTrading212Sync(unittest.TestCase):
         self.database = DatabaseManager()
         self.database.create_database(str(self.path))
         self.addCleanup(self.database.close)
-        self.binding = Trading212Connection("demo", 123, str(self.directory / "archive"), 2020)
+        self.binding = Trading212Connection("demo", 123, 2020)
+        self.archive_directory = str(self.directory / "archive")
         save_connection(self.database, self.binding)
         rate = patch.object(DatabaseManager, "get_exchange_rate", return_value=2.0)
         self.rate = rate.start()
@@ -68,15 +71,18 @@ class TestTrading212Sync(unittest.TestCase):
         return f"trading212.import.{report.year}.{report.sha256}"
 
     def run_sync(self, **kwargs):
-        return Trading212Sync(str(self.path), self.binding, api_factory=self.factory, **kwargs).run()
+        return Trading212Sync(
+            str(self.path), self.binding, archive_directory=self.archive_directory,
+            api_factory=self.factory, **kwargs,
+        ).run()
 
     def test_connection_roundtrip_rejects_rebinding_and_malformed_settings_without_schema_change(self):
         self.assertEqual(load_connection(self.database), self.binding)
         self.assertEqual(self.database.get_db_version(), 2)
         with self.assertRaisesRegex(ValueError, "already bound"):
-            save_connection(self.database, Trading212Connection("live", 123, self.binding.archive_directory, 2020))
+            save_connection(self.database, Trading212Connection("live", 123, 2020))
         with self.assertRaisesRegex(ValueError, "already bound"):
-            save_connection(self.database, Trading212Connection("demo", 456, self.binding.archive_directory, 2020))
+            save_connection(self.database, Trading212Connection("demo", 456, 2020))
         for changes in ({"account_id": True}, {"first_year": True}, {"archive_directory": ""},
                         {"version": True}, {"timezone": "UTC"}, {"environment": "invalid"}):
             with self.subTest(changes=changes):
@@ -87,6 +93,28 @@ class TestTrading212Sync(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_connection(self.database)
                 self.database.set_setting("trading212.connection", "")
+
+    def test_legacy_binding_ignores_archive_path_and_sync_rewrites_portable_metadata(self):
+        legacy = {
+            "version": 1, "environment": "demo", "account_id": 123,
+            "archive_directory": r"X:\another-computer\old-archive",
+            "first_year": 2020, "timezone": "Europe/Prague",
+        }
+        self.database.set_setting("trading212.connection", json.dumps(legacy))
+        before = list(self.conn.iterdump())
+        self.assertEqual(load_connection(self.database), self.binding)
+        self.assertEqual(list(self.conn.iterdump()), before)
+        self.assertEqual(self.run_sync().status, "complete")
+        self.api.get_archived_csvs.assert_called_once()
+        self.api.sync_yearly_csv.assert_called_once()
+        self.assertEqual(self.api.get_archived_csvs.call_args.args[0], self.archive_directory)
+        self.assertEqual(self.api.sync_yearly_csv.call_args.args[0], self.archive_directory)
+        metadata = json.loads(self.database.get_setting("trading212.connection"))
+        self.assertEqual(metadata, {
+            "version": 2, "environment": "demo", "account_id": 123,
+            "first_year": 2020, "timezone": "Europe/Prague",
+        })
+        self.assertEqual(self.database.get_db_version(), 2)
 
     def test_success_skip_unchanged_and_explicit_refresh_reimports_same_hash(self):
         report = self.report(2020, [self.row("one")])
@@ -111,6 +139,37 @@ class TestTrading212Sync(unittest.TestCase):
         self.assertEqual(refreshed.reports[0].counts["interest"], 0)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM interests").fetchone()[0], 1)
         self.rate.assert_not_called()
+
+    def test_first_binding_requires_confirmation_for_each_transaction_category_only(self):
+        self.conn.execute("DELETE FROM settings WHERE key='trading212.connection'")
+        self.conn.commit()
+        self.assertFalse(requires_account_confirmation(self.database))
+        common = {
+            "Time": "2024-06-01 12:00:00", "ID": "synthetic", "ISIN": "US0000000001",
+            "Ticker": "TEST", "Name": "Synthetic", "No. of shares": 2,
+            "Price / share": 1, "Currency (Price / share)": "USD",
+            "Total": 2, "Currency (Total)": "USD", "Notes": "Interest on cash",
+        }
+        for action, table in (("Market buy", "trades"), ("Market sell", "trades"),
+                              ("Dividend (Dividend)", "dividends"), ("Interest on cash", "interests"),
+                              ("ADR Fee", "fees")):
+            with self.subTest(action=action):
+                result = self.database.import_dataframe(pd.DataFrame([{**common, "Action": action}]))
+                self.assertEqual(result["status"], "complete")
+                self.assertIsNone(load_connection(self.database))
+                self.assertTrue(requires_account_confirmation(self.database))
+                before = list(self.conn.iterdump())
+                with self.assertRaisesRegex(ValueError, "no account identification"):
+                    save_connection(self.database, self.binding)
+                self.assertEqual(list(self.conn.iterdump()), before)
+                save_connection(self.database, self.binding, confirm_existing_data=True)
+                self.assertFalse(requires_account_confirmation(self.database))
+                save_connection(self.database, self.binding)
+                self.conn.execute("DELETE FROM settings WHERE key='trading212.connection'")
+                self.conn.execute("DELETE FROM csv_identities")
+                self.conn.execute(f"DELETE FROM {table}")
+                self.conn.commit()
+                self.assertFalse(requires_account_confirmation(self.database))
 
     def test_finalization_updates_archive_coverage_without_reimporting_identical_bytes(self):
         report = self.report(2020, [self.row("one")])

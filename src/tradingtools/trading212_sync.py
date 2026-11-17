@@ -25,7 +25,6 @@ _STATE_VERSION = 1
 class Trading212Connection:
     environment: Literal["live", "demo"]
     account_id: int
-    archive_directory: str
     first_year: int
 
     def __post_init__(self) -> None:
@@ -35,11 +34,6 @@ class Trading212Connection:
             raise ValueError("Invalid Trading212 account ID")
         if type(self.first_year) is not int or not 1 <= self.first_year <= Trading212API.current_archive_year():
             raise ValueError("First archive year must not be in the future")
-        if (
-            not isinstance(self.archive_directory, str) or not self.archive_directory.strip()
-            or not Path(self.archive_directory).is_absolute()
-        ):
-            raise ValueError("Choose an absolute archive directory")
 
 
 def load_connection(database: DatabaseManager) -> Trading212Connection | None:
@@ -47,26 +41,44 @@ def load_connection(database: DatabaseManager) -> Trading212Connection | None:
     if not text:
         return None
     data = json.loads(text)
-    if not isinstance(data, dict) or set(data) != {
-        "version", "environment", "account_id", "archive_directory", "first_year", "timezone",
-    }:
+    if not isinstance(data, dict):
         raise ValueError("Invalid saved Trading212 connection")
-    if type(data["version"]) is not int or data["version"] != 1 or data["timezone"] != "Europe/Prague":
+    if type(data.get("version")) is not int or data["version"] not in (1, 2):
+        raise ValueError("Unsupported saved Trading212 connection")
+    keys = {"version", "environment", "account_id", "first_year", "timezone"}
+    if set(data) != keys | ({"archive_directory"} if data["version"] == 1 else set()):
+        raise ValueError("Invalid saved Trading212 connection")
+    if data["timezone"] != "Europe/Prague":
         raise ValueError("Unsupported saved Trading212 connection")
     return Trading212Connection(
-        data["environment"], data["account_id"], data["archive_directory"], data["first_year"],
+        data["environment"], data["account_id"], data["first_year"],
     )
 
 
-def save_connection(database: DatabaseManager, connection: Trading212Connection) -> None:
+def requires_account_confirmation(database: DatabaseManager) -> bool:
+    if load_connection(database) is not None:
+        return False
+    if database.conn is None:
+        raise RuntimeError("Open a database before binding a Trading212 account")
+    return any(
+        database.conn.execute(f"SELECT EXISTS(SELECT 1 FROM {table})").fetchone()[0]
+        for table in ("trades", "interests", "dividends", "fees")
+    )
+
+
+def save_connection(
+    database: DatabaseManager, connection: Trading212Connection, *, confirm_existing_data: bool = False,
+) -> None:
     previous = load_connection(database)
     if previous is not None and (
         previous.environment != connection.environment or previous.account_id != connection.account_id
     ):
         raise ValueError("This database is already bound to another Trading212 account/environment")
+    if requires_account_confirmation(database) and not confirm_existing_data:
+        raise ValueError("Existing transactions have no account identification; confirm the Trading212 account first")
     database.set_setting(_CONNECTION_KEY, json.dumps({
-        "version": 1, "environment": connection.environment, "account_id": connection.account_id,
-        "archive_directory": connection.archive_directory, "first_year": connection.first_year,
+        "version": 2, "environment": connection.environment, "account_id": connection.account_id,
+        "first_year": connection.first_year,
         "timezone": "Europe/Prague",
     }), "Non-secret Trading212 connection")
 
@@ -152,12 +164,16 @@ class SyncResult:
 class Trading212Sync:
     def __init__(
         self, database_path: str, connection: Trading212Connection, *,
+        archive_directory: str,
         refresh_years: tuple[int, ...] = (), cancel_event: Event | None = None,
         on_progress: Callable[[SyncProgress], None] | None = None,
         api_factory: Callable[..., Trading212API] = Trading212API,
     ) -> None:
         self.database_path = database_path
         self.connection = connection
+        if not archive_directory.strip() or not Path(archive_directory).is_absolute():
+            raise ValueError("Choose an absolute archive directory on this computer")
+        self.archive_directory = archive_directory
         self.refresh_years = refresh_years
         self.cancel_event = cancel_event if cancel_event is not None else Event()
         self.on_progress = on_progress
@@ -285,12 +301,13 @@ class Trading212Sync:
             )
             if api.verify_account(cancel_event=self.cancel_event) != self.connection.account_id:
                 raise ValueError("Trading212 account does not match the database")
+            save_connection(database, self.connection)
             api.get_archived_csvs(
-                self.connection.archive_directory, cancel_event=self.cancel_event,
+                self.archive_directory, cancel_event=self.cancel_event,
                 on_report=lambda report: import_report(report, refreshed=False),
             )
             api.sync_yearly_csv(
-                self.connection.archive_directory, self.connection.first_year,
+                self.archive_directory, self.connection.first_year,
                 refresh_years=self.refresh_years, cancel_event=self.cancel_event,
                 on_report=lambda report: import_report(report, refreshed=report.year in self.refresh_years),
             )

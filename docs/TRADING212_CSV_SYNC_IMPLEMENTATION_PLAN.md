@@ -831,6 +831,14 @@ závěrečná regrese zůstávají etapě 7.
 
 #### Etapa 7 — obnova, Windows executable a závěrečná regrese
 
+**Upřesnění přenosnosti nastavení po etapě 6:** kořen archivu patří pouze do
+místního `config.json` (`trading212_archive_directory`), společně pro účty
+oddělené podsložkami prostředí/ID. Do DB se ukládají jen přenosná metadata
+účtu, prvního roku a časové zóny. Formát metadat 2 neobsahuje cestu; nejde
+o změnu schématu DB. Starý formát 1 se načte bez využití uložené cesty a při
+uložení propojení nebo ověřené synchronizaci se přepíše. Bez místního kořene
+aplikace vyžádá jeho výběr; cestu z přenesené DB automaticky nepřebírá.
+
 **Stav:** čeká. **Předpoklad:** etapa 6.
 
 - Ověřit lokální obnovu prázdné DB z doporučených ročních CSV bez API,

@@ -9,9 +9,10 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Generic, TypeVar
 
 from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.config.config_loader import get_config
 from tradingtools.trading212_api import Trading212API
 from tradingtools.trading212_sync import (
-    SyncProgress, Trading212Connection, load_connection, save_connection,
+    SyncProgress, Trading212Connection, load_connection, requires_account_confirmation, save_connection,
 )
 
 
@@ -213,33 +214,50 @@ class Trading212ConnectionDialog:
             selected_environment = "live" if environment == "live" else "demo"
             first_year = int(self.first_year.get())
             directory = str(Path(self.archive.get()).resolve()) if self.archive.get().strip() else ""
+            if not directory:
+                raise ValueError("Choose an archive directory on this computer")
             Trading212Connection(
                 selected_environment, self.original.account_id if self.original else 1,
-                directory, first_year,
+                first_year,
             )
 
-            def verify(cancel: Event, notify: Callable[[SyncProgress], None]) -> int:
+            def verify(cancel: Event, notify: Callable[[SyncProgress], None]) -> tuple[int, bool]:
                 api = Trading212API(
                     selected_environment, self.original.account_id if self.original else None,
                     on_progress=lambda event: notify(SyncProgress(event.phase, event.year, wait_seconds=event.wait_seconds)),
                 )
-                return (
+                account_id = (
                     api.verify_credentials(key, secret, cancel_event=cancel) if key else
                     api.verify_account(cancel_event=cancel)
                 )
+                if self.original is not None and (
+                    self.original.environment != selected_environment or self.original.account_id != account_id
+                ):
+                    raise ValueError("Trading212 account does not match the database")
+                database = DatabaseManager()
+                try:
+                    database.open_database(self.database_path)
+                    if load_connection(database) != self.original:
+                        raise ValueError("The saved connection changed; reopen connection settings")
+                    return account_id, requires_account_confirmation(database)
+                finally:
+                    database.close()
 
-            account_id = self._work("Verify Trading212 account", verify)
-            if self.exit_requested or account_id is None:
+            verified = self._work("Verify Trading212 account", verify)
+            if self.exit_requested or verified is None:
                 return
-            if not messagebox.askyesno(
-                "Confirm Trading212 connection",
-                f"Bind this database to {selected_environment} account {account_id}?\n"
-                f"Archive from {first_year} in:\n{directory}\n\n"
-                "Only history export is used. CSV archives contain sensitive financial data.",
-                parent=self.dialog,
-            ):
-                return
-            connection = Trading212Connection(selected_environment, account_id, directory, first_year)
+            account_id, confirm_existing_data = verified
+            if confirm_existing_data:
+                if not messagebox.askyesno(
+                    "Confirm account for existing transactions",
+                    "This database already contains transactions without account identification.\n"
+                    "Their account cannot be verified automatically.\n\n"
+                    f"The API will import from {selected_environment} account {account_id}.\n"
+                    "Continue and assign this database to that account?",
+                    parent=self.dialog, default=messagebox.NO,
+                ):
+                    return
+            connection = Trading212Connection(selected_environment, account_id, first_year)
 
             def store(cancel: Event, notify: Callable[[SyncProgress], None]) -> bool:
                 database = DatabaseManager()
@@ -247,13 +265,17 @@ class Trading212ConnectionDialog:
                     database.open_database(self.database_path)
                     if load_connection(database) != self.original:
                         raise ValueError("The saved connection changed; reopen connection settings")
+                    if requires_account_confirmation(database) and not confirm_existing_data:
+                        raise ValueError("Transactions were added without account identification; reopen connection settings")
                     if key:
                         api = Trading212API(selected_environment, account_id)
                         api.save_credentials(key, secret, cancel_event=cancel)
                     if cancel.is_set():
                         raise InterruptedError("Connection setup cancelled")
+                    notify(SyncProgress("Saving local archive directory"))
+                    get_config().save_trading212_archive_directory(directory)
                     notify(SyncProgress("Saving non-secret connection settings"))
-                    save_connection(database, connection)
+                    save_connection(database, connection, confirm_existing_data=confirm_existing_data)
                     return True
                 finally:
                     database.close()
@@ -295,6 +317,7 @@ class Trading212ConnectionDialog:
                 messagebox.showerror("Trading212 credentials", str(error), parent=self.dialog)
 
     def show(self) -> Trading212Connection | None:
+        archive_directory = get_config().get_trading212_archive_directory()
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Trading212 connection")
         self.dialog.transient(self.parent)
@@ -302,7 +325,7 @@ class Trading212ConnectionDialog:
         frame.pack(fill="both", expand=True)
         self.environment = tk.StringVar(value=self.original.environment if self.original else "live")
         self.first_year = tk.StringVar(value=str(self.original.first_year) if self.original else "")
-        self.archive = tk.StringVar(value=self.original.archive_directory if self.original else "")
+        self.archive = tk.StringVar(value=archive_directory)
         self.key, self.secret = tk.StringVar(), tk.StringVar()
         ttk.Label(frame, text="Environment").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
@@ -310,7 +333,7 @@ class Trading212ConnectionDialog:
             state="disabled" if self.original else "readonly",
         ).grid(row=0, column=1, sticky="ew")
         for row, (label, variable) in enumerate((
-            ("First archive year", self.first_year), ("Archive folder", self.archive),
+            ("First archive year", self.first_year), ("Archive folder (this computer)", self.archive),
             ("API Key", self.key), ("Secret", self.secret),
         ), start=1):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=5)

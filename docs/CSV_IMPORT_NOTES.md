@@ -5,9 +5,19 @@
 - **File > Read transactions from Trading212...** uses verified annual archives
   and the same importer as manual CSV import. **Options > Trading212 connection...**
   manages the account binding, first year, archive folder and native Windows
-  credentials. The connection is verified and explicitly confirmed before saving.
-- Saved connections start normal synchronization directly, without a repeated
-  setup/refresh question. **File > Refresh older Trading212 years...** separately
+  credentials. The account is verified before saving.
+- Manual CSV imports never request or fill account metadata and never show
+  account-confirmation prompts, whether the database is empty, populated or bound.
+  First API setup of a populated, unbound database requires explicit confirmation
+  that its unidentified transactions belong to the verified account/environment.
+  This includes databases containing only trades, interest, dividends or fees.
+  Declining saves neither the binding nor credentials. Empty databases and
+  same-account settings changes need no extra account confirmation.
+  Saving rechecks the database state; API account/environment mismatches are
+  errors, never an overridable confirmation.
+- Saved connections with a configured local archive root start normal
+  synchronization directly, without a repeated setup/refresh question.
+  **File > Refresh older Trading212 years...** separately
   offers a clickable year list when an explicit historical refresh is needed.
 - Report metadata timestamps are matched at the broker's observed millisecond
   precision when sub-millisecond digits were truncated. Requests, archive bounds
@@ -15,6 +25,15 @@
   content or conflicting higher-precision timestamps remain errors.
 - Schema remains **2**. Existing `settings` stores only non-secret connection
   details and compact versioned import status/counts per year and CSV hash.
+  Connection metadata format 2 contains environment, account ID, first year and
+  timezone, never an archive path. The shared machine-local root is stored in
+  `config.json` under `trading212_archive_directory` and applies to all accounts,
+  whose archives retain separate environment/account subfolders.
+  Legacy format-1 bindings are readable but their paths are ignored. They are
+  rewritten without the path on connection save or after successful account
+  verification during sync. Missing local configuration opens setup before any
+  synchronization; the old database path is never adopted automatically.
+  Changing the root does not relocate existing archives.
   Running/partial/cancelled/failed reports are retried; a completed unchanged
   revision is skipped unless explicitly refreshed.
 - Progress, cancellation and competing-operation guards apply to API imports.

@@ -53,11 +53,15 @@ include credentials; configure the connection again on another computer.
    mode. For annual rates, import the required years before synchronization.
 2. Select **Options > Trading212 connection...** (also offered on the first sync).
    Choose demo/live, the first year of account history, a protected archive folder,
-   and enter the masked Key and Secret. Verification does not save the entered
-   pair until you confirm the displayed account.
+   and enter the masked Key and Secret. Save verifies the account before storing
+   the connection and credentials. If the database already contains transactions
+   without an account binding, confirm that they belong to the displayed account.
+   Declining leaves the binding and credentials unsaved. Empty databases need
+   no additional account confirmation.
 3. Select **File > Read transactions from Trading212...** to start normal
-   synchronization directly. Connection setup appears automatically only for a
-   database without a saved connection.
+   synchronization directly. Connection setup appears automatically for a
+   database without a saved connection or when this computer has no archive
+   folder configured.
    To recheck older years, use **File > Refresh older Trading212 years...**
    and click the desired years in the selection list; no comma-separated input
    is needed. Selected years are exported and rechecked even when unchanged.
@@ -66,10 +70,27 @@ include credentials; configure the connection again on another computer.
    unsupported actions, intentional skips, errors and conflicts.
 
 One database is bound to one account and environment; changing either is refused.
-Connection settings and compact per-year/hash import statuses use the existing
-`settings` table, with **no schema change (still version 2)**. Key replacement
+The window title shows the open database name and, when bound, its saved
+Trading212 account ID and Live/Demo environment without an API request.
+Portable account metadata (environment, account ID, first year and timezone) and
+compact per-year/hash import statuses use the existing `settings` table, with
+**no schema change (still version 2)**. Key replacement
 must verify the bound account. Leave both credential fields blank to reuse the
 saved pair. Removing local credentials keeps the DB, archive and binding.
+Manual CSV import never asks for account metadata or confirmation, and does not
+create or change the binding. Unbound CSV-only databases may remain unbound.
+For API imports, an account mismatch stops synchronization before archive import.
+
+The shared archive root is stored **only on this computer** in
+`%APPDATA%\TradingTools\config\config.json`, under `trading212_archive_directory`.
+Accounts and demo/live environments have separate subfolders beneath that root.
+Moving a database does not move or select its archive: if the new computer has
+no configured root, choose one in connection settings before synchronizing.
+Legacy database bindings containing an archive path remain readable, but that
+path is ignored, never used to initialize local configuration. Saving the
+connection or starting synchronization after successful account verification
+rewrites the binding without the path (metadata format 2, not DB schema 3).
+Selecting a different root does not move existing archive files automatically.
 
 Workers own their API and SQLite connections. The progress window shows phases,
 rate-limit waits and processed rows. Closing it cancels locally but leaves the
