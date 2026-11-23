@@ -269,7 +269,9 @@ class Trading212ConnectionDialog:
                         raise ValueError("Transactions were added without account identification; reopen connection settings")
                     if key:
                         api = Trading212API(selected_environment, account_id)
-                        api.save_credentials(key, secret, cancel_event=cancel)
+                        api.store_verified_credentials(
+                            key, secret, account_id, cancel_event=cancel,
+                        )
                     if cancel.is_set():
                         raise InterruptedError("Connection setup cancelled")
                     notify(SyncProgress("Saving local archive directory"))
@@ -311,10 +313,44 @@ class Trading212ConnectionDialog:
 
         try:
             if self._work("Remove credentials", remove):
+                self.saved_key_status.set("No saved key pair for this account and environment.")
                 messagebox.showinfo("Credentials removed", "The local key pair was removed.", parent=self.dialog)
         except Exception as error:
             if not self.exit_requested:
                 messagebox.showerror("Trading212 credentials", str(error), parent=self.dialog)
+
+    def _inspect_saved_key(self) -> None:
+        original = self.original
+        if original is None:
+            self.saved_key_status.set(
+                "A new key pair will be saved after account verification."
+            )
+            return
+
+        def inspect(cancel: Event, notify: Callable[[SyncProgress], None]) -> str | None:
+            if cancel.is_set():
+                raise InterruptedError("Saved credential check cancelled")
+            notify(SyncProgress("Checking saved key in Windows Credential Manager"))
+            return Trading212API(
+                original.environment, original.account_id,
+            ).credential_fingerprint()
+
+        try:
+            fingerprint = self._work("Check saved Trading212 key", inspect)
+            if self.exit_requested:
+                return
+            if fingerprint is None:
+                self.saved_key_status.set(
+                    "No saved key pair for this account and environment. Enter a new pair."
+                )
+            else:
+                self.saved_key_status.set(
+                    f"Saved API key fingerprint: {fingerprint}. "
+                    "Blank fields reuse this key; enter a new pair to replace it."
+                )
+        except Exception as error:
+            if not self.exit_requested:
+                self.saved_key_status.set(f"Could not inspect saved key: {error}")
 
     def show(self) -> Trading212Connection | None:
         archive_directory = get_config().get_trading212_archive_directory()
@@ -327,6 +363,7 @@ class Trading212ConnectionDialog:
         self.first_year = tk.StringVar(value=str(self.original.first_year) if self.original else "")
         self.archive = tk.StringVar(value=archive_directory)
         self.key, self.secret = tk.StringVar(), tk.StringVar()
+        self.saved_key_status = tk.StringVar(value="Checking saved key..." if self.original else "")
         ttk.Label(frame, text="Environment").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
             frame, textvariable=self.environment, values=("live", "demo"),
@@ -345,11 +382,29 @@ class Trading212ConnectionDialog:
             f"Bound account: {self.original.account_id}. Leave both key fields blank to reuse credentials."
             if self.original else "Choose the first year of your account history. Credentials use Windows Credential Manager."
         )
-        ttk.Label(frame, text=text, wraplength=540).grid(row=5, column=0, columnspan=3, pady=10)
-        ttk.Button(frame, text="Verify and save", command=self._save).grid(row=6, column=1, sticky="e")
-        ttk.Button(frame, text="Cancel", command=self._cancel).grid(row=6, column=2)
+        ttk.Label(
+            frame,
+            text=(
+                text + "\nThe key fingerprint identifies the locally saved key; "
+                "it does not confirm that Trading212 still authorizes it."
+            ),
+            wraplength=540,
+        ).grid(row=5, column=0, columnspan=3, pady=5)
+        ttk.Label(frame, textvariable=self.saved_key_status, wraplength=540).grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=5,
+        )
+        archive_status = (
+            "Archive folder is saved in this computer's configuration."
+            if archive_directory else
+            "No archive folder is saved on this computer; choose it below."
+        )
+        ttk.Label(frame, text=archive_status, wraplength=540).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=5,
+        )
+        ttk.Button(frame, text="Verify and save", command=self._save).grid(row=8, column=1, sticky="e")
+        ttk.Button(frame, text="Cancel", command=self._cancel).grid(row=8, column=2)
         if self.original:
-            ttk.Button(frame, text="Remove saved credentials", command=self._delete_credentials).grid(row=6, column=0)
+            ttk.Button(frame, text="Remove saved credentials", command=self._delete_credentials).grid(row=8, column=0)
         self.dialog.protocol("WM_DELETE_WINDOW", self._cancel)
         previous_close = self.parent.protocol("WM_DELETE_WINDOW")
         self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
@@ -357,6 +412,7 @@ class Trading212ConnectionDialog:
         try:
             self.dialog.wait_visibility()
             self.dialog.grab_set()
+            self._inspect_saved_key()
             self.parent.wait_window(self.dialog)
         finally:
             self.parent.protocol("WM_DELETE_WINDOW", previous_close)

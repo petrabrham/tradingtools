@@ -211,7 +211,19 @@ class Trading212API:
                 cancel_event=cancel_event, deadline=deadline, size_limit=64 * 1024,
             )
         except ConnectionError:
-            self._fail("Could not securely connect to the Trading212 account API.")
+            self._logger.error("Could not securely connect to the Trading212 account API.")
+            raise RuntimeError("Could not securely connect to the Trading212 account API.") from None
+        for _ in range(2):
+            if status != 429:
+                break
+            try:
+                status, content, _ = self._api_exchange(
+                    "GET", self._ACCOUNT_PATH, credentials=(api_key, api_secret),
+                    cancel_event=cancel_event, deadline=deadline, size_limit=64 * 1024,
+                )
+            except ConnectionError:
+                self._logger.error("Could not securely connect to the Trading212 account API.")
+                raise RuntimeError("Could not securely connect to the Trading212 account API.") from None
         if status != 200:
             self._raise_api_status(status, self._ACCOUNT_PATH)
         summary = self._decode_json(content)
@@ -457,6 +469,23 @@ class Trading212API:
         account_id = self.verify_credentials(
             api_key, api_secret, cancel_event=cancel_event, wait_timeout=wait_timeout,
         )
+        return self.store_verified_credentials(
+            api_key, api_secret, account_id, cancel_event=cancel_event,
+        )
+
+    def store_verified_credentials(
+        self, api_key: str, api_secret: str, verified_account_id: int, *,
+        cancel_event: Event | None = None,
+    ) -> int:
+        """Store credentials only after the caller has verified their account."""
+        self._validate_credentials(api_key, api_secret)
+        if (
+            type(verified_account_id) is not int
+            or verified_account_id <= 0
+            or (self._account_id is not None and verified_account_id != self._account_id)
+        ):
+            raise ValueError("Verified Trading212 account does not match the selected account.")
+        self._credential_backend()
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError("Trading212 operation cancelled before saving credentials.")
         payload = json.dumps({"api_key": api_key, "api_secret": api_secret})
@@ -465,8 +494,8 @@ class Trading212API:
             win32cred.CredWrite(
                 {
                     "Type": win32cred.CRED_TYPE_GENERIC,
-                    "TargetName": self._credential_target(account_id),
-                    "UserName": str(account_id),
+                    "TargetName": self._credential_target(verified_account_id),
+                    "UserName": str(verified_account_id),
                     "CredentialBlob": payload,
                     "Comment": "TradingTools Trading212 API credentials",
                     "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
@@ -475,11 +504,10 @@ class Trading212API:
             )
         except (KeyringError, pywintypes.error, OSError, ValueError):
             self._fail("Could not save credentials in Windows Credential Manager.")
-        self._account_id = account_id
-        return account_id
+        self._account_id = verified_account_id
+        return verified_account_id
 
-    def load_credentials(self) -> tuple[str, str]:
-        """Read the connected account's key pair from Windows Credential Manager."""
+    def _read_credentials(self) -> tuple[str, str] | None:
         target = self._credential_target()
         backend = self._credential_backend()
         try:
@@ -487,7 +515,7 @@ class Trading212API:
         except (KeyringError, pywintypes.error, OSError, UnicodeError):
             self._fail("Could not read credentials from Windows Credential Manager.")
         if payload is None:
-            self._fail("No stored credentials for this Trading212 account.")
+            return None
         if not isinstance(payload, str):
             self._fail("Stored Trading212 credentials are invalid. Replace the key pair.")
         try:
@@ -502,6 +530,24 @@ class Trading212API:
         except (ValueError, TypeError, UnicodeError):
             self._fail("Stored Trading212 credentials are invalid. Replace the key pair.")
         return api_key, api_secret
+
+    def load_credentials(self) -> tuple[str, str]:
+        """Read the connected account's key pair from Windows Credential Manager."""
+        credentials = self._read_credentials()
+        if credentials is None:
+            self._fail("No stored credentials for this Trading212 account.")
+        return credentials
+
+    def credential_fingerprint(self) -> str | None:
+        """Return a short local identifier for the saved key, never the key or secret."""
+        credentials = self._read_credentials()
+        if credentials is None:
+            return None
+        fingerprint = hashlib.sha256(
+            b"TradingTools Trading212 API key fingerprint\0"
+            + credentials[0].encode("utf-8")
+        ).hexdigest()
+        return fingerprint[:12].upper()
 
     def verify_account(
         self, cancel_event: Event | None = None, wait_timeout: float = 600.0,

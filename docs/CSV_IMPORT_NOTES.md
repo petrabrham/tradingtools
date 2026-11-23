@@ -17,6 +17,18 @@
   errors, never an overridable confirmation.
 - Saved connections with a configured local archive root start normal
   synchronization directly, without a repeated setup/refresh question.
+  When setup is shown, the archive folder is loaded from this computer's
+  `config.json`; the dialog does not recover or adopt a path from the database.
+  For an existing account binding, it identifies the credential pair with the
+  first 12 hexadecimal characters of a domain-separated SHA-256 of the API key.
+  Neither key nor secret is displayed. Blank fields reuse the saved pair; enter
+  both values to replace it. The fingerprint distinguishes local credentials,
+  but only account verification confirms the broker still accepts the key.
+  New credentials are verified once and then stored for that verified account;
+  storing them does not repeat the account-summary request. A rate-limited
+  account-summary GET is retried at most twice, honoring `Retry-After` or the
+  endpoint's bounded fallback delay. Invalid credentials and other HTTP errors
+  are not retried.
   **File > Refresh older Trading212 years...** separately
   offers a clickable year list when an explicit historical refresh is needed.
 - Report metadata timestamps are matched at the broker's observed millisecond

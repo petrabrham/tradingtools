@@ -127,9 +127,16 @@ class TestTrading212API(unittest.TestCase):
         })
         reloaded = Trading212API(account_id=123, logger=self.logger)
         self.assertEqual(reloaded.load_credentials(), (self.key, self.secret))
+        self.assertEqual(
+            reloaded.credential_fingerprint(),
+            hashlib.sha256(
+                b"TradingTools Trading212 API key fingerprint\0" + self.key.encode("utf-8")
+            ).hexdigest()[:12].upper(),
+        )
         self.assertEqual(reloaded.verify_account(), 123)
         reloaded.delete_credentials()
         self.assertFalse(self.storage)
+        self.assertIsNone(reloaded.credential_fingerprint())
         self.assert_safe_failure(reloaded.load_credentials, "No stored credentials")
 
     def test_account_and_environment_are_isolated_and_update_keeps_one_record(self):
@@ -161,6 +168,38 @@ class TestTrading212API(unittest.TestCase):
                 self.api.save_credentials("replacement-key", "replacement-secret", cancel_event=cancel)
         self.write.assert_not_called()
         self.assertEqual(self.storage, original)
+
+    def test_verified_credentials_can_be_stored_without_a_second_network_check(self):
+        self.api._account_id = 123
+        with patch.object(
+            self.api, "verify_credentials",
+            side_effect=AssertionError("Credentials were verified twice"),
+        ):
+            self.assertEqual(
+                self.api.store_verified_credentials(self.key, self.secret, 123),
+                123,
+            )
+        self.assertEqual(self.api.load_credentials(), (self.key, self.secret))
+        self.write.assert_called_once()
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.api.store_verified_credentials(self.key, self.secret, 456)
+        self.assertEqual(self.write.call_count, 1)
+
+    def test_account_verification_retries_rate_limited_safe_get(self):
+        rate_limited = Mock(status=429, length=None)
+        rate_limited.getheader.side_effect = lambda name: {"Retry-After": "10"}.get(name)
+        success = Mock(status=200, length=None)
+        success.getheader.return_value = None
+        success.read1.side_effect = [b'{"id": 123}', b'']
+        self.connection.getresponse.side_effect = [rate_limited, success]
+
+        self.assertEqual(self.api._verify_credentials(self.key, self.secret), 123)
+        self.assertEqual(self.connection.request.call_count, 2)
+        self.assertEqual(self.clock, 10)
+        self.assertTrue(all(
+            call.kwargs["headers"]["Authorization"].startswith("Basic ")
+            for call in self.connection.request.call_args_list
+        ))
 
     def test_failed_verification_or_write_preserves_original_pair(self):
         self.api.save_credentials(self.key, self.secret)

@@ -58,6 +58,15 @@ include credentials; configure the connection again on another computer.
    without an account binding, confirm that they belong to the displayed account.
    Declining leaves the binding and credentials unsaved. Empty databases need
    no additional account confirmation.
+   The archive folder is prefilled from this computer's `config.json`. When an
+   account is already bound, the dialog also displays a short SHA-256 fingerprint
+   of the locally saved API key. The key and secret stay masked/blank; blank
+   fields reuse that identified local key pair. If it was revoked at Trading 212,
+   enter the replacement pair. The fingerprint identifies the local key only;
+   successful account verification confirms whether Trading 212 still accepts it.
+   The entered pair is verified once before storing. A temporary account-endpoint
+   HTTP 429 is retried briefly according to `Retry-After`; invalid credentials
+   and other errors are not retried.
 3. Select **File > Read transactions from Trading212...** to start normal
    synchronization directly. Connection setup appears automatically for a
    database without a saved connection or when this computer has no archive

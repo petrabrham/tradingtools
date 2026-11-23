@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 from pathlib import Path
 from threading import Event, get_ident
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from tradingtools.db.dbmanager import DatabaseManager
 from tradingtools.config.config_loader import ConfigLoader, get_config
@@ -158,7 +158,7 @@ class TestTrading212Dialog(unittest.TestCase):
                               side_effect=lambda *a, **kw: dialog._cancel()) as error,
                     ):
                         api.return_value.verify_credentials.return_value = 123
-                        api.return_value.save_credentials.side_effect = RuntimeError("Synthetic vault failure")
+                        api.return_value.store_verified_credentials.side_effect = RuntimeError("Synthetic vault failure")
                         self.assertIsNone(dialog.show())
                     error.assert_called_once()
                     self.assertIn("Synthetic vault failure", error.call_args.args[1])
@@ -167,6 +167,48 @@ class TestTrading212Dialog(unittest.TestCase):
                     self.assertEqual(dialog.secret.get(), "")
                 finally:
                     database.close()
+
+    def test_connection_dialog_prefills_local_archive_and_identifies_saved_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.db"
+            archive = str((Path(directory) / "archive").resolve())
+            get_config().save_trading212_archive_directory(archive)
+            binding = Trading212Connection("demo", 123, 2020)
+            dialog = Trading212ConnectionDialog(self.root, str(path), binding)
+
+            def finish_when_visible():
+                if dialog.dialog.winfo_viewable():
+                    self.assertEqual(dialog.archive.get(), archive)
+                    self.assertEqual(dialog.key.get(), "")
+                    self.assertEqual(dialog.secret.get(), "")
+                    self.assertIn("9ABCDEF01234", dialog.saved_key_status.get())
+                    dialog._cancel()
+                else:
+                    self.root.after(10, finish_when_visible)
+
+            with (
+                patch.object(
+                    dialog, "_work",
+                    side_effect=lambda title, job: job(Event(), Mock()),
+                ) as work,
+                patch("tradingtools.dialogs.trading212_dialog.Trading212API") as api,
+            ):
+                api.return_value.credential_fingerprint.return_value = "9ABCDEF01234"
+                self.root.after(10, finish_when_visible)
+                self.assertIsNone(dialog.show())
+            work.assert_called_once()
+            api.assert_called_once_with("demo", 123)
+            api.return_value.credential_fingerprint.assert_called_once_with()
+            self.assertEqual(get_config().get_trading212_archive_directory(), archive)
+
+            missing = Trading212ConnectionDialog(self.root, str(path), binding)
+            missing._work = Mock(return_value=None)
+            missing.dialog = tk.Toplevel(self.root)
+            missing.saved_key_status = tk.StringVar()
+            with patch("tradingtools.dialogs.trading212_dialog.Trading212API") as api:
+                missing._inspect_saved_key()
+            self.assertIn("No saved key pair", missing.saved_key_status.get())
+            missing.dialog.destroy()
 
     def test_connection_confirmation_depends_on_existing_data_and_binding(self):
         cases = (
@@ -223,7 +265,12 @@ class TestTrading212Dialog(unittest.TestCase):
                         if success:
                             self.assertEqual(load_connection(database), original)
                             self.assertEqual(dialog.result, original)
-                            api.return_value.save_credentials.assert_called_once()
+                            api.return_value.verify_credentials.assert_called_once()
+                            api.return_value.store_verified_credentials.assert_called_once_with(
+                                "synthetic-key", "synthetic-secret", 123,
+                                cancel_event=ANY,
+                            )
+                            api.return_value.save_credentials.assert_not_called()
                             self.assertEqual(get_config().get_trading212_archive_directory(), archive_directory)
                             error.assert_not_called()
                         else:
