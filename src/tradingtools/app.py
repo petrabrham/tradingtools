@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk  # Required for Treeview and Notebook
 from tkcalendar import DateEntry
-import pandas as pd
 import os
 from tradingtools.db.dbmanager import DatabaseManager
 from datetime import datetime, timedelta
@@ -18,6 +17,13 @@ from tradingtools.views.pairs_view import PairsView
 from tradingtools.views.open_positions_view import OpenPositionsView
 from tradingtools.dialogs.exchange_rate_dialog import ExchangeRateDialog
 from tradingtools.dialogs.import_rates_dialog import ImportRatesDialog
+from tradingtools.dialogs.csv_import_dialog import CSVImportDialog
+from tradingtools.dialogs.trading212_dialog import (
+    Trading212ConnectionDialog, Trading212RefreshDialog, Trading212WorkerDialog,
+)
+from tradingtools.dialogs.import_conflicts_dialog import ImportConflictsDialog
+from tradingtools.import_diagnostics import ImportComparison
+from tradingtools.trading212_sync import SyncResult, Trading212Connection, Trading212Sync, load_connection
 from tradingtools.ui import MenuManager, FilterManager, copy_treeview_to_clipboard
 
 class TradingToolsApp:
@@ -29,6 +35,9 @@ class TradingToolsApp:
         
         # Database manager (moved DB logic to separate module)
         self.db = DatabaseManager()
+        self.data_operation_active = False
+        self.last_import_comparisons: list[ImportComparison] = []
+        self._exit_after_operation = False
 
         # Tax rates loader for JSON-based calculations
         self.tax_rates_loader = TaxRatesLoader()
@@ -96,13 +105,18 @@ class TradingToolsApp:
     # Title
     ###########################################################
     def update_title(self):
-        """Update the window title with the current database name"""
+        """Show the current database and its saved Trading212 account."""
         base_title = "Trading Tools"
         if self.db.current_db_path:
             db_name = os.path.basename(self.db.current_db_path)
-            self.root.title(f"{base_title} - {db_name}")
-        else:
-            self.root.title(base_title)
+            base_title += f" - {db_name}"
+            connection = load_connection(self.db)
+            if connection is not None:
+                base_title += (
+                    f" - Trading212 account {connection.account_id}"
+                    f" ({connection.environment.capitalize()})"
+                )
+        self.root.title(base_title)
 
     ###########################################################
     # Menu
@@ -115,6 +129,8 @@ class TradingToolsApp:
     # Menu Command Handlers
     ###########################################################
     def open_csv_file(self):
+        if self._operation_blocked():
+            return
         if not self.db.conn:
             messagebox.showwarning("Warning", "Please create or open a database first!")
             return
@@ -123,35 +139,198 @@ class TradingToolsApp:
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if file_path:
+            self._begin_operation()
+            self.last_import_comparisons = []
             try:
-                # Read CSV file
-                df = pd.read_csv(file_path)
-
-                self.db.logger.info(f"Importing CSV file: {file_path}")
-
-                # Use DatabaseManager to import DataFrame
-                meta = self.db.import_dataframe(df)
+                if self.db.current_db_path is None:
+                    raise RuntimeError("The open database has no file path")
+                dialog = CSVImportDialog(self.root, self.db.current_db_path, file_path)
+                try:
+                    meta = dialog.show()
+                finally:
+                    self._exit_after_operation = self._exit_after_operation or dialog.exit_requested
+                if meta is None:
+                    return
+                self.last_import_comparisons = meta.get("comparisons", [])
                 self.filter_manager.update_year_list()
             except Exception as e:
-                messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")
+                self.db.logger.exception("CSV import failed")
+                if not self._exit_after_operation:
+                    messagebox.showerror("Error", f"Error importing CSV file: {str(e)}")
+                self.update_views()
+                return
+            finally:
+                self._end_operation()
 
+            if dialog.exit_requested:
+                return
             self.update_views()
 
             message = (
-                f"Records imported: {meta['records']}\n"
+                f"Records processed: {meta['processed']} / {meta['records']}\n"
                 f"Read / Added counts:\n"
                 f"  Buy:         {meta['read']['buy']} / {meta['added'].get('buy', 0)}\n"
                 f"  Sell:        {meta['read']['sell']} / {meta['added'].get('sell', 0)}\n"
                 f"  Interest:    {meta['read']['interest']} / {meta['added']['interest']}\n"
                 f"  Dividend:    {meta['read']['dividend']} / {meta['added'].get('dividend', 0)}\n"
+                f"  Fee:         {meta['read'].get('fee', 0)} / {meta['added'].get('fee', 0)}\n"
                 f"  Other:       {meta['read']['insignificant']} / -\n"
-                f"  Unknown:     {meta['read']['unknown']} / -"
+                f"  Unknown:     {meta['read']['unknown']} / -\n"
+                f"Duplicates: {sum(meta['duplicates'].values())}\n"
+                f"Automatically normalized times: {meta.get('time_normalized', 0)} (included in duplicates)\n"
+                f"Failed: {len(meta['errors'])}\n"
+                f"Conflicts: {len(meta.get('conflicts', []))}"
             )
-            messagebox.showinfo("Success", message)
+            if meta.get("time_backup"):
+                message += f"\nBefore-normalization backup: {meta['time_backup']}"
+            if meta["unknown_actions"]:
+                message += "\nUnsupported actions:\n" + "\n".join(
+                    f"  {action}: {count}" for action, count in meta["unknown_actions"].items()
+                )
+            if meta["errors"]:
+                message += "\nFirst errors:\n" + "\n".join(
+                    f"  Row {issue['row']} ({issue['action']}): {issue['message']}"
+                    for issue in meta["errors"][:5]
+                )
+                message += "\nSee the log for all errors."
+            if meta["status"] == "complete":
+                messagebox.showinfo("Success", message)
+            elif meta["status"] == "cancelled":
+                messagebox.showwarning(
+                    "Import cancelled", message + "\nAlready imported rows have been kept."
+                )
+            else:
+                messagebox.showwarning("Import incomplete", message)
+            if self.last_import_comparisons:
+                self.show_import_conflicts()
 
+    def _operation_blocked(self) -> bool:
+        if getattr(self, "data_operation_active", False):
+            messagebox.showwarning("Operation in progress", "Wait for the current import/synchronization to finish.")
+            return True
+        return False
 
+    def _begin_operation(self) -> None:
+        self.data_operation_active = True
+        self.menu_manager.update_states(self.db)
+
+    def _end_operation(self) -> None:
+        self.data_operation_active = False
+        self.menu_manager.update_states(self.db)
+        if getattr(self, "_exit_after_operation", False):
+            self._exit_after_operation = False
+            self.on_exit()
+
+    def show_import_conflicts(self) -> None:
+        comparisons = getattr(self, "last_import_comparisons", [])
+        if comparisons:
+            ImportConflictsDialog(self.root, comparisons).show()
+
+    def _setup_trading212(self) -> Trading212Connection | None:
+        if self.db.current_db_path is None:
+            raise RuntimeError("Open a database first")
+        dialog = Trading212ConnectionDialog(self.root, self.db.current_db_path, load_connection(self.db))
+        try:
+            connection = dialog.show()
+            if connection is not None:
+                self.update_title()
+            return connection
+        finally:
+            self._exit_after_operation = self._exit_after_operation or dialog.exit_requested
+
+    def configure_trading212(self) -> None:
+        if self._operation_blocked() or self.db.current_db_path is None:
+            return
+        self._begin_operation()
+        try:
+            self._setup_trading212()
+        except Exception as error:
+            self.db.logger.exception("Trading212 connection setup failed")
+            messagebox.showerror("Trading212 connection", str(error))
+        finally:
+            self._end_operation()
+
+    def refresh_trading212_years(self) -> None:
+        self.read_trading212_transactions(select_refresh=True)
+
+    def read_trading212_transactions(self, *, select_refresh: bool = False) -> None:
+        if self._operation_blocked() or self.db.current_db_path is None:
+            return
+        self._begin_operation()
+        self.last_import_comparisons = []
+        outcome: SyncResult | None = None
+        try:
+            connection = load_connection(self.db)
+            if connection is None or not get_config().get_trading212_archive_directory():
+                connection = self._setup_trading212()
+            if connection is None or self._exit_after_operation:
+                return
+            archive_directory = get_config().get_trading212_archive_directory()
+            if not archive_directory:
+                raise ValueError("Choose an archive directory on this computer in Trading212 connection settings")
+            refresh: tuple[int, ...] = ()
+            if select_refresh:
+                options = Trading212RefreshDialog(self.root, connection.first_year)
+                try:
+                    selected = options.show()
+                finally:
+                    self._exit_after_operation = self._exit_after_operation or options.exit_requested
+                if selected is None or self._exit_after_operation:
+                    return
+                refresh = selected
+            database_path = self.db.current_db_path
+            if database_path is None:
+                raise RuntimeError("The database was closed")
+            dialog = Trading212WorkerDialog(
+                self.root, "Read transactions from Trading212",
+                lambda cancel, notify: Trading212Sync(
+                    database_path, connection, refresh_years=refresh,
+                    archive_directory=archive_directory,
+                    cancel_event=cancel, on_progress=notify,
+                ).run(),
+            )
+            try:
+                outcome = dialog.show()
+            finally:
+                self._exit_after_operation = self._exit_after_operation or dialog.exit_requested
+            if outcome is not None:
+                self.last_import_comparisons = outcome.comparisons
+                self.filter_manager.update_year_list()
+                self.update_views()
+        except Exception as error:
+            self.db.logger.exception("Trading212 GUI operation failed")
+            if not self._exit_after_operation:
+                messagebox.showerror("Trading212 synchronization", str(error))
+        finally:
+            exit_requested = self._exit_after_operation
+            self._end_operation()
+        if outcome is not None and not exit_requested:
+            self._show_sync_result(outcome)
+
+    def _show_sync_result(self, outcome: SyncResult) -> None:
+        window = tk.Toplevel(self.root)
+        window.title(f"Trading212 synchronization: {outcome.status}")
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+        text = tk.Text(frame, width=100, height=22, wrap="word")
+        scrollbar = ttk.Scrollbar(frame, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        text.insert("1.0", outcome.summary())
+        text.configure(state="disabled")
+        if outcome.comparisons:
+            ttk.Button(window, text="View conflicts (read only)", command=self.show_import_conflicts).pack(pady=5)
+        ttk.Button(window, text="Close", command=window.destroy).pack(pady=5)
+        window.transient(self.root)
+        window.wait_visibility()
+        window.grab_set()
+        self.root.wait_window(window)
     def create_database(self):
         """Create a new SQLite database"""
+        if self._operation_blocked():
+            return
+        self.last_import_comparisons = []
         # Ask user to choose exchange rate mode using dialog
         rate_dialog = ExchangeRateDialog(self.root)
         selected_mode = rate_dialog.show()
@@ -184,6 +363,9 @@ class TradingToolsApp:
 
     def open_database(self):
         """Open an existing SQLite database"""
+        if self._operation_blocked():
+            return
+        self.last_import_comparisons = []
         file_path = filedialog.askopenfilename(
             filetypes=[("SQLite Database", "*.db"), ("All files", "*.*")]
         )
@@ -192,6 +374,9 @@ class TradingToolsApp:
 
     def _connect_database(self, file_path: str) -> None:
         """Connect a selected or restored database and refresh the UI."""
+        if self._operation_blocked():
+            return
+        self.last_import_comparisons = []
         try:
             self.db.open_database(file_path)
             self.update_title()
@@ -223,6 +408,9 @@ class TradingToolsApp:
 
     def release_database(self):
         """Release the current database"""
+        if self._operation_blocked():
+            return
+        self.last_import_comparisons = []
         if not self.db.conn:
             messagebox.showwarning("Warning", "No database is currently open!")
             return
@@ -238,6 +426,9 @@ class TradingToolsApp:
 
     def save_database_as(self):
         """Save the current database to a new file"""
+        if self._operation_blocked():
+            return
+        self.last_import_comparisons = []
         if not self.db.conn:
             messagebox.showwarning("Warning", "No database is currently open!")
             return
@@ -258,6 +449,8 @@ class TradingToolsApp:
 
     def import_annual_rates(self):
         """Import annual exchange rates from GFŘ text file"""
+        if self._operation_blocked():
+            return
         if not self.db.conn:
             messagebox.showwarning("Warning", "Please create or open a database first!")
             return
@@ -279,6 +472,7 @@ class TradingToolsApp:
         year, file_path = import_dialog.show()
         
         if year and file_path:
+            self._begin_operation()
             try:
                 import_result = self.db.import_annual_rates_from_file(file_path, year)
                 
@@ -301,6 +495,8 @@ class TradingToolsApp:
                     
             except Exception as e:
                 messagebox.showerror("Import Error", f"Error importing annual rates:\n\n{str(e)}")
+            finally:
+                self._end_operation()
 
     ###########################################################
     # Widgets
@@ -633,6 +829,8 @@ class TradingToolsApp:
     ###########################################################
     def on_exit(self) -> None:
         """Save the session database path before closing the connection."""
+        if self._operation_blocked():
+            return
         try:
             database_path = self.db.current_db_path if self.db.conn else None
             get_config().save_last_database_path(database_path)
@@ -641,6 +839,7 @@ class TradingToolsApp:
             self.db.logger.exception("Error saving application session")
             messagebox.showerror("Error", f"Error closing application: {str(e)}")
             return
+        self.last_import_comparisons = []
         self.root.destroy()
 
     def run(self):

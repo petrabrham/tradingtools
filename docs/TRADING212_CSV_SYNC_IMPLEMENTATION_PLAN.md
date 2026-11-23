@@ -1,0 +1,1014 @@
+# Plán synchronizace Trading 212 přes export/import CSV
+
+Datum: 2026-11-15  
+Stav: etapy 1–6 dokončeny; automatická část etapy 7 ověřena, ruční ověření
+skutečného úložiště pověření v executable zbývá.
+
+Tento plán nahrazuje [původní návrh přímého načítání JSON historií](TRADING212_API_IMPLEMENTATION_PLAN.md).
+
+## 1. Cíl a zvolený přístup
+
+Do menu `File` přidat `Read transactions from Trading212...`.
+Aplikace požádá Trading 212 o CSV report, stáhne jej, bezpečně archivuje
+a importuje pomocí současného CSV importu.
+
+Uživatel nemusí ručně exportovat ani vybírat soubor. Současně získá
+roční CSV přehledy pro případ obnovy transakčních dat do nové databáze.
+
+- Spouštění je ruční; bez automatické synchronizace při startu.
+- Vzdálený účet se používá výhradně pro čtení/export historie.
+- Žádné obchodování ani změny portfolia.
+- Ruční CSV import zůstává dostupný.
+- Zachovat existující finanční výpočty, párování a režim směnných kurzů.
+- První verze váže jednu databázi na jeden účet a prostředí Trading 212.
+- Od první verze ukládat API Key a Secret do Windows Credential Manageru,
+  nevyžadovat jejich opakované zadávání při každém spuštění.
+- Veškerou logiku specifickou pro Trading 212 API soustředit do jedné
+  třídy `Trading212API` v samostatném souboru
+  `src/tradingtools/trading212_api.py`.
+
+Read-only zde neznamená „jen HTTP GET“. Vytvoření reportu používá POST,
+ale pouze vytváří export historie, nikoli objednávku.
+
+## 2. Ověřený API postup
+
+1. `GET /api/v0/equity/account/summary`: ověřit účet a jeho ID.
+2. `POST /api/v0/equity/history/exports`: zadat časový rozsah a obsah reportu.
+3. `GET /api/v0/equity/history/exports`: sledovat požadované `reportId`.
+4. Při stavu `Finished` stáhnout CSV z `downloadLink`.
+
+Požadavek na export obsahuje:
+
+- `timeFrom`, `timeTo`;
+- `dataIncluded.includeOrders`;
+- `dataIncluded.includeDividends`;
+- `dataIncluded.includeInterest`;
+- `dataIncluded.includeTransactions`.
+
+Pro roční archiv zapnout všechny čtyři přepínače. Archiv má zachovat
+i události, které TradingTools nyní neumí analyticky zpracovat.
+Ověřit, jaké konkrétní události broker do reportu skutečně zahrnuje.
+
+Dokumentované limity:
+
+- vytvoření reportu: 1 požadavek za 30 sekund;
+- kontrola reportů: 1 požadavek za minutu;
+- přehled účtu: 1 požadavek za 5 sekund.
+
+Limity jsou na účet. Respektovat také rate-limit hlavičky. Při exportu
+více roků jedním seznamem reportů kontrolovat všechny čekající `reportId`,
+nikoli provádět samostatný polling pro každý rok.
+
+Stavy `Queued`, `Processing`, `Running` znamenají čekání.
+`Canceled`, `Failed` jsou neúspěšné terminální stavy.
+Zavést konečný časový limit čekání a možnost zrušení.
+Zrušení místního běhu nemusí zrušit report již generovaný brokerem.
+
+## 3. Podmínky, které ověřit před implementací
+
+- Je CSV z API kompatibilní s ručním exportem: hlavičky, kódování,
+  oddělovač, ID, časová zóna, měny, dividendová daň a poplatky?
+- Obsahuje `includeInterest` oba typy úroků, včetně lending interest?
+- Jak broker interpretuje hranice `timeFrom` a `timeTo`:
+  včetně/výlučně, přesnost a časová zóna?
+- Je povolen celý kalendářní rok v jednom reportu? Existuje limit rozsahu,
+  velikosti nebo dostupnosti starší historie?
+- Jaká konkrétní oprávnění klíče vyžaduje vytvoření a čtení reportů?
+  Dokumentace exportů uvádí pouze obecné `Missing Permissions`.
+- Jak dlouho platí odkaz ke stažení a lze po restartu dohledat report?
+
+Neodvozovat skutečnou srážkovou daň z odhadované sazby ani nedoplňovat
+chybějící údaje nulami. Pokud CSV není kompatibilní, nejprve přesně
+vymezit nutné úpravy importeru; nespoléhat na předpokládanou shodu.
+
+Pokud se celý rok nevejde do jednoho reportu, nejprve navrhnout a odsouhlasit
+skládání dílčích exportů. Nevydávat dílčí soubor za úplný roční přehled.
+
+## 4. Roční archiv
+
+### Časové pokrytí
+
+- Uzavřený rok: od 1. ledna do konce 31. prosince daného roku.
+- Aktuální rok: od 1. ledna do okamžiku exportu; jasně označit jako průběžný.
+- Po přechodu do nového roku znovu exportovat celý předchozí rok,
+  i když už existuje průběžný soubor vytvořený 31. prosince.
+- První rok archivu zvolí uživatel, typicky rok prvních transakcí na účtu.
+  Datum nejnovější transakce v DB samo neurčuje začátek úplného archivu.
+
+Uživatel pro etapu 3 výslovně zvolil **Europe/Prague**, tedy český místní
+kalendářní rok nezávisle na nastavení počítače. Pro API se hranice převádějí
+do UTC: úplný rok 2024 od `2023-12-31T23:00:00Z` do
+`2024-12-31T22:59:59.999999Z`. Požadovaný konec je poslední mikrosekunda
+místního roku; export průběžného roku končí zachyceným okamžikem synchronizace.
+Časová zóna je součástí metadat. Všechny CSV timestampy musejí mít zónu
+a ležet v požadovaném intervalu; původní bytes se kvůli ročnímu členění nefiltrují.
+
+Přelom roku, přestupný rok a poslední zlomek sekundy ověřit offline.
+Konkrétní přesné pražské hranice a jejich interpretace brokerem ještě nebyly
+ověřeny živým API; původní živé ověření etapy 0 používalo UTC interval
+zakončený celou sekundou. Neshodu vráceného intervalu neobcházet
+tolerancí ani automatickým prohlášením souboru za úplný.
+
+### Umístění a soubory
+
+Uživatel při prvním propojení vybere složku archivu. Neumisťovat ji
+do instalace aplikace ani automaticky vedle spustitelného souboru.
+Archiv nesmí záviset na existenci konkrétní databáze.
+
+Navržené členění:
+
+```text
+<vybraná složka>\Trading212\<prostředí>\<účet>\
+    archive.json
+    2025\
+        Trading212_2025_<UTC-čas-verze>_<reportId>.csv
+    2026\
+        Trading212_2026_<UTC-čas-verze>_<reportId>.csv
+```
+
+Jména mají obsahovat bezpečné identifikátory a UTC čas bez dvojteček.
+Žádná credentials v názvech ani metadatech. Archiv obsahuje citlivá
+finanční data; doporučit uživateli chráněné úložiště a samostatnou zálohu.
+Jméno označuje neměnnou verzi souboru, nikoli poslední potvrzené pokrytí.
+Úplnost a doporučená revize jsou v metadatech: nezměněný soubor lze tak
+znovu použít i při finalizaci roku bez přejmenování či vytvoření další kopie.
+
+- Uchovat originální CSV bytes bez přepočtů, filtrace a přepisování sloupců.
+- `archive.json` uložit mimo DB: rok, účet/prostředí, reportId, požadovaný
+  interval, volby obsahu, čas stažení, cesta, velikost a SHA-256 souboru.
+- Rozlišit úplný uzavřený rok a průběžné pokrytí; uvést doporučenou
+  aktuální verzi pro obnovu. „Úplný“ znamená celý požadovaný rok
+  dostupný při exportu, nikoli záruku, že broker nikdy neprovede opravu.
+- Pokud se obsah nového exportu nezměnil, nevytvářet další identickou kopii.
+- Pokud se změnil, zachovat novou verzi i předchozí soubor. Uzavřený
+  rok může broker dodatečně opravit; nepřepisovat archiv destruktivně.
+- V první verzi nepřidávat automatické mazání starších verzí.
+
+### Bezpečnost zápisu
+
+Stahovat do konkrétního dočasného souboru ve stejné složce, ověřit dokončení,
+obsah a CSV strukturu, spočítat hash a teprve poté soubor atomicky zveřejnit.
+HTML chybová stránka není CSV. Prázdný rok je přípustný jen jako validní
+report se správnými hlavičkami, ne jako prázdná HTTP odpověď.
+
+Metadata aktualizovat atomicky až po zveřejnění CSV. Při pádu mezi zápisy
+musí jít nezapsaný CSV soubor dohledat a znovu ověřit. Selhání archivu
+je viditelná chyba; nehlásit úspěšnou synchronizaci bez uchovaného reportu.
+
+CSV archivovat před DB importem. Pokud import selže například kvůli
+chybějícím kurzům, CSV zůstane dostupné pro opakovaný lokální import.
+
+## 5. Výběr roků při synchronizaci
+
+Pro první verzi preferovat jednoduchost: pro dotčený rok exportovat
+celý roční interval a importovat celý soubor s deduplikací.
+Nevytvářet paralelně inkrementální soubory a další odlišný roční archiv.
+
+První běh:
+
+1. Ověřit účet, zvolit archiv a první rok.
+2. Pro každý rok do aktuálního roku získat úplný/průběžný report.
+3. Archivovat a importovat po jednotlivých rocích.
+4. Existující archiv lze použít pro lokální obnovu bez nového API exportu.
+   Kontrolovat účet, pokrytí, obsahové volby a hash.
+
+Běžný běh:
+
+1. Aktualizovat aktuální rok.
+2. Doplnit chybějící roky a finalizovat předchozí rok po přelomu roku.
+3. Zopakovat lokální import již stažených roků s nedokončeným importem.
+4. Aktualizovat také starší rok zasahující do navrženého sedmidenního
+   překryvu, zejména na začátku ledna.
+
+Nejnovější data v DB a stav importu jednotlivých kategorií jsou orientační
+pomůcka. Jeden globální `MAX(timestamp)` nesmí způsobit vynechání úroků
+nebo dividend ani chybějícího ročního archivu.
+
+Starší dokončené roky při každém běhu znovu nestahovat. Nabídnout explicitní
+obnovení exportu vybraných roků pro dodatečné opravy. Sedmidenní překryv
+nezaručuje zachycení libovolně starých změn.
+
+## 6. Import a deduplikace
+
+Použít [DatabaseManager.import_dataframe](../src/tradingtools/db/dbmanager.py)
+po načtení archivovaného CSV přes pandas. Zachovat finanční převody a
+[existující pravidla CSV importu](CSV_IMPORT_NOTES.md).
+
+Před automatizací cíleně upravit:
+
+- Výsledky importu: skutečné počty vložených, duplicitních, vynechaných,
+  neznámých a chybných záznamů; nespoléhat jen na `lastrowid`.
+- Předání výsledku dividendového zápisu až k počítadlu importeru.
+- Explicitní chyby jednotlivých řádků v konečném výsledku, nejen v logu.
+- Opakování po částečném importu nesmí násobit data.
+- Ověření ID mezi ručním a API CSV. Při shodě formátu není potřeba
+  zavádět mapování jednotlivých JSON `fill.id`.
+- Dividendy nyní mají `UNIQUE(timestamp, isin_id)`. Ověřit, zda export
+  může obsahovat dvě legitimní výplaty se stejným klíčem a zda má stabilní
+  ID. Pokud ano, cíleně doplnit dividendovou identitu a migraci, včetně
+  kompatibility se starými záznamy bez ID.
+- Stejné ID s rozdílným obsahem hlásit jako konflikt, ne jako obyčejnou
+  duplicitu. Již spárované obchody automaticky nepřepisovat.
+- Ošetřit přechod ze starého `Time` bez offsetu na `Time (UTC)`.
+  Současný parser starou hodnotu interpretuje v místní časové zóně;
+  při stejném brokerově čase proto nemusí vzniknout stejný DB timestamp.
+  U dividend bez uloženého brokerova ID hrozí duplicity při novém importu.
+  Před normalizací starých záznamů ověřit jejich původ a časovou sémantiku;
+  neposouvat plošně všechny časy v existující DB.
+
+Žádná plošná přestavba repositories ani nový obecný broker framework.
+Migraci schématu zavést jen pro ověřenou potřebu identity/stavu importu;
+zachovat existující záznamy, jejich místní ID a párování.
+
+V DB uložit ne-tajnou vazbu na účet/prostředí a stav lokálního importu
+verze reportu. Evidence archivu zůstává mimo DB, aby přežila její ztrátu.
+Označení „staženo“ a „úspěšně importováno“ musí být oddělená.
+
+Záměrně ignorované události i nepodporované akce zůstanou v originálním
+CSV. V UI uvést, že úspěšné stažení celého reportu neznamená podporu
+všech jeho akcí v analytických pohledech.
+
+## 7. Obnova databáze z archivu
+
+1. Vytvořit novou DB a vybrat stejný režim kurzů jako u původní DB.
+2. U ročních GFŘ kurzů nejdříve importovat potřebné kurzové soubory;
+   pro denní ČNB zajistit dostupnost potřebných kurzů.
+3. Vybrat ověřenou nejnovější doporučenou verzi každého roku,
+   ne všechny archivní revize současně.
+4. Importovat od nejstaršího roku k nejnovějšímu pomocí běžného CSV
+   importu; API klíč ani dostupnost Trading 212 nejsou nutné.
+5. Zkontrolovat chyby, nepodporované akce a souhrny jednotlivých kategorií.
+
+CSV obnoví jen brokerovy údaje, které importer podporuje. Neobnoví
+uživatelsky vytvořená párování, nastavení, ruční opravy ani jiné lokální
+údaje, které v exportu nejsou. Roční archiv proto není náhradou za
+`Save Database Copy As...` a zálohu konfigurace/kurzů.
+
+Pro první verzi stačí dokumentovaný postup se současným ručním importem.
+Hromadný průvodce obnovou je případné pozdější rozšíření.
+
+## 8. Credentials a read-only hranice
+
+- Od první verze použít Windows Credential Manager (Správce pověření)
+  aktuálního Windows uživatele, z Pythonu přes knihovnu `keyring`.
+- Použít výhradně ověřený nativní Windows backend. Samotná dostupnost
+  knihovny nestačí; nepřijmout plaintext backend ani jiné neověřené úložiště.
+- Při prvním propojení uživatel zadá API Key a maskovaný Secret.
+  Po ověření účtu uložit dvojici jako jeden credential záznam, aby při
+  aktualizaci nemohla vzniknout kombinace starého klíče a nového Secretu.
+- Záznam pojmenovat podle aplikace, prostředí a identity účtu.
+  Konfigurace/DB obsahuje pouze ne-tajný odkaz na pověření.
+  Při dalším spuštění jej aplikace načte ze systémového úložiště.
+- Přihlašovací údaje nevkládat do repository, instalačního balíčku,
+  souboru JSON, SQLite, CSV archivu ani logů. `.gitignore` není zabezpečení.
+- Při chybě či nedostupnosti Credential Manageru zobrazit konkrétní
+  chybu a zastavit API propojení/synchronizaci; žádný náhradní zápis do
+  souboru ani tichý přechod na režim pouze v paměti.
+  Ruční import místního CSV zůstává dostupný.
+- Nabídnout změnu a odstranění uloženého pověření. Změnu ověřit proti
+  vázanému účtu před nahrazením funkčního záznamu.
+  Odstranění lokálního pověření nemaže DB ani archiv a nezneplatní klíč
+  u Trading 212; vzdálené zneplatnění provádí uživatel u brokera.
+- Pověření nejsou přenositelnou součástí zálohy DB. Na jiném počítači
+  nebo pod jiným Windows uživatelem je nutné API propojení nastavit znovu.
+- Úložiště chrání credentials na disku, ale není ochranou před malwarem
+  běžícím pod stejným uživatelem. Používat samostatný klíč bez obchodních
+  oprávnění a možnost jeho zneplatnění u brokera.
+- Potřebná oprávnění ověřit pro exporty a přehled účtu; nežádat
+  oprávnění pro zadávání, změny a rušení objednávek.
+- Povolit pouze čtení přehledu účtu, seznamu exportů a jeden konkrétní
+  POST pro vytvoření CSV reportu. Nepřidávat obchodní API metody.
+- Používat HTTPS s ověřením TLS a konečnými timeouty.
+- Download oddělit od autentizovaného API klienta. Na `downloadLink`
+  ani na jeho přesměrování nepřidávat API Authorization.
+- Ověřit bezpečný protokol a cíl stažení podle skutečného brokerova
+  download workflow; nepřijímat libovolné lokální či nebezpečné URL.
+- Nelogovat credentials, celé finanční payloady ani podepsané odkazy.
+
+Archiv je lokální výstup pro uživatele. Žádné finanční údaje, klíče
+ani archivní soubory neposílat jiným službám.
+
+## 9. GUI a chyby
+
+Nový příkaz zapojit přes [MenuManager](../src/tradingtools/ui/menu_manager.py)
+a [TradingToolsApp](../src/tradingtools/app.py).
+
+- Bez otevřené DB je příkaz zakázaný.
+- První dialog: credentials, demo/live, archiv a první rok.
+- Další spuštění používá uložené pověření bez opakovaného zadávání;
+  přidat správu propojení pro změnu a odstranění pověření.
+- Před prvním zápisem potvrdit vazbu účtu na DB; později ji vždy ověřit.
+- Ukazovat fáze: požadavek reportu, čekání, stahování, archivace a import,
+  včetně aktuálního roku a čekání na rate limit.
+- Síť a souborové operace mimo GUI vlákno; komunikace přes frontu
+  a `root.after()`. Tkinter volat jen z GUI vlákna.
+- Existující SQLite spojení nepředávat do workeru. Import provádět
+  přes vlastníka spojení po krátkých dávkách, aby zůstalo možné zrušení.
+  Cíleně umožnit dávkování importeru bez změny jeho finanční logiky.
+- Během běhu nepovolit další synchronizaci, CSV import ani výměnu DB.
+- Po vložení dat obnovit seznam roků a pohledy.
+- Při zrušení zachovat platná CSV a dokončené DB zápisy; dočasné
+  soubory bezpečně uklidit. Import lze idempotentně zopakovat.
+
+`401`/`403` mají konkrétní vysvětlení. Přechodné chyby a `429` mají
+omezené retry a zrušitelné čekání. Timeout po POST nesmí vést k nekonečnému
+vytváření reportů: nejprve ověřit, zda report vznikl, a případnou
+nejednoznačnost přiznat. Pamatovat známé čekající `reportId` pro pokračování.
+
+Selhání downloadu nebo archivu neoznačit jako dokončený rok.
+Selhání importu neznehodnotí archivovaný CSV soubor.
+Celkový dialog rozlišuje úspěch, částečný výsledek, zrušení a chybu;
+uvádí roky, umístění CSV a skutečné počty importovaných záznamů.
+
+## 10. Kroky implementace
+
+### Závazné rozdělení odpovědností
+
+Nová třída `Trading212API` bude v jediném modulu
+`src/tradingtools/trading212_api.py`. Bude zajišťovat:
+
+- správu API Key a Secret přes Windows Credential Manager;
+- autentizaci, ověření účtu a povolené HTTP operace;
+- vytvoření reportů, kontrolu stavu, rate limiting, timeouty a retry;
+- bezpečné stahování CSV bez předávání API credentials na download URL;
+- volbu ročních exportů, pokračování čekajících reportů a jejich stav;
+- roční archiv, validaci souborů, verze, hash a archivní metadata;
+- informace o průběhu a zrušení bez přímého přístupu k Tkinter widgetům.
+
+Nevytvářet pro tuto integraci oddělené implementační třídy/moduly klienta,
+credential storage, archivu a synchronizační služby. Jednotlivé kroky níže
+jsou části implementace stejné třídy, nikoli návrh dalších tříd.
+
+`Trading212API` nebude zapisovat do analytických tabulek ani provádět
+daňové výpočty. Jejím výstupem budou ověřené cesty k archivovaným CSV
+a metadata průběhu. Existující aplikační obsluha předá soubory importeru.
+GUI zůstává v současných UI částech; CSV import a obecné DB operace
+zůstávají v `DatabaseManager` a repositories.
+Do `DatabaseManager` nepřidávat HTTP požadavky, credentials, polling
+ani jinou logiku specifickou pro API.
+
+### Etapový postup
+
+Rozdělení odsouhlaseno jako způsob práce 2026-11-16. Implementovat vždy
+jen jednu zadanou etapu. Po jejím dokončení uvést změny, výsledky testů
+a případné otevřené otázky, poté zastavit. Další etapu zahájit až po
+potvrzení uživatele; nespouštět automaticky celý plán.
+
+Každá etapa musí být samostatně ověřitelná. Do dokončení etapy 6
+nepřidávat funkční synchronizační příkaz do GUI. Skutečné klíče, osobní
+CSV ani účetní údaje nevkládat do repository nebo testovacích fixtures.
+
+#### Etapa 0 — ověření proveditelnosti
+
+**Stav:** dokončeno v rozsahu popsaném v části 12.
+
+- Ověřeno vytvoření a stažení CSV s přidělenými oprávněními.
+- Porovnány aktuální a starší ruční exporty.
+- Ověřen celoroční report, oba typy úroků a dividendové daňové údaje.
+- Zjištěno riziko místního času ve starých DB.
+
+Toto ověření nenahrazuje automatické testy ani řešení starých timestampů.
+Není potřeba znovu začínat reálným API exportem.
+
+#### Etapa 1 — třída a Windows Credential Manager
+
+**Stav:** dokončeno 2026-11-16.
+**Předpoklad:** schválení etapy splněno.
+
+- Vytvořit `Trading212API` v `src/tradingtools/trading212_api.py`.
+- Přidat `keyring` do závislostí a ověřit nativní Windows backend.
+- Implementovat správu dvojice API Key/Secret: uložení, načtení, změnu
+  a odstranění; oddělení účtu/prostředí a explicitní chyby bez fallbacku.
+- Doplnit jen čtecí ověření identity účtu a autentizaci potřebnou pro
+  bezpečné první uložení či změnu klíče.
+
+**Ověření:** testy s mockem úložiště a HTTP: opětovné načtení, oddělení
+účtů/prostředí, odmítnutí nebezpečného backendu, zachování původního
+pověření po neúspěšné změně, žádné tajné hodnoty v souborech/logu.
+
+**Hranice etapy:** bez exportů, archivu, GUI a zápisů do analytické DB.
+
+**Výsledek:**
+
+- Implementováno v [Trading212API](../src/tradingtools/trading212_api.py):
+  `save_credentials`, `load_credentials`, `verify_account`,
+  `delete_credentials`; změna klíče používá opět `save_credentials`.
+- Pověření jsou v jednom nativním záznamu pro účet/prostředí s lokální
+  perzistencí. Zápis používá veřejné Windows `CredWrite` přes
+  `pywin32-ctypes`: běžné `WinVaultKeyring.set_password` při přepsání
+  uchovává kopii starého Secretu pod složeným názvem. Přímý nativní
+  overwrite tomuto nežádoucímu uchovávání zabrání.
+- Doplněny závislosti `keyring` a pro Windows `pywin32-ctypes`.
+- [Offline testy](../tests/test_trading212_api.py): 8 testů prošlo,
+  včetně chyb úložiště/HTTP, izolace účtů, změny pověření, odmítnutí
+  jiného backendu a potlačení citlivých podrobností v chybách/logu.
+- Pylance nehlásí syntaktické ani typové chyby v novém kódu.
+- Na aktuálním Windows ověřena dostupnost `WinVaultKeyring`; skutečné
+  uživatelské pověření nebylo načteno ani uloženo a API nebylo kontaktováno.
+
+Použitý cílený příkaz:
+
+```powershell
+python -m unittest discover -s tests -p "test_trading212_api.py" -v
+```
+
+#### Etapa 2 — vytvoření a stažení jednoho CSV reportu
+
+**Stav:** dokončeno 2026-11-16; další etapa nebyla zahájena.
+**Předpoklad:** etapa 1 splněna.
+
+- Doplnit povolený POST pro report, GET seznamu reportů a jejich stavy.
+- Zavést rate limits, timeouty, konečné retry, pokračování známého
+  reportId a zrušitelné čekání.
+- Bezpečně stáhnout a ověřit CSV do zadané lokální cesty bez předávání
+  API Authorization na download URL.
+
+**Ověření:** fiktivní report projde od požadavku po validní soubor;
+testy pokryjí `Failed`, `Canceled`, `401`, `403`, `429`, timeout po POST,
+neplatný CSV a nebezpečné přesměrování. Žádná obchodní API operace.
+
+**Hranice etapy:** jeden zadaný interval, bez plánování více roků,
+ročního archivu, GUI a importu do DB.
+
+**Výsledek:**
+
+- Doplněny metody `request_csv_report`, `list_csv_reports`,
+  `wait_for_csv_report` a `download_csv_report` do jediné
+  [třídy Trading212API](../src/tradingtools/trading212_api.py).
+- Interval vyžaduje timezone-aware datumy; report zahrnuje všechny čtyři
+  kategorie. Před exportem a při obnovení čekání se ověřuje identita účtu.
+- Sdílený transport uvnitř instance povoluje pouze GET přehledu účtu,
+  GET seznamu exportů a POST pro vytvoření CSV. Respektuje dokumentované
+  intervaly 5/60/30 sekund a serverové hlavičky.
+- Čekání, retry a download mají společný limit jednotlivé operace,
+  výchozí 600 sekund, a podporují zrušení přes `threading.Event`.
+- Po ztracené odpovědi, timeoutu nebo serverové chybě POST se hledá
+  jedinečný nový report se shodným intervalem/obsahem, oproti seznamu
+  před požadavkem. Nejednoznačný výsledek je explicitní chyba; stejná
+  instance při opakování pouze kontroluje reporty, neposílá další POST.
+  Bezpečně odmítnutý `429` má nejvýše tři pokusy.
+- Známé `reportId` lze předat další operaci čekání/downloadu.
+  Stav nejistého vytvoření je zatím pouze v paměti instance;
+  perzistentní evidence a restart patří do etapy 3.
+- Download povoluje HTTPS pod doménami `trading212.com`/`amazonaws.com`,
+  kontroluje i přesměrování a nikdy jim nepředává API Authorization.
+  Limit je 100 MiB; délka, CSV struktura a časy řádků se validují před
+  zveřejněním souboru. Originální bytes se nepřepisují.
+- Používá se unikátní dočasný soubor ve stejné složce a Windows rename
+  bez přepsání existujícího cíle. Po chybě/zrušení se dočasný soubor uklidí.
+  Chyba zápisu na disk se nevydává za opakovatelnou síťovou chybu.
+- [Offline testy](../tests/test_trading212_api.py): 29 testů prošlo,
+  včetně všech 8 testů etapy 1, bounded retry, obnovy po ztraceném POST,
+  terminálních stavů, časového limitu, zrušení, redirectů, prázdného CSV,
+  přesné velikostní hranice, deadline mezi příchozími bloky, neúplné
+  JSON odpovědi a zachování existujících souborů.
+- Pylance nehlásí typové chyby. Skutečný klíč, uživatelský Credential
+  Manager ani reálné API nebyly při ověřování etapy 2 použity.
+
+Použitý cílený příkaz:
+
+```powershell
+python -m unittest discover -s tests -p "test_trading212_api.py" -v
+```
+
+#### Etapa 3 — roční archiv a plánování exportů
+
+**Stav:** dokončena. **Předpoklad:** etapa 2.
+
+- Do stejné třídy doplnit výběr roků od uživatelem zadaného prvního roku.
+- Rozlišovat uzavřený rok a průběžný aktuální rok; finalizovat předchozí
+  rok při přechodu do nového.
+- Implementovat atomické CSV soubory a archivní metadata, hash,
+  zachování změněných verzí a opakované použití nezměněného obsahu.
+- Doplnit chybějící roky, obnovu vybraného staršího exportu a pokračování
+  po přerušeném stahování; respektovat společné limity API.
+
+**Ověření:** prázdný archiv, přelom roku, přestupný rok, neúplné pokrytí,
+nezměněná/změněná revize, chyba disku a pád mezi CSV a metadaty.
+
+**Hranice etapy:** archiv a API jsou použitelné bez Tkinter a otevřené DB.
+Ještě neimportovat automaticky do databáze.
+
+**Výsledek etapy 3:**
+
+- `Trading212API.sync_yearly_csv(archive_directory, first_year, ...)` exportuje
+  chybějící a aktuální roky, finalizuje průběžný starší rok a respektuje
+  sedmidenní překryv. `refresh_years` umožňuje výslovnou opravu starších roků.
+  Časový rozpočet platí samostatně pro jeden rok; limity API jsou společné
+  pro všechna volání stejné instance.
+- Archiv je oddělený podle prostředí a účtu a používá `Europe/Prague`.
+  `archive.json` eviduje všechny potvrzené exporty a doporučené `reportId`
+  pro jednotlivé roky. Při stejných bytes může více exportů odkazovat na
+  jeden soubor; změněné verze zůstávají vedle původních.
+- Záměr, původní report IDs a nejistota vzniku reportu jsou zapsané před
+  odesláním POST. Po restartu se dohledává původní report nebo pokračuje
+  známým ID; nejasný výsledek nezpůsobí další slepý POST. Potvrzené
+  vzdálené `Failed`/`Canceled` dovolí nový pokus až při dalším běhu.
+- Journal obsahuje konkrétní dočasnou a cílovou cestu i ověřený hash
+  před zveřejněním CSV. Metadata potvrzených revizí se mění až poté.
+  Windows zámek archivu brání souběžným zapisovačům a operační systém
+  jej při zániku procesu uvolní; není nutné ručně odstraňovat „stale lock“.
+- `get_archived_csvs(...)` ověří místní soubory a bez credentials či API
+  vrátí doporučené revize. Umí dokončit přerušené zveřejnění ověřeného
+  CSV; rozpracovaný report vyžadující API ohlásí varováním a poskytne
+  pouze již potvrzené soubory. Neodhaduje pokrytí neznámého orphan CSV.
+- Nová přímá Windows závislost `tzdata` poskytuje data pro `ZoneInfo`.
+  Výběr složky a prvního roku je zatím parametr metody, nikoli GUI dialog.
+
+**Ověřeno:** 43 offline testů včetně celé regrese etap 1–2. Pokryty jsou
+pražské hranice roku a přestupný rok, sedmidenní překryv, prázdný report,
+chybějící rok, nezměněné a změněné revize, nesprávné pokrytí a hash,
+nesprávná identita/metadatová cesta, přerušení a timeout, chyba zápisu
+před POST a po CSV, restart nejistého/známého reportu a lokální obnova
+ověřeného `.part` souboru. Pylance nehlásí chyby syntaxe ani typů.
+Použit stejný cílený testovací příkaz jako v etapě 2.
+
+Žádný skutečný API klíč ani účet nebyl při této etapě použit. Přesné
+pražské hranice je ještě nutné ověřit živým API; viz část 4. GUI,
+databázový import a řešení historických časů zůstávají beze změny.
+Pokračování etapou 4 vyžaduje další výslovný pokyn.
+
+#### Etapa 4 — spolehlivý výsledek existujícího CSV importu
+
+**Stav:** dokončena. **Předpoklad:** dostupná ověřená CSV struktura z etapy 0.
+Na etapách 1–3 technicky nezávisí; pořadí lze změnit pouze po dohodě.
+
+- Opravit přímo související předávání výsledků zápisů a počítání
+  vložených/duplicitních řádků.
+- Vrátit explicitní chyby, neznámé a záměrně vynechané akce,
+  aby konečný dialog nepovažoval částečný import za úplný úspěch.
+- Umožnit krátké dávky a zrušení importu bez změny finančního mapování.
+- Zachovat použitelnost současného ručního CSV importu.
+
+**Ověření:** malé syntetické CSV; správné počty při prvním a opakovaném
+importu, chyba jednoho řádku, neznámá akce a přerušení dávky.
+Existující finanční souhrny se nezmění.
+
+**Hranice etapy:** bez API logiky v `DatabaseManager`, bez plošné
+migrace starých časů a bez nové GUI synchronizace.
+
+**Rozhraní etapy 4:**
+
+- `import_dataframe(df, cancel_event=None)` zůstává synchronním vstupem.
+  Vrací `ImportResult`: původní `records`, `columns`, `read`, `added`
+  a navíc `processed`, `status`, `duplicates`, `failed`, `errors`,
+  `unknown_actions`, `skipped_actions`. `records` je velikost vstupu,
+  `processed` skutečně zpracované řádky; ani jedna položka neznamená
+  počet vložených záznamů.
+- `status` je `complete`, `partial` nebo `cancelled`. Záměrně vynechané
+  vklady/výběry a skutečné duplicity samy neznamenají neúplný import.
+  Chyby řádků a nepodporované akce ano. Chyby obsahují pořadí datového
+  řádku od 1, akci a zprávu; pořadí není pandas index ani fyzické číslo
+  řádku CSV s hlavičkou či víceřádkovým textem.
+- `import_dataframe_batches(df, batch_size=100, cancel_event=None)`
+  vydává nezávislé kumulativní výsledky po dávkách (`running`) a jeden
+  konečný výsledek. Dávky jsou úseky provádění, nikoli nová hromadná
+  transakce. Dosavadní commity po řádcích zůstávají; zrušení je kontrolováno
+  před každým řádkem. Probíhající řádek/načítání kurzu nejprve doběhne.
+  Volat na vlákně vlastnícím SQLite connection; GUI plánování přijde později.
+- Prázdné volitelné daně/poplatky zůstávají nulové. Chybějící povinné
+  hodnoty, neplatná/nekonečná čísla a chybějící měny nenulových částek
+  už nejsou nahrazovány úspěšně vypadajícími výchozími hodnotami.
+- Repositories ignorují pouze své konkrétní unikátní identity.
+  Jiná integritní chyba není duplicita. Trade insert vrací nové row ID
+  nebo nulu; úrok a dividenda počet vložených řádků. `insert_dividend`
+  výsledek nově předává volajícímu. Po chybě SQL se necommitnuté změny
+  vrátí zpět před pokračováním na další řádek.
+- Současný ruční CSV dialog je přímo závislý volající: ukazuje skutečné
+  počty, duplicity, nepodporované akce a první chyby; částečný import
+  hlásí jako varování, ne úspěch. Fatální chyba nespadne do následného
+  dialogu Success. Nové menu Trading212 ani tlačítko Cancel zatím nevzniká.
+
+**Ověřeno:** 132 cílených offline testů importu, ručního dialogu, načítání
+obchodů a párovacího repository. Nové syntetické případy ověřují skutečné
+počty při prvním a opakovaném importu, zachování znamének a částek
+nákupů/prodejů/úroků/dividend, chybějící kurz a pokračování po chybě,
+SQL rollback, neplatná čísla a strukturu, volitelné prázdné poplatky,
+legacy/UTC timestampy, neznámou akci a zrušení mezi dávkami i během dávky.
+Testy ručního dialogu potvrzují varování při neúplném importu, úspěšný
+duplicitní import a absenci následného Success po fatální chybě.
+
+Cílený příkaz pro nové importní testy:
+
+```powershell
+python -m unittest discover -s tests -p "test_csv_import.py" -v
+```
+
+Pylance ověřil kompatibilitu všech 17 volání `import_dataframe`.
+Změněný import a nové testy nepřidávají typové ani syntaktické chyby.
+Existující nesouvisející diagnostiky v `DatabaseManager` a aplikaci
+nebyly plošně opravovány. Nebyly použity osobní transakce ani živé API.
+API/archivní třída, databázové schéma a dividendová identita se nemění.
+Pokračování etapou 5 vyžaduje další výslovný pokyn.
+
+**Následné doplnění na žádost uživatele:** ruční CSV import má nyní modální
+progress dialog s počtem řádků, procenty a tlačítkem Cancel. Při čtení CSV
+zobrazuje neurčitý průběh. Import běží v pracovním vlákně s vlastní SQLite
+connection, GUI se aktualizuje přes frontu a `after`; původní connection
+aplikace se mezi vlákny nesdílí. Dialog při zrušení počká na dokončení
+aktivního řádku/čtení/kurzu a zachová již potvrzené transakce. Tato změna
+nezapojuje Trading212 menu ani neposouvá dividendovou migraci etapy 5.
+
+#### Etapa 5 — dividendová identita a staré časové údaje
+
+**Stav:** dokončena. Uživatel odsouhlasil „konzervativní migraci a explicitní
+konflikty“. Implementace ověřena na syntetických databázích; pracovní databáze
+nebyla migrována ani nebylo voláno reálné Trading212 API.
+
+- Ověřit a doplnit stabilní identitu dividend z CSV, pokud ji export
+  poskytuje; odlišit legitimní výplaty stejného času a instrumentu.
+- Vyřešit návaznost starých záznamů z `Time` na nové `Time (UTC)`,
+  aniž by se plošně posouvaly neověřené timestampy.
+- Nejednoznačné historické shody a změny finančního obsahu hlásit
+  jako konflikty; nepřepisovat spárované obchody.
+- Potřebnou migraci provést přes existující verze schématu,
+  transakčně, po záloze a se zachováním místních ID/vazeb.
+
+**Ověření:** starý ruční CSV -> nový UTC CSV, zimní/letní čas,
+opakovaná migrace, dvě rozdílné dividendy stejného času a nejednoznačná
+shoda. Žádné nové duplicity ani ztráta historických dat/párování.
+
+**Hranice etapy:** bezpečnost lokálních importů; stále bez automatického
+spouštění API synchronizace z GUI.
+
+**Výsledek implementace:**
+
+- Schéma 2 ukládá zdrojovou identitu a snapshot lokální transakce. Broker ID
+  se využije, pokud existuje; jeho dostupnost sama nedokazuje stabilitu
+  napříč exporty. Dividendy s rozdílnými ID mohou sdílet čas a instrument.
+- Otevření schématu 1 automaticky vytvoří vedle DB zálohu
+  `<filename>.pre-v2-<random>.bak`, pak provede transakční migraci. Zachová
+  původní hodnoty, ID, indexy, AUTOINCREMENT i párování. Chyba zálohy migraci
+  blokuje; SQL chyba vše vrátí zpět. Vlastní dividendové triggery vyžadují
+  ruční řešení. Záloha obsahuje citlivá data a musí být stejně chráněna jako DB.
+  Starší aplikace schéma 2 neotevře; pro návrat slouží původní záloha.
+- `reconcile_legacy_dataframe(df, source_timezone=..., imported_timezone=...)`
+  vyžaduje původní CSV a obě výslovně určená pásma. Prokazuje shodu včetně
+  původních přepočtů (`rel_tol=1e-12`, `abs_tol=1e-8`), jen doplní identitu
+  a zachová původní naivní zdroj jako alias. Neopravuje timestampy, částky,
+  zbývající množství ani párování. Nejednoznačné/neexistující DST časy odmítá.
+- Změněný obsah pod stejným ID, lokální úpravy, chybějící historický důkaz
+  a nejednoznačné shody jsou explicitní konflikty. Opakované nerozlišitelné
+  dividendy s alespoň jedním chybějícím ID v témže CSV se neslučují. Bez ID
+  nelze prokázat rozdílnost dvou totožných singletonů z různých souborů;
+  takový opakovaný import je považován za duplicitu.
+- Transakce a její zdroj se zapisují atomicky po řádcích, včetně případně
+  nového instrumentu. Běžný CSV souhrn nyní uvádí počet konfliktů.
+  Reconciliation zatím nemá GUI; jeho zapojení patří do další etapy.
+- Ověření: **156 cílených offline testů** (identity, migrace/rollback/záloha,
+  zima/léto/DST, oba CSV formáty, ID i chybějící ID, původní kurzy, lokální
+  úpravy, zachování zamčeného párování, CSV progress a přepnutí DB).
+  Pylance: nové moduly bez chyb, změněné podpisy kompatibilní s volajícími;
+  existující nesouvisející diagnostiky DB manageru nejsou součástí opravy.
+
+#### Doplnění etapy 5 — samostatné ADR poplatky
+
+Na výslovný pokyn uživatele rozšířeno stejné **schéma 2** a migrace **1 → 2**:
+žádná databáze verze 2 dosud neexistuje, proto není zaváděna verze 3.
+
+- Nová tabulka `fees` a `FeesRepository` uchovávají ADR typ, čas, volitelný
+  instrument, původní částku/měnu a přepočet do CZK. `Total` a
+  `Currency (Total)` jsou povinné; znaménko zůstává zachováno. Použije se
+  vybraný denní/roční kurz, nikoli odhad měny `Total (Account CCY)`.
+- Import `ADR Fee` nevyžaduje broker ID, cenu ani počet kusů. Sdílí zdrojové
+  identity, explicitní konflikty, ochranu lokálních změn, řízené časové
+  reconciliation a atomický zápis poplatku/instrumentu/zdroje.
+- Chybějící historické poplatky se doplní běžným opakovaným importem CSV;
+  migrace je nevymýšlí a reconciliation bez existujícího záznamu vrací
+  výslovný konflikt s pokynem k importu. Nerozlišitelné anonymní skupiny se
+  neslučují; singleton opakovaný v různých souborech je duplicita.
+- `fee` má vlastní importní počty a řádek ve stávajícím výsledku importu.
+  Žádné nové GUI, finanční/daňové souhrny ani přenos existujících poplatků
+  z obchodů. `Dividend adjustment` nadále není poplatek ani podporovaný import.
+- Vytvoření `fees` je součástí transakce před zápisem verze 2; chyba vrací
+  zpět i dividendovou migraci. Zachována záloha, historická ID, hodnoty a párování.
+- Cílené ověření rozšířeno na **166 offline testů**, včetně poplatků,
+  deduplikace/konfliktů, kurzů, zrušení/opakování, časových pásem a rollbacku.
+  Pracovní databáze ani reálné Trading212 API nebyly použity.
+
+#### Oprava opakovaného importu původního CSV po migraci
+
+Uživatel při opětovném importu starého CSV narazil na konflikty všech obchodů
+a úroků bez zdrojových identit. Reprodukováno syntetickým testem: původní
+implementace odmítala i nezměněné řádky se stejnými broker ID.
+
+- Běžný import nyní u historických obchodů/úroků se stejným ID ověří přesný
+  uložený timestamp a všechny neměnné importované hodnoty včetně přepočtů a
+  poplatků. Použije stávající interpretaci času, nikoli odhad jiného pásma.
+- Při prokázané shodě pouze atomicky doplní zdrojovou identitu a započítá
+  duplicitu. Zachová původní hodnoty, ID, zbývající množství i zamčená párování.
+- Odlišné časy nebo finanční hodnoty zůstávají explicitní konflikty. Tato
+  výjimka neprovádí automatické časové posuny.
+- Ověření: **169 cílených offline testů**, včetně opakovaného původního importu,
+  zachování párování, odmítnutí změn a rollbacku při selhání zápisu identity.
+  Pracovní databáze uživatele ani API klíče nebyly otevřeny.
+
+**Doplnění pro dividendy:** předchozí oprava opomenula 32 dividend bez ID.
+V původním CSV 2024 ověřeno 333 řádků, z toho 32 dividend bez broker ID a
+hlavička `Time` (bez vypisování finančních údajů). Import nyní umí i u
+historické dividendy prokázat jedinou nezaznamenanou shodu přesného času,
+ISIN a všech neměnných hodnot. Doplní pouze identitu; dividendy nevkládá
+znovu ani nemění. Více shod, odlišné hodnoty či posunuté časy zůstávají
+konfliktem. Rozšířený regresní případ obsahuje 32 historických dividend
+ve společném importu s obchody a úroky; **171 cílených testů prošlo**,
+včetně ochrany proti nejednoznačnosti a rollbacku při selhání zápisu zdroje.
+
+#### Etapa 6 — propojení s GUI a kompletní synchronizační průběh
+
+**Stav:** dokončeno. **Předpoklady:** etapy 1–5.
+
+- Přidat příkaz menu, první nastavení účtu/archivu/prvního roku
+  a správu uloženého pověření.
+- Spojit výstupy `Trading212API` s existujícím CSV importerem.
+  HTTP, exportní a archivní logika zůstává v jediné třídě.
+- Realizovat worker, frontu událostí a `root.after()`; SQLite a Tkinter
+  obsluhovat na správném vlákně.
+- Zavést průběh, zrušení, ochranu proti souběžným importům/výměně DB,
+  stav importu jednotlivých reportů a pokračování po částečném běhu.
+- Obnovit filtry/pohledy a zobrazit přesný úplný/částečný/chybový výsledek.
+
+**Ověření:** prázdná DB se zadaným prvním rokem, DB s historickými CSV,
+opakovaná synchronizace, chyba importu po archivaci, zrušení a zavření
+okna během čekání. GUI zůstává ovladatelné a nevznikají duplicity.
+
+**Hranice etapy:** žádný nový průvodce obnovou ani automatická synchronizace
+při startu; jen dohodnutý ručně spouštěný příkaz.
+
+**Výsledek etapy 6:**
+
+- `File > Read transactions from Trading212...` spouští ověření účtu,
+  kontrolu/obnovu místního archivu, roční exporty a import. První propojení
+  nabízí nastavení a vyžaduje potvrzení ověřeného účtu; další správa je
+  v `Options > Trading212 connection...`. Prostředí/účet nelze vázané DB
+  tiše změnit. Key/Secret zůstávají výhradně v nativním Správci pověření.
+- HTTP, limity, nejistý POST, ověřování a zveřejnění archivu zůstávají
+  v `Trading212API`. Volitelné bezpečné události a ověřené deskriptory
+  reportů předávají výsledek koordinátoru až po zveřejnění archivu.
+  Chyba následného importu nezpůsobí opakovaný POST.
+- Koordinátor a GUI používají vlastní worker/SQLite připojení, frontu,
+  průběh a zrušení. Souběžné importy a výměna DB jsou blokované menu
+  i obsluhou příkazů. Zavření progress okna pouze ruší běh; zavření
+  hlavního okna čeká na úklid workeru a potom standardně uloží session.
+  Pomocné Tk callbacky se po obnovení původní obsluhy odregistrují.
+- Schéma zůstává **2**, bez nové tabulky konfliktů. V `settings` jsou
+  ne-tajné údaje propojení a malé verzované stavy podle roku/SHA-256,
+  základní počty a časy pokusů/dokončení. Nedokončené/částečné/chybové
+  importy se opakují přes deduplikaci; dokončený shodný soubor se
+  přeskočí, pokud uživatel výslovně nevybere obnovu daného roku.
+- Přehled odděluje pokrytí archivu (celý/průběžný rok) od úspěchu
+  importu, načtené/přidané počty, duplicity, nepodporované/ignorované
+  akce a chyby/konflikty. Při řádkových konfliktech pokračují další roky;
+  chyby identity, archivu, DB nebo uložení stavu ukončí běh viditelně.
+  Potvrzené CSV i dříve commitnuté řádky zůstávají pro opakování.
+- `View last import conflicts...` nabízí pouze čtení, také po ručním
+  CSV importu. Zobrazuje identifikované kandidáty, původní zdroj,
+  skutečná uložená pole, zaznamenaný původní snapshot a očekávané
+  hodnoty jen tam, kde už byly spočteny. Nekombinuje částky v různých
+  měnách a nedostupné interpretace nenahrazuje nulou.
+  Porovnání jsou pouze v paměti aktuálního běhu, nikoli v DB/settings.
+  Zmizí při dalším importu, výměně/uvolnění DB či ukončení aplikace.
+
+**Ověření výsledku:** **240 cílených offline testů prošlo**. Pokrývají
+nový koordinátor a skutečná Tk okna, rušení oběma způsoby zavření,
+chybu uložení pověření/stavu, částečný rok následovaný úspěšným rokem,
+opakování po chybě disku, kandidáty a původní snapshoty bez zápisu,
+reimport 32 starých dividend, ADR poplatky, migraci a zamčená párování.
+Prošla kontrola syntaxe a whitespace; nová syntaxe je slučitelná s
+deklarovaným Pythonem 3.10, běhové testy proběhly na Pythonu 3.12.
+Jednotlivé dřívější kontroly Pylance nenahrazují celoprojektový type-check.
+Reálné API, skutečné pověření ani pracovní DB nebyly při této etapě
+použity. Živé hranice exportů, zabalená Windows aplikace a úplná
+závěrečná regrese zůstávají etapě 7.
+
+**Následná oprava po vyzkoušení GUI:**
+
+- Povolená čtecí diagnostika (`GET` přehledu účtu a seznamu exportů) potvrdila,
+  že broker vrací konec reportu s přesností na milisekundy, zatímco požadavek
+  používá mikrosekundy. Čtyři přepínače obsahu se shodovaly. Jde o ověření
+  metadat, nikoli krajních CSV transakcí; nebyl vytvořen nový export ani
+  zapsáno do pracovní DB/archivu.
+- Porovnání rozpoznává toto zkrácení pouze na stejnou milisekundu.
+  Jiná milisekunda, jiný obsah a neshodné přesnější časové razítko se odmítají.
+  Požadované intervaly ani přesná kontrola časů uvnitř CSV se nemění.
+  Známý čekající report lze dokončit po restartu; nejistý POST stále vyžaduje
+  právě jedno nové odpovídající ID, ne automatické opakování požadavku.
+- Běžný příkaz načítání spustí synchronizaci rovnou. Prvotní nastavení je
+  automatické jen pro nepropojenou DB; správa zůstává v Options.
+  Samostatný příkaz `Refresh older Trading212 years...` nabízí klikací
+  výběr uzavřených let místo opakovaného textového dotazu.
+- Opravu ověřilo **62 cílených offline testů**: skutečně pozorovaná
+  přesnost metadat, odmítnutí odlišných intervalů, obnova nejistého POSTu,
+  restart čekajícího exportu, zachování původních bytes/hranice roku
+  a GUI včetně prvotního nastavení, přímého spuštění a výběru let.
+
+**Následné schválené sjednocení starého času:**
+
+- Import smí opravit skutečný DB timestamp jen u jednoznačné uložené identity,
+  pokud se kanonický zdroj liší pouze naivní/UTC interpretací stejného času
+  a uložený snapshot nebyl změněn. Původní místní parser musí být přesně
+  reprodukovatelný; nezkouší se tolerance jedné či dvou hodin.
+- Nejednoznačné/neexistující DST časy, nereprodukovatelná původní zóna,
+  změna kurzového dne, UTC daňového roku, pořadí nákupu/prodeje nebo kalendářního
+  časového testu zůstávají konflikty.
+- Před prvním pokusem o opravu v každém CSV importu vznikne sousední SQLite
+  záloha `*.pre-time-normalization-*.bak`; její chyba zastaví import.
+  Změna timestampu, zdroje, původního aliasu, snapshotu a odvozených dnů držení
+  je atomická po řádku. Částky v CZK, množství, ID, vazby párování, metody,
+  výsledek časového testu, poznámky a zámky se nemění.
+- Schválené rozšíření přepočítá uložené celé dny držení, pokud se při opravě
+  času změní, ale časový test a platnost párování zůstanou stejné. Původní počet
+  musí odpovídat původním timestampům; nekonzistentní hodnoty se nepřepisují
+  a chybějící hodnoty zůstávají NULL. Výjimka platí i pro zamčená párování;
+  záloha vzniká před prvním zápisem do párování.
+- Staré i nové CSV lze bezpečně opakovat. Přehledy ručního/API importu uvádějí
+  počet sjednocení jako podmnožinu duplicit a cestu k záloze. Konflikty se
+  nadále neukládají. Schéma zůstává **2**; neprobíhá zápis do Trading212.
+- Ověření: **209 cílených offline testů prošlo**. Zahrnují zimní/letní čas,
+  všechny podporované kategorie, původní i UTC reimport, nejednoznačné
+  identity, hranice dne/roku/DST, změnu místní zóny, selhání zálohy i
+  rollback identity i odvozených dnů držení, zrušení/částečný import,
+  přepočet dnů u zamčených párů na straně nákupu i prodeje a GUI přehledy.
+  Použity byly pouze dočasné testovací DB a simulované API.
+
+#### Etapa 7 — obnova, Windows executable a závěrečná regrese
+
+**Upřesnění přenosnosti nastavení po etapě 6:** kořen archivu patří pouze do
+místního `config.json` (`trading212_archive_directory`), společně pro účty
+oddělené podsložkami prostředí/ID. Do DB se ukládají jen přenosná metadata
+účtu, prvního roku a časové zóny. Formát metadat 2 neobsahuje cestu; nejde
+o změnu schématu DB. Starý formát 1 se načte bez využití uložené cesty a při
+uložení propojení nebo ověřené synchronizaci se přepíše. Bez místního kořene
+aplikace vyžádá jeho výběr; cestu z přenesené DB automaticky nepřebírá.
+
+**Stav:** automatická část dokončena; ruční kontrola skutečného Windows
+Credential Manageru v executable zbývá. **Předpoklad:** etapa 6.
+
+- Ověřit lokální obnovu prázdné DB z doporučených ročních CSV bez API,
+  se stejnými kurzy a s přiznanými omezeními párování/nastavení.
+- Spustit celou existující testovací sadu po cílených testech etap.
+- Ověřit zabalenou Windows aplikaci a nativní backend `keyring`.
+- Doplnit [README](../README.md) a [CSV poznámky](CSV_IMPORT_NOTES.md):
+  první propojení, první rok, správa klíče, archiv, chyby a obnova.
+
+**Ověření:** shoda podporovaných transakcí a finančních souhrnů po obnově,
+funkční credential storage v executable a zachované běžné funkce aplikace.
+
+**Výsledky automatického ověření:**
+
+- **280 testů prošlo** při plném `unittest discover`. Samostatný opakovaný
+  běh celé sady prošel i s blokovaným síťovým připojením a skutečnými
+  `CredRead`/`CredWrite`/`CredDelete`; testy používají vlastní adaptéry.
+- Síťová demonstrace ročních kurzů byla přesunuta do
+  `tests/manual_annual_rates.py`, aby samotný discovery nespouštěl CNB dotazy.
+- Nový scénář sestaví archiv dvou roků včetně změněné historické revize,
+  vybere doporučené CSV bez credentials/API a obnoví novou DB. V obou
+  režimech kurzů porovnává všechny řádky podporovaných transakcí i explicitní
+  CZK součty obchodů, daně, obou úroků, dividend a podepsaných ADR poplatků.
+  Opakovaný import přidá nulu; nepodporované akce nadále hlásí partial.
+- Denní kurzy jsou v offline testu poskytovány pevnými testovacími daty;
+  běžná denní obnova v aplikaci vyžaduje dostupné stejné CNB kurzy.
+  Roční tabulky, párování, zámky a nastavení nejsou součástí CSV.
+- Běh odhalil přechodné odmítnutí `os.replace` s WinError 5. Stejná
+  atomická operace po krátkém čekání uspěla. Zápis metadat nyní omezeně
+  opakuje pouze WinError 5/32/33, s varováním; trvalé a jiné chyby zůstávají
+  chybou. Test ověřuje i zachování původních metadat a úklid dočasného souboru.
+  Nejde o opakování API POST.
+- PyInstaller úspěšně vytvořil `dist\TradingTools.exe`.
+  `scripts\build_windows.ps1 -SmokeTest` spustil skutečný executable:
+  `frozen=true`, GUI, výchozí JSON, schéma DB, titulek s účtem,
+  `Europe/Prague` a `keyring.backends.Windows.WinVaultKeyring` prošly.
+  Přidán explicitní diagnostický režim `--smoke-test REPORT`, nikoli
+  automatická kontrola při běžném startu.
+- Smoke test používá dočasné AppData, blokuje síť a nahrazuje úložiště
+  pověření paměťovým adaptérem. Nečte ani nemění skutečný Windows vault.
+  Ověřeno i chybové ukončení s nenulovým kódem a JSON diagnostikou.
+- Změněný Python kód prošel kontrolou syntaxe pro Python 3.10; runtime
+  a executable byly ověřeny na Pythonu 3.12 a Windows.
+  Doplněny kroky obnovy a její omezení v README a CSV poznámkách.
+
+**Zbývající ruční akceptace:** v zabalené aplikaci propojit demo účet,
+aplikaci ukončit, znovu otevřít a ověřit použití uloženého pověření
+bez nového zadání; následně případně ověřit odstranění pověření.
+Tento krok vyžaduje skutečný vault a API, a proto nebyl automaticky proveden.
+Živé mezní časové intervaly exportu také nejsou tímto offline během ověřeny.
+
+Reálné API kontroly jen s výslovným souhlasem uživatele; automatické testy
+musí fungovat offline s fiktivními daty a bez skutečného Správce pověření.
+
+Při implementaci doplnit `keyring` do [pyproject.toml](../pyproject.toml);
+ostatní závislosti vybírat podle potřeby. Použít existující
+[paths helpers](../src/tradingtools/paths.py) pro aplikační konfiguraci,
+ne však jako důvod k pevnému umístění uživatelského archivu do AppData.
+
+## 11. Testy a akceptační kritéria
+
+Testovat fiktivní HTTP odpovědi, malé CSV fixtures, dočasné archivní složky
+a lokální SQLite DB. Automatické testy bez skutečných credentials a sítě.
+Credential storage v automatických testech nahradit testovacím adaptérem;
+nezapisovat do skutečného uživatelského Správce pověření.
+
+- Uložení a následné načtení pověření nevyžaduje opětovné zadání;
+  prostředí a účty mají oddělené záznamy.
+- Změna/odstranění pověření nepoškodí DB ani archiv; chyba ověření nového
+  klíče zachová původní funkční záznam.
+- Chyba úložiště nebo nebezpečný backend blokuje API funkci bez zápisu
+  credentials do souboru; configuration/DB/logy neobsahují tajné hodnoty.
+- Report request zahrne správný rok a všechny obsahové přepínače;
+  jiné POST/PUT/DELETE než vytvoření exportu klient nepoužije.
+- Stavy reportu, rate limits, timeout a zrušení; polling více roků
+  nepřekročí limit společného endpointu.
+- Přelom roku a přestupný rok: žádná mezera ani nesprávně označené pokrytí.
+- Aktuální rok je průběžný; při dalším roce vznikne finální předchozí rok.
+- Identický obsah nevytvoří další kopii; změněný obsah vytvoří revizi
+  bez ztráty předchozího souboru.
+- Neúplný download, HTML místo CSV, chyba disku a poškozený hash
+  nevedou k označení archivu za validní.
+- Pád mezi CSV a metadaty neztratí již zveřejněný report.
+- Opakovaný import i obnovení po částečném běhu vloží 0 duplicit;
+  dvě legitimní stejnočasové události se nesloučí.
+- CSV/API ID konflikty, dividendové daně, úroky a oba režimy kurzů
+  mají ověřené výsledky; chybějící údaje nejsou nahrazeny nulou.
+- Originální CSV obsahuje i nepodporované akce, které UI přizná.
+- Jiný účet/prostředí se odmítne před importem; download neobdrží API klíč.
+- Obnova nové DB z doporučených ročních CSV funguje bez API a dá stejné
+  počty podporovaných transakcí a finanční souhrny při stejných kurzech.
+- GUI zůstává ovladatelné a nepovolí souběžné změny DB.
+- Třídu `Trading212API` lze testovat bez Tkinter okna a otevřené DB.
+  API a credential logika není rozptýlena do `app.py` či `dbmanager.py`.
+
+Nejdříve cílené testy, následně dotčené regresní testy a před dokončením:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Ruční ověření nejdříve demo, reálný účet až se souhlasem uživatele.
+Ověřit také Windows executable, zabalení `keyring` a dostupnost jeho
+nativního Windows backendu, nejen běh ze zdrojových souborů.
+
+## 12. Výsledky prvního ověření
+
+Datum ověření: 2026-11-15. API bylo ověřeno se souhlasem uživatele,
+bez importu do DB a bez změny aplikace. Stažená CSV a podrobné porovnání
+zůstávají mimo veřejné repository v soukromé složce uživatele.
+Do tohoto dokumentu nepatří credentials, identita účtu ani finanční hodnoty.
+
+- Se sadou oprávnění `Account data`, `History`, `History - Dividends`,
+  `History - Orders`, `History - Transactions`, `Metadata` prošlo načtení
+  přehledu účtu, vytvoření reportu se všemi čtyřmi obsahovými přepínači,
+  kontrola stavu i download bez API Authorization.
+  Ověření dokazuje dostatečnost této sady, nikoli její minimálnost;
+  nezkoušelo se odebrání jednotlivých oprávnění.
+- Prošel jeden celý uzavřený kalendářní rok i průběžný rozsah aktuálního roku.
+  Nebyly testovány všechny možné roční hranice, limity velikosti a intervalů.
+- V aktuálním CSV se všechny řádky shodovaly s ručním exportem na všech
+  sloupcích po normalizaci numerického formátování a UTC času.
+  Hlavičky byly stejné. Nejde o tvrzení o byte-for-byte shodě souborů.
+- Starší ruční export a nově vytvořený API report obsahovaly stejné události
+  podle akce, času normalizovaného jako UTC, ID a ISIN.
+  Shodovaly se částky, ceny, poplatky, srážkové daně a příslušné měny.
+  Byly ověřeny také oba typy úroků.
+- U staršího vzorku se lišily některé názvy instrumentů, `Currency (Result)`
+  u nákupů a drobná přesnost `Exchange rate` u dividend.
+  Tyto rozdíly nelze samy o sobě klasifikovat jako změnu transakce.
+  Při deduplikaci porovnávat finančně relevantní údaje, ne celý řádek
+  bez zohlednění verze exportu.
+- Starší ruční exporty používají `Time`; nové API CSV používá `Time (UTC)`.
+  Uživatel potvrdil, že starší soubory exportoval dříve. V porovnaném vzorku
+  byla UTC interpretace starého času konzistentní s API, nikoli však
+  obecně ověřená pro všechny historické exporty.
+- Přímý test současného `DatabaseManager.timestr_to_timestamp` pro stejné
+  syntetické časy s offsetem a bez něj na aktuálním počítači prokázal
+  zimní rozdíl -3600 sekund a letní -7200 sekund. To je blokující riziko
+  pro deduplikaci starých dividend podle `(timestamp, isin_id)`.
+
+Závěr: exportní přístup i zadaná oprávnění jsou prakticky ověřené.
+Před automatickým zápisem vyřešit identitu dividend a návaznost časů
+ve starých DB; normalizaci dat ani migraci toto ověření neprovedlo.
+Credential Manager byl následně implementován v etapě 1 a ověřen offline
+testy a kontrolou dostupnosti nativního backendu. Reálný zápis uživatelského
+klíče a Windows executable zatím ověřeny nebyly.
+
+## 13. Rozhodnutí před realizací
+
+Zvolený směr: API export CSV, současný import a uchování ročních přehledů.
+Potvrzeno: Windows Credential Manager od první verze, bez plaintext fallbacku.
+Před implementací ještě potvrdit:
+
+- Výchozí složku a UI výběru archivu, první rok a roční časové členění.
+- Zachování změněných verzí bez automatického mazání.
+- Způsob explicitního obnovení starých roků.
+- Nutné úpravy CSV importu podle ověřených exportních fixtures.
+
+Tento dokument eviduje etapový postup. Dokončení etapy není pokynem
+k automatickému zahájení další etapy.
+
+## 14. Oficiální zdroje
+
+Ověřeno podle dokumentace dostupné 2026-11-15:
+
+- [Přehled API a autentizace](https://docs.trading212.com/api)
+- [Vytvoření CSV reportu](https://docs.trading212.com/api/historical-events/requestreport.md)
+- [Seznam reportů, stavy a downloadLink](https://docs.trading212.com/api/historical-events/getreports.md)
+- [Identita účtu](https://docs.trading212.com/api/accounts/getaccountsummary.md)
+- [API klíče a oprávnění](https://helpcentre.trading212.com/hc/en-us/articles/14584770928157-Trading-212-API-key)

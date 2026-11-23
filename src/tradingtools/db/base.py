@@ -8,6 +8,7 @@ class BaseRepository:
     def __init__(self, conn: sqlite3.Connection, logger: Optional[logging.Logger] = None):
         self.conn = conn
         self.logger = logger or logging.getLogger("trading_tools.db")
+        self.defer_commit = False
 
     def _cursor(self) -> sqlite3.Cursor:
         return self.conn.cursor()
@@ -27,6 +28,8 @@ class BaseRepository:
         return cur
 
     def commit(self) -> None:
+        if self.defer_commit:
+            return
         try:
             self.conn.commit()
         except Exception:

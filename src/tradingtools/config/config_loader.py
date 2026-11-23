@@ -75,15 +75,29 @@ class ConfigLoader:
 
     def save_last_database_path(self, database_path: Optional[str]) -> None:
         """Persist the session path without overwriting other user settings."""
+        self._save_setting(
+            'last_database_path', str(Path(database_path).resolve()) if database_path else '',
+        )
+
+    def get_trading212_archive_directory(self) -> str:
+        value = self.get('trading212_archive_directory', default='')
+        if not isinstance(value, str) or (value and (not value.strip() or not Path(value).is_absolute())):
+            raise ValueError("Trading212 archive directory in local configuration must be an absolute path.")
+        return value
+
+    def save_trading212_archive_directory(self, directory: str) -> None:
+        if not isinstance(directory, str) or not directory.strip() or not Path(directory).is_absolute():
+            raise ValueError("Choose an absolute archive directory.")
+        self._save_setting('trading212_archive_directory', str(Path(directory).resolve()))
+
+    def _save_setting(self, key: str, value: Any) -> None:
         config_path = get_config_dir() / 'config.json'
         with config_path.open(encoding='utf-8') as file:
             config = json.load(file)
         if not isinstance(config, dict):
             raise ValueError("Application configuration must be a JSON object.")
 
-        config['last_database_path'] = (
-            str(Path(database_path).resolve()) if database_path else ''
-        )
+        config[key] = value
         temporary_path = None
         try:
             with tempfile.NamedTemporaryFile(

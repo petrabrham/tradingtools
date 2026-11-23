@@ -179,9 +179,8 @@ class RealizedIncomeView(BaseView):
             return
         
         try:
-            # Update repository connection if needed
-            if not self.pairings_repo.conn:
-                self.pairings_repo.conn = self.db.conn
+            if self.pairings_repo.conn is not self.db.conn:
+                self.pairings_repo = PairingsRepository(self.db.conn)
             
             # Get realized income calculations from pairings
             results = self.pairings_repo.calculate_realized_income(start_timestamp, end_timestamp)

@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from tradingtools.app import TradingToolsApp
 from tradingtools.config.config_loader import ConfigLoader
 from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.trading212_sync import SyncResult, Trading212Connection, save_connection
 from tradingtools.ui.menu_manager import MenuManager
 
 
@@ -44,7 +45,67 @@ class TestApplicationSession(unittest.TestCase):
         self.app.update_title = self.update_title
         self.app.update_views = self.update_views
         self.app.use_json_tax_rates = Mock()
+        self.app.data_operation_active = False
+        self.app._exit_after_operation = False
         self.directory = Path(appdata)
+        self.config.save_trading212_archive_directory(str(self.directory / "archive"))
+
+    def test_title_follows_database_account_environment_and_release(self):
+        self.app.db = DatabaseManager()
+        self.addCleanup(self.app.db.close)
+        del self.app.update_title
+        self.app.update_title()
+        self.root.title.assert_called_with("Trading Tools")
+
+        for environment, account_id in (("live", 123), ("demo", 456)):
+            path = self.directory / f"{environment}.db"
+            self.app.db.create_database(str(path))
+            save_connection(self.app.db, Trading212Connection(environment, account_id, 2020))
+            self.app.db.close()
+            self.app._connect_database(str(path))
+            self.root.title.assert_called_with(
+                f"Trading Tools - {path.name} - Trading212 account {account_id}"
+                f" ({environment.capitalize()})"
+            )
+
+        path = self.directory / "unbound.db"
+        self.app.db.create_database(str(path))
+        self.app.db.close()
+        self.app._connect_database(str(path))
+        self.root.title.assert_called_with("Trading Tools - unbound.db")
+        self.app.release_database()
+        self.root.title.assert_called_with("Trading Tools")
+        self.showerror.assert_not_called()
+
+    def test_first_account_setup_updates_title_from_settings_or_sync(self):
+        self.app.db = DatabaseManager()
+        self.addCleanup(self.app.db.close)
+        del self.app.update_title
+        binding = Trading212Connection("demo", 123, 2020)
+
+        def save_binding():
+            save_connection(self.app.db, binding)
+            return binding
+
+        for handler in (self.app.configure_trading212, self.app.read_trading212_transactions):
+            with self.subTest(handler=handler.__name__):
+                path = self.directory / f"{handler.__name__}.db"
+                self.app.db.create_database(str(path))
+                self.app.update_title()
+                with (
+                    patch("tradingtools.app.Trading212ConnectionDialog") as settings,
+                    patch("tradingtools.app.Trading212WorkerDialog") as worker,
+                    patch.object(self.app, "_show_sync_result"),
+                ):
+                    settings.return_value.show.side_effect = save_binding
+                    settings.return_value.exit_requested = False
+                    worker.return_value.show.return_value = SyncResult()
+                    worker.return_value.exit_requested = False
+                    handler()
+                self.root.title.assert_called_with(
+                    f"Trading Tools - {path.name} - Trading212 account 123 (Demo)"
+                )
+        self.showerror.assert_not_called()
 
     def test_exit_and_startup_reconnect_real_database_and_restore_rate_mode(self):
         path = self.directory / "session.db"
@@ -155,6 +216,259 @@ class TestApplicationSession(unittest.TestCase):
         with patch("tradingtools.ui.menu_manager.tk.Menu", return_value=menu):
             MenuManager(self.app.root, self.app).create_menu()
         menu.add_command.assert_any_call(label="Exit", command=self.app.on_exit)
+
+    def test_csv_read_failure_never_shows_success_or_uses_uninitialized_result(self):
+        self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.CSVImportDialog.show", side_effect=ValueError("Invalid CSV")),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+        ):
+            self.app.open_csv_file()
+        self.showerror.assert_called_once()
+        info.assert_not_called()
+        self.db.import_dataframe.assert_not_called()
+        self.update_views.assert_called_once()
+
+    def test_csv_partial_import_shows_issues_not_success(self):
+        self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
+        self.db.import_dataframe.return_value = {
+            "records": 5, "processed": 5, "status": "partial",
+            "read": {"buy": 1, "sell": 0, "interest": 1, "dividend": 0, "fee": 1, "insignificant": 1, "unknown": 1},
+            "added": {"buy": 0, "sell": 0, "interest": 1, "dividend": 0, "fee": 1},
+            "duplicates": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
+            "errors": [{"row": 2, "action": "Market buy", "message": "Missing ID"}],
+            "unknown_actions": {"Dividend adjustment": 1},
+        }
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=self.db.import_dataframe.return_value),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+            patch("tradingtools.app.messagebox.showwarning") as warning,
+        ):
+            self.app.open_csv_file()
+        info.assert_not_called()
+        self.showerror.assert_not_called()
+        title, message = warning.call_args.args
+        self.assertEqual(title, "Import incomplete")
+        self.assertIn("Failed: 1", message)
+        self.assertIn("Dividend adjustment: 1", message)
+        self.assertIn("Fee:         1 / 1", message)
+        self.assertIn("Row 2 (Market buy): Missing ID", message)
+        self.filter_manager.update_year_list.assert_called_once()
+        self.update_views.assert_called_once()
+
+    def test_csv_duplicate_only_import_still_shows_success_with_zero_added(self):
+        self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
+        self.db.import_dataframe.return_value = {
+            "records": 1, "processed": 1, "status": "complete",
+            "read": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0, "insignificant": 0, "unknown": 0},
+            "added": {"buy": 0, "sell": 0, "interest": 0, "dividend": 0},
+            "duplicates": {"buy": 1, "sell": 0, "interest": 0, "dividend": 0},
+            "errors": [], "unknown_actions": {},
+            "time_normalized": 1, "time_backup": "synthetic.db.pre-time-normalization-example.bak",
+        }
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=self.db.import_dataframe.return_value),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+            patch("tradingtools.app.messagebox.showwarning") as warning,
+        ):
+            self.app.open_csv_file()
+        warning.assert_not_called()
+        self.showerror.assert_not_called()
+        self.assertEqual(info.call_args.args[0], "Success")
+        self.assertIn("Duplicates: 1", info.call_args.args[1])
+        self.assertIn("Automatically normalized times: 1 (included in duplicates)", info.call_args.args[1])
+        self.assertIn("Before-normalization backup: synthetic.db.pre-time-normalization-example.bak",
+                      info.call_args.args[1])
+
+    def test_csv_cancelled_before_import_does_not_show_success(self):
+        self.db.conn = Mock()
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.filedialog.askopenfilename", return_value="synthetic.csv"),
+            patch("tradingtools.app.CSVImportDialog.show", return_value=None),
+            patch("tradingtools.app.messagebox.showinfo") as info,
+        ):
+            self.app.open_csv_file()
+        info.assert_not_called()
+        self.showerror.assert_not_called()
+        self.db.import_dataframe.assert_not_called()
+
+    def test_busy_guard_blocks_database_import_and_second_sync_handlers(self):
+        self.app.data_operation_active = True
+        with (
+            patch("tradingtools.app.messagebox.showwarning") as warning,
+            patch("tradingtools.app.filedialog.askopenfilename") as choose,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+        ):
+            for handler in (
+                self.app.create_database, self.app.open_database, self.app.release_database,
+                self.app.save_database_as, self.app.open_csv_file, self.app.import_annual_rates,
+                self.app.read_trading212_transactions, self.app.configure_trading212,
+                self.app.refresh_trading212_years,
+            ):
+                handler()
+        self.assertEqual(warning.call_count, 9)
+        choose.assert_not_called()
+        worker.assert_not_called()
+        self.db.close.assert_not_called()
+        self.db.open_database.assert_not_called()
+
+    def test_busy_menu_disables_all_competing_data_commands(self):
+        menu = Mock()
+        manager = MenuManager(self.root, self.app)
+        manager.file_menu = menu
+        manager.options_menu = Mock()
+        self.app.data_operation_active = True
+        self.db.conn = Mock()
+        manager.update_states(self.db)
+        for label in (
+            "New Database", "Connect Database", "Save Database Copy As...", "Release Database",
+            "Import CSV", "Read transactions from Trading212...", "Import Annual Exchange Rates...",
+            "Refresh older Trading212 years...",
+        ):
+            menu.entryconfig.assert_any_call(label, state="disabled")
+        manager.options_menu.entryconfig.assert_any_call("Trading212 connection...", state="disabled")
+
+    def test_sync_cleanup_refreshes_partial_results_and_retains_only_current_comparisons(self):
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, 2020)
+        self.db.current_db_path = "synthetic.db"
+        outcome = SyncResult(status="partial", comparisons=[Mock()])
+        with (
+            patch("tradingtools.app.load_connection", return_value=binding),
+            patch("tradingtools.app.Trading212RefreshDialog") as refresh,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch.object(self.app, "_show_sync_result") as summary,
+        ):
+            worker.return_value.show.return_value = outcome
+            worker.return_value.exit_requested = False
+            self.app.read_trading212_transactions()
+        self.assertFalse(self.app.data_operation_active)
+        self.assertEqual(self.app.last_import_comparisons, outcome.comparisons)
+        self.filter_manager.update_year_list.assert_called_once()
+        self.update_views.assert_called_once()
+        summary.assert_called_once_with(outcome)
+        refresh.assert_not_called()
+
+    def test_sync_root_close_exits_only_after_worker_cleanup_without_summary(self):
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        self.db.current_db_path = "synthetic.db"
+        binding = Trading212Connection("demo", 123, 2020)
+        with (
+            patch("tradingtools.app.load_connection", return_value=binding),
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch.object(self.app, "_show_sync_result") as summary,
+            patch.object(self.app, "on_exit") as close,
+        ):
+            worker.return_value.show.return_value = SyncResult(status="cancelled")
+            worker.return_value.exit_requested = True
+            self.app.read_trading212_transactions()
+        self.assertFalse(self.app.data_operation_active)
+        summary.assert_not_called()
+        close.assert_called_once()
+
+    def test_invalid_connection_settings_restore_guard_and_never_show_uninitialized_result(self):
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.load_connection", side_effect=ValueError("Invalid saved connection")),
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch.object(self.app, "_show_sync_result") as summary,
+        ):
+            self.app.read_trading212_transactions()
+        self.assertFalse(self.app.data_operation_active)
+        worker.assert_not_called()
+        summary.assert_not_called()
+        self.showerror.assert_called_once()
+
+    def test_setup_is_only_automatic_for_database_without_saved_connection(self):
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, 2020)
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.load_connection", side_effect=[None, binding]),
+            patch.object(self.app, "_setup_trading212", return_value=binding) as setup,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch.object(self.app, "_show_sync_result"),
+        ):
+            worker.return_value.show.return_value = SyncResult()
+            worker.return_value.exit_requested = False
+            self.app.read_trading212_transactions()
+            self.app.read_trading212_transactions()
+        setup.assert_called_once()
+
+    def test_bound_database_without_local_archive_requires_setup_before_sync(self):
+        from threading import Event
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, 2020)
+        self.db.current_db_path = "copied-database.db"
+        selected = str((self.directory / "selected-archive").resolve())
+        for accepted in (False, True):
+            with self.subTest(accepted=accepted):
+                self.config._save_setting("trading212_archive_directory", "")
+
+                def setup():
+                    if accepted:
+                        self.config.save_trading212_archive_directory(selected)
+                        return binding
+                    return None
+
+                with (
+                    patch("tradingtools.app.load_connection", return_value=binding),
+                    patch.object(self.app, "_setup_trading212", side_effect=setup) as settings,
+                    patch("tradingtools.app.Trading212WorkerDialog") as worker,
+                    patch("tradingtools.app.Trading212Sync") as sync,
+                    patch.object(self.app, "_show_sync_result"),
+                ):
+                    worker.return_value.show.side_effect = lambda: worker.call_args.args[2](Event(), Mock())
+                    worker.return_value.exit_requested = False
+                    sync.return_value.run.return_value = SyncResult()
+                    self.app.read_trading212_transactions()
+                    settings.assert_called_once()
+                    if accepted:
+                        self.assertEqual(sync.call_args.kwargs["archive_directory"], selected)
+                    else:
+                        worker.assert_not_called()
+                        sync.assert_not_called()
+                self.assertFalse(self.app.data_operation_active)
+        self.showerror.assert_not_called()
+
+    def test_explicit_refresh_passes_selected_years_to_worker_and_cancel_does_not_start_it(self):
+        from threading import Event
+        from tradingtools.trading212_sync import SyncResult, Trading212Connection
+
+        binding = Trading212Connection("demo", 123, 2020)
+        self.db.current_db_path = "synthetic.db"
+        with (
+            patch("tradingtools.app.load_connection", return_value=binding),
+            patch("tradingtools.app.Trading212RefreshDialog") as options,
+            patch("tradingtools.app.Trading212WorkerDialog") as worker,
+            patch("tradingtools.app.Trading212Sync") as sync,
+            patch.object(self.app, "_show_sync_result"),
+        ):
+            options.return_value.show.return_value = (2020, 2022)
+            options.return_value.exit_requested = False
+            worker.return_value.show.side_effect = lambda: worker.call_args.args[2](Event(), Mock())
+            worker.return_value.exit_requested = False
+            sync.return_value.run.return_value = SyncResult()
+            self.app.refresh_trading212_years()
+            self.assertEqual(sync.call_args.kwargs["refresh_years"], (2020, 2022))
+            self.assertEqual(sync.call_args.kwargs["archive_directory"],
+                             self.config.get_trading212_archive_directory())
+            worker.reset_mock()
+            options.return_value.show.return_value = None
+            self.app.refresh_trading212_years()
+            worker.assert_not_called()
+        self.assertFalse(self.app.data_operation_active)
 
 
 if __name__ == "__main__":

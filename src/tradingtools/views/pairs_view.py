@@ -331,7 +331,13 @@ class PairsView(BaseView):
         """
         self.current_start_timestamp = start_timestamp
         self.current_end_timestamp = end_timestamp
-        
+
+        if self.db.conn:
+            if self.pairings_repo.conn is not self.db.conn:
+                self.pairings_repo = PairingsRepository(self.db.conn)
+            if self.trades_repo.conn is not self.db.conn:
+                self.trades_repo = TradesRepository(self.db.conn)
+
         # Load all data independently
         self._load_sales_in_interval()
         self._load_current_pairings(start_timestamp, end_timestamp)

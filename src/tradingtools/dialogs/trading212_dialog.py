@@ -1,0 +1,424 @@
+"""Tk views for connection management and worker-owned synchronization."""
+
+import tkinter as tk
+from dataclasses import dataclass
+from pathlib import Path
+from queue import Empty, Queue
+from threading import Event, Thread
+from tkinter import filedialog, messagebox, ttk
+from typing import Callable, Generic, TypeVar
+
+from tradingtools.db.dbmanager import DatabaseManager
+from tradingtools.config.config_loader import get_config
+from tradingtools.trading212_api import Trading212API
+from tradingtools.trading212_sync import (
+    SyncProgress, Trading212Connection, load_connection, requires_account_confirmation, save_connection,
+)
+
+
+T = TypeVar("T")
+
+
+@dataclass
+class _Outcome(Generic[T]):
+    value: T | None = None
+    error: Exception | None = None
+
+
+class Trading212WorkerDialog(Generic[T]):
+    def __init__(
+        self, parent: tk.Tk, title: str,
+        job: Callable[[Event, Callable[[SyncProgress], None]], T],
+    ) -> None:
+        self.parent, self.title, self.job = parent, title, job
+        self.cancel_event = Event()
+        self.messages: Queue[SyncProgress | _Outcome[T]] = Queue()
+        self.outcome: _Outcome[T] = _Outcome()
+        self.exit_requested = False
+
+    def _run(self) -> None:
+        try:
+            outcome = _Outcome(value=self.job(self.cancel_event, self.messages.put))
+        except Exception as error:
+            outcome = _Outcome[T](error=error)
+        self.messages.put(outcome)
+
+    def _cancel(self) -> None:
+        self.cancel_event.set()
+        self.cancel_button.configure(state="disabled")
+        self.label.configure(text="Cancelling... waiting for the current operation to finish.")
+
+    def _close_parent(self) -> None:
+        self.exit_requested = True
+        self._cancel()
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                message = self.messages.get_nowait()
+                if isinstance(message, _Outcome):
+                    self.outcome = message
+                    self.bar.stop()
+                    self.dialog.destroy()
+                    return
+                if self.cancel_event.is_set():
+                    continue
+                year = f" ({message.year})" if message.year is not None else ""
+                wait = f" - waiting {message.wait_seconds:.0f}s" if message.wait_seconds is not None else ""
+                text = message.phase + year + wait
+                if message.processed is not None and message.records is not None:
+                    self.bar.stop()
+                    self.bar.configure(mode="determinate", maximum=max(1, message.records), value=message.processed)
+                    text += f": {message.processed} / {message.records}"
+                else:
+                    if self.bar.cget("mode") != "indeterminate":
+                        self.bar.configure(mode="indeterminate")
+                        self.bar.start()
+                self.label.configure(text=text)
+        except Empty:
+            self.dialog.after(50, self._poll)
+
+    def show(self) -> T | None:
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title(self.title)
+        self.dialog.transient(self.parent)
+        self.dialog.geometry("640x180")
+        self.label = ttk.Label(self.dialog, text="Preparing...", wraplength=600)
+        self.label.pack(padx=20, pady=20)
+        self.bar = ttk.Progressbar(self.dialog, mode="indeterminate", length=600)
+        self.bar.pack(padx=20, fill="x")
+        self.bar.start()
+        self.cancel_button = ttk.Button(self.dialog, text="Cancel", command=self._cancel)
+        self.cancel_button.pack(pady=15)
+        self.dialog.protocol("WM_DELETE_WINDOW", self._cancel)
+        previous_close = self.parent.protocol("WM_DELETE_WINDOW")
+        self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
+        temporary_close = self.parent.protocol("WM_DELETE_WINDOW")
+        try:
+            self.dialog.wait_visibility()
+            self.dialog.grab_set()
+            worker = Thread(target=self._run, name="trading212")
+            worker.start()
+            self.dialog.after(50, self._poll)
+            self.parent.wait_window(self.dialog)
+            worker.join()
+        finally:
+            self.parent.protocol("WM_DELETE_WINDOW", previous_close)
+            self.parent.deletecommand(temporary_close)
+            if self.dialog.winfo_exists():
+                self.dialog.destroy()
+        if self.outcome.error is not None:
+            raise self.outcome.error
+        return self.outcome.value
+
+
+class Trading212RefreshDialog:
+    def __init__(self, parent: tk.Tk, first_year: int) -> None:
+        self.parent, self.first_year = parent, first_year
+        self.result: tuple[int, ...] | None = None
+        self.exit_requested = False
+
+    def _confirm(self) -> None:
+        selected = self.years.curselection()
+        if not selected:
+            messagebox.showwarning("Select years", "Select at least one year to refresh.", parent=self.dialog)
+            return
+        self.result = tuple(int(self.years.get(index)) for index in selected)
+        self.dialog.destroy()
+
+    def _close_parent(self) -> None:
+        self.exit_requested = True
+        self.dialog.destroy()
+
+    def show(self) -> tuple[int, ...] | None:
+        years = range(self.first_year, Trading212API.current_archive_year())
+        if not years:
+            messagebox.showinfo("Refresh Trading212 years", "There are no closed years to refresh.", parent=self.parent)
+            return None
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Refresh older Trading212 years")
+        self.dialog.transient(self.parent)
+        frame = ttk.Frame(self.dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text="Click years to select/unselect them.\n"
+            "Selected years will be exported again and reimported.\n"
+            "Other years follow normal synchronization.",
+        ).pack(anchor="w", pady=5)
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill="both", expand=True)
+        self.years = tk.Listbox(list_frame, selectmode="multiple", exportselection=False, height=min(len(years), 10))
+        for year in years:
+            self.years.insert("end", str(year))
+        scrollbar = ttk.Scrollbar(list_frame, command=self.years.yview)
+        self.years.configure(yscrollcommand=scrollbar.set)
+        self.years.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        ttk.Button(frame, text="Refresh selected years", command=self._confirm).pack(side="left", pady=10)
+        ttk.Button(frame, text="Cancel", command=self.dialog.destroy).pack(side="right", pady=10)
+        previous_close = self.parent.protocol("WM_DELETE_WINDOW")
+        self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
+        temporary_close = self.parent.protocol("WM_DELETE_WINDOW")
+        try:
+            self.dialog.wait_visibility()
+            self.dialog.grab_set()
+            self.parent.wait_window(self.dialog)
+        finally:
+            self.parent.protocol("WM_DELETE_WINDOW", previous_close)
+            self.parent.deletecommand(temporary_close)
+            if self.dialog.winfo_exists():
+                self.dialog.destroy()
+        return self.result
+
+
+class Trading212ConnectionDialog:
+    def __init__(self, parent: tk.Tk, database_path: str, original: Trading212Connection | None) -> None:
+        self.parent, self.database_path, self.original = parent, database_path, original
+        self.result: Trading212Connection | None = None
+        self.exit_requested = False
+
+    def _work(self, title: str, job: Callable[[Event, Callable[[SyncProgress], None]], T]) -> T | None:
+        worker_dialog = Trading212WorkerDialog(self.parent, title, job)
+        try:
+            return worker_dialog.show()
+        finally:
+            self.exit_requested = self.exit_requested or worker_dialog.exit_requested
+            if self.exit_requested:
+                self._cancel()
+            elif self.dialog.winfo_exists():
+                self.dialog.grab_set()
+
+    def _choose_directory(self) -> None:
+        directory = filedialog.askdirectory(parent=self.dialog, title="Choose protected CSV archive folder")
+        if directory:
+            self.archive.set(directory)
+
+    def _cancel(self) -> None:
+        self.key.set("")
+        self.secret.set("")
+        if self.dialog.winfo_exists():
+            self.dialog.destroy()
+
+    def _close_parent(self) -> None:
+        self.exit_requested = True
+        self._cancel()
+
+    def _save(self) -> None:
+        key, secret = self.key.get(), self.secret.get()
+        try:
+            if bool(key) != bool(secret) or (self.original is None and not key):
+                raise ValueError("Enter both API Key and Secret")
+            environment = self.environment.get()
+            if environment not in ("live", "demo"):
+                raise ValueError("Choose live or demo")
+            selected_environment = "live" if environment == "live" else "demo"
+            first_year = int(self.first_year.get())
+            directory = str(Path(self.archive.get()).resolve()) if self.archive.get().strip() else ""
+            if not directory:
+                raise ValueError("Choose an archive directory on this computer")
+            Trading212Connection(
+                selected_environment, self.original.account_id if self.original else 1,
+                first_year,
+            )
+
+            def verify(cancel: Event, notify: Callable[[SyncProgress], None]) -> tuple[int, bool]:
+                api = Trading212API(
+                    selected_environment, self.original.account_id if self.original else None,
+                    on_progress=lambda event: notify(SyncProgress(event.phase, event.year, wait_seconds=event.wait_seconds)),
+                )
+                account_id = (
+                    api.verify_credentials(key, secret, cancel_event=cancel) if key else
+                    api.verify_account(cancel_event=cancel)
+                )
+                if self.original is not None and (
+                    self.original.environment != selected_environment or self.original.account_id != account_id
+                ):
+                    raise ValueError("Trading212 account does not match the database")
+                database = DatabaseManager()
+                try:
+                    database.open_database(self.database_path)
+                    if load_connection(database) != self.original:
+                        raise ValueError("The saved connection changed; reopen connection settings")
+                    return account_id, requires_account_confirmation(database)
+                finally:
+                    database.close()
+
+            verified = self._work("Verify Trading212 account", verify)
+            if self.exit_requested or verified is None:
+                return
+            account_id, confirm_existing_data = verified
+            if confirm_existing_data:
+                if not messagebox.askyesno(
+                    "Confirm account for existing transactions",
+                    "This database already contains transactions without account identification.\n"
+                    "Their account cannot be verified automatically.\n\n"
+                    f"The API will import from {selected_environment} account {account_id}.\n"
+                    "Continue and assign this database to that account?",
+                    parent=self.dialog, default=messagebox.NO,
+                ):
+                    return
+            connection = Trading212Connection(selected_environment, account_id, first_year)
+
+            def store(cancel: Event, notify: Callable[[SyncProgress], None]) -> bool:
+                database = DatabaseManager()
+                try:
+                    database.open_database(self.database_path)
+                    if load_connection(database) != self.original:
+                        raise ValueError("The saved connection changed; reopen connection settings")
+                    if requires_account_confirmation(database) and not confirm_existing_data:
+                        raise ValueError("Transactions were added without account identification; reopen connection settings")
+                    if key:
+                        api = Trading212API(selected_environment, account_id)
+                        api.store_verified_credentials(
+                            key, secret, account_id, cancel_event=cancel,
+                        )
+                    if cancel.is_set():
+                        raise InterruptedError("Connection setup cancelled")
+                    notify(SyncProgress("Saving local archive directory"))
+                    get_config().save_trading212_archive_directory(directory)
+                    notify(SyncProgress("Saving non-secret connection settings"))
+                    save_connection(database, connection, confirm_existing_data=confirm_existing_data)
+                    return True
+                finally:
+                    database.close()
+
+            if self._work("Save Trading212 connection", store):
+                self.result = connection
+                self._cancel()
+        except InterruptedError:
+            if not self.exit_requested:
+                messagebox.showinfo("Cancelled", "Connection setup cancelled.", parent=self.dialog)
+        except Exception as error:
+            if not self.exit_requested:
+                messagebox.showerror("Trading212 connection", str(error), parent=self.dialog)
+        finally:
+            self.key.set("")
+            self.secret.set("")
+
+    def _delete_credentials(self) -> None:
+        original = self.original
+        if original is None or not messagebox.askyesno(
+            "Remove saved credentials",
+            "Remove the local key pair? The database, binding and archive remain unchanged.\n"
+            "This does not revoke the key at Trading212.", parent=self.dialog,
+        ):
+            return
+
+        def remove(cancel: Event, notify: Callable[[SyncProgress], None]) -> bool:
+            if cancel.is_set():
+                raise InterruptedError("Credential deletion cancelled")
+            notify(SyncProgress("Removing local credentials"))
+            Trading212API(original.environment, original.account_id).delete_credentials()
+            return True
+
+        try:
+            if self._work("Remove credentials", remove):
+                self.saved_key_status.set("No saved key pair for this account and environment.")
+                messagebox.showinfo("Credentials removed", "The local key pair was removed.", parent=self.dialog)
+        except Exception as error:
+            if not self.exit_requested:
+                messagebox.showerror("Trading212 credentials", str(error), parent=self.dialog)
+
+    def _inspect_saved_key(self) -> None:
+        original = self.original
+        if original is None:
+            self.saved_key_status.set(
+                "A new key pair will be saved after account verification."
+            )
+            return
+
+        def inspect(cancel: Event, notify: Callable[[SyncProgress], None]) -> str | None:
+            if cancel.is_set():
+                raise InterruptedError("Saved credential check cancelled")
+            notify(SyncProgress("Checking saved key in Windows Credential Manager"))
+            return Trading212API(
+                original.environment, original.account_id,
+            ).credential_fingerprint()
+
+        try:
+            fingerprint = self._work("Check saved Trading212 key", inspect)
+            if self.exit_requested:
+                return
+            if fingerprint is None:
+                self.saved_key_status.set(
+                    "No saved key pair for this account and environment. Enter a new pair."
+                )
+            else:
+                self.saved_key_status.set(
+                    f"Saved API key fingerprint: {fingerprint}. "
+                    "Blank fields reuse this key; enter a new pair to replace it."
+                )
+        except Exception as error:
+            if not self.exit_requested:
+                self.saved_key_status.set(f"Could not inspect saved key: {error}")
+
+    def show(self) -> Trading212Connection | None:
+        archive_directory = get_config().get_trading212_archive_directory()
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Trading212 connection")
+        self.dialog.transient(self.parent)
+        frame = ttk.Frame(self.dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+        self.environment = tk.StringVar(value=self.original.environment if self.original else "live")
+        self.first_year = tk.StringVar(value=str(self.original.first_year) if self.original else "")
+        self.archive = tk.StringVar(value=archive_directory)
+        self.key, self.secret = tk.StringVar(), tk.StringVar()
+        self.saved_key_status = tk.StringVar(value="Checking saved key..." if self.original else "")
+        ttk.Label(frame, text="Environment").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            frame, textvariable=self.environment, values=("live", "demo"),
+            state="disabled" if self.original else "readonly",
+        ).grid(row=0, column=1, sticky="ew")
+        for row, (label, variable) in enumerate((
+            ("First archive year", self.first_year), ("Archive folder (this computer)", self.archive),
+            ("API Key", self.key), ("Secret", self.secret),
+        ), start=1):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Entry(frame, textvariable=variable, show="*" if row >= 3 else "", width=55).grid(
+                row=row, column=1, sticky="ew", padx=8,
+            )
+        ttk.Button(frame, text="Browse...", command=self._choose_directory).grid(row=2, column=2)
+        text = (
+            f"Bound account: {self.original.account_id}. Leave both key fields blank to reuse credentials."
+            if self.original else "Choose the first year of your account history. Credentials use Windows Credential Manager."
+        )
+        ttk.Label(
+            frame,
+            text=(
+                text + "\nThe key fingerprint identifies the locally saved key; "
+                "it does not confirm that Trading212 still authorizes it."
+            ),
+            wraplength=540,
+        ).grid(row=5, column=0, columnspan=3, pady=5)
+        ttk.Label(frame, textvariable=self.saved_key_status, wraplength=540).grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=5,
+        )
+        archive_status = (
+            "Archive folder is saved in this computer's configuration."
+            if archive_directory else
+            "No archive folder is saved on this computer; choose it below."
+        )
+        ttk.Label(frame, text=archive_status, wraplength=540).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=5,
+        )
+        ttk.Button(frame, text="Verify and save", command=self._save).grid(row=8, column=1, sticky="e")
+        ttk.Button(frame, text="Cancel", command=self._cancel).grid(row=8, column=2)
+        if self.original:
+            ttk.Button(frame, text="Remove saved credentials", command=self._delete_credentials).grid(row=8, column=0)
+        self.dialog.protocol("WM_DELETE_WINDOW", self._cancel)
+        previous_close = self.parent.protocol("WM_DELETE_WINDOW")
+        self.parent.protocol("WM_DELETE_WINDOW", self._close_parent)
+        temporary_close = self.parent.protocol("WM_DELETE_WINDOW")
+        try:
+            self.dialog.wait_visibility()
+            self.dialog.grab_set()
+            self._inspect_saved_key()
+            self.parent.wait_window(self.dialog)
+        finally:
+            self.parent.protocol("WM_DELETE_WINDOW", previous_close)
+            self.parent.deletecommand(temporary_close)
+            self.key.set("")
+            self.secret.set("")
+            if self.dialog.winfo_exists():
+                self.dialog.destroy()
+        return self.result

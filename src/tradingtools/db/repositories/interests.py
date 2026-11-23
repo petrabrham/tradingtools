@@ -47,13 +47,13 @@ class InterestsRepository(BaseRepository):
         if timestamp < 0:
             raise ValueError("timestamp must be a positive Unix timestamp")
 
-        sql = ("INSERT OR IGNORE INTO interests "
+        sql = ("INSERT INTO interests "
                "(timestamp, type, id_string, total_czk) "
-               "VALUES (?, ?, ?, ?)")
+               "VALUES (?, ?, ?, ?) ON CONFLICT(id_string) DO NOTHING")
         
         cur = self.execute(sql, (timestamp, int(type_), id_string, total_czk))
         self.commit()
-        return cur.lastrowid
+        return cur.rowcount
 
     def get_by_date_range(self, start_timestamp: int, end_timestamp: int) -> List[Tuple]:
         """Get interests within the given timestamp range.
